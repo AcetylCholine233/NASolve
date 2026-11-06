@@ -247,6 +247,39 @@ def _phaser_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
     )
 
 
+def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
+    """Phaser model + AutoSol metal sites over the Phaser map (latest found attempt)."""
+    block = report.get("metal_autosol")
+    attempts = block.get("attempts") if isinstance(block, Mapping) else None
+    found = [
+        attempt for attempt in (attempts if isinstance(attempts, list) else [])
+        if isinstance(attempt, Mapping) and attempt.get("status") == "METAL_SITES_FOUND"
+    ]
+    if not found:
+        raise CootViewError(
+            "No metal search in this run found sites; run 'nasolve autosol RUN --metal ELEMENT'"
+        )
+    attempt = found[-1]
+    inputs = attempt.get("inputs")
+    outputs = attempt.get("outputs")
+    if not isinstance(inputs, Mapping) or not isinstance(outputs, Mapping):
+        raise CootViewError("The metal-search record is malformed")
+    model = _reported_file(inputs.get("phaser_model"), "Phaser model", run)
+    map_path = _reported_file(inputs.get("phaser_map"), "Phaser map", run)
+    heavy_atoms = _reported_file(
+        outputs.get("heavy_atom_model"), "AutoSol heavy-atom model", run
+    )
+    return ViewProfile(
+        "metal",
+        model,
+        map_path,
+        (heavy_atoms,),
+        (),
+        f"Phaser solution with AutoSol metal sites ({attempt.get('attempt')})",
+        "Phaser MR map",
+    )
+
+
 def _prepared_model(run: Path, report: Mapping[str, object]) -> Path:
     postmr = report.get("postmr")
     if not isinstance(postmr, Mapping) or postmr.get("status") != "POSTMR_READY":
@@ -542,6 +575,7 @@ def resolve_view_profile(
     report = _read_json(_required_file(run / "report.json", "AutoMR report"), "run report")
     resolvers = {
         "automr": _phaser_profile,
+        "metal": _metal_profile,
         "postmr": _postmr_profile,
         "autosol": _autosol_profile,
         "autorefine": _autorefine_profile,

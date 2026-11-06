@@ -117,10 +117,27 @@ DATASET=/absolute/path/to/dataset
 ./nasolve automr "$DATASET" -W --pair F:D --execute
 ```
 
-NASolve prints the new numbered run directory. Use that exact path for PostMR:
+NASolve prints the new numbered run directory. If the crystal may contain a
+metal ion (for example a metal-mediated base pair), search for it with MR-SAD
+straight after Phaser, naming the metal(s) to look for:
 
 ```bash
 RUN=/absolute/path/to/dataset/AutoMR/run_001
+./nasolve autosol "$RUN" --metal AG            # several: --metal AG --metal HG
+```
+
+This runs `phenix.autosol` with the original Phaser model as the partial model
+(`autosol.phasing.partpdb_rms`, default 1.0 A; change it with `--rmsd`), lets
+AutoSol choose the number of sites, and does no model building. Each search
+gets a new `RUN/AutoSolMetal/attempt_NNN` folder. If AutoSol finds a site of a
+requested metal, NASolve lists the nearest residues and opens Coot with the
+Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
+later with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to skip).
+Finding no site is a normal result and usually means the ion is not
+incorporated. Sites are never added to the model automatically, and the run's
+stage and status do not change, so continue with PostMR either way:
+
+```bash
 ./nasolve postmr "$RUN"
 ```
 

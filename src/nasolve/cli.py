@@ -13,6 +13,12 @@ from typing import Mapping
 
 from .autorefine import AutoRefineError, execute_autorefine
 from .autosol import AutoSolPreparationError, execute_autosol
+from .autosol_metal import (
+    DEFAULT_PARTIAL_MODEL_RMSD,
+    FOUND as METAL_FOUND,
+    execute_metal_search,
+    parse_metals,
+)
 from .automr import AutoMRInputError, ModelAssessmentError, prepare_automr
 from .checkpoints import (
     CheckpointError,
@@ -171,12 +177,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backbone_review.add_argument("--coot", help="one-run Coot executable override")
     autosol = subparsers.add_parser(
-        "autosol", help="run guarded MR-SAD phasing when PostMR finds a heavy atom"
+        "autosol",
+        help="MR-SAD AutoSol: search for named metal ions after Phaser (--metal), "
+             "or phase from a nucleotide heavy atom after PostMR",
     )
     autosol.add_argument(
         "run", nargs="?", type=Path,
-        help="completed POSTMR_READY run directory (default: active workspace run)",
+        help="AutoMR run directory (default: active workspace run); without --metal it "
+             "must be POSTMR_READY",
     )
+    autosol.add_argument(
+        "--metal", action="append", metavar="ELEMENT",
+        help="search for this metal right after Phaser, e.g. --metal AG; repeat or use "
+             "AG,HG for several (the first is AutoSol's atom_type)",
+    )
+    autosol.add_argument(
+        "--rmsd", type=float, default=None, metavar="A",
+        help="estimated RMSD of the Phaser model for the metal search "
+             "(autosol.phasing.partpdb_rms; default 1.0)",
+    )
+    autosol.add_argument(
+        "--allow-mr-review", action="store_true",
+        help="allow the metal search on a Phaser result that needs review (TFZ 7-8)",
+    )
+    autosol.add_argument(
+        "--no-coot", action="store_true",
+        help="do not open Coot when the metal search finds sites",
+    )
+    autosol.add_argument("--coot", help="one-run Coot executable override")
     autorefine = subparsers.add_parser(
         "autorefine", help="run one quiet, checkpointed Phenix refinement round"
     )
@@ -258,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="dataset directory required by 'show last'",
     )
     show.add_argument(
-        "--stage", choices=("automr", "postmr", "autosol", "autorefine"),
+        "--stage", choices=("automr", "metal", "postmr", "autosol", "autorefine"),
         help="view a specific stage instead of the selected current checkpoint",
     )
     show.add_argument(
@@ -732,7 +760,89 @@ def _backbone_review(args: argparse.Namespace) -> int:
         return 2
 
 
+def _autosol_metal(args: argparse.Namespace) -> int:
+    """Metal-ion search right after Phaser; opens Coot when sites are found."""
+    try:
+        metals = parse_metals(args.metal)
+        config = load_config()
+        run = _workspace_run(args.run, config)
+        phenix = discover_phenix(config, explicit=args.phenix_root)
+        if args.phenix_root is None:
+            remember_phenix(config, phenix)
+            save_config(config)
+        autosol_executable = phenix.executables.get("phenix.autosol")
+        mtz_dump_executable = phenix.executables.get("phenix.mtz.dump")
+        if autosol_executable is None:
+            raise AutoSolPreparationError(
+                "The discovered Phenix installation has no phenix.autosol executable"
+            )
+        if mtz_dump_executable is None:
+            raise AutoSolPreparationError("The metal search requires phenix.mtz.dump")
+        result = execute_metal_search(
+            run,
+            autosol_executable,
+            mtz_dump_executable,
+            metals,
+            partial_model_rmsd=(
+                DEFAULT_PARTIAL_MODEL_RMSD if args.rmsd is None else args.rmsd
+            ),
+            allow_mr_review=args.allow_mr_review,
+            environment=phenix.environment,
+        )
+    except (AutoSolPreparationError, ConfigError, PhenixDiscoveryError) as exc:
+        print(f"AutoSol metal search error: {exc}", file=sys.stderr)
+        return 2
+    print(f"{result.status}: {result.message}")
+    print(f"Metals searched: {', '.join(result.metals)}")
+    print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
+    print(f"Run directory: {result.run_directory}")
+    print(f"AutoSol folder: {result.attempt_directory}")
+    print(f"AutoSol log: {result.log_path}")
+    for site in result.sites:
+        near = ", ".join(
+            f"{item['chain']}:{item['residue_number']} {item['residue_name']} "
+            f"{item['atom_name']} {float(item['distance']):.2f} A"
+            for item in site["nearest_residues"]  # type: ignore[union-attr]
+        )
+        print(
+            f"  site {site['index']}: {site['element']} occupancy "
+            f"{float(site['occupancy']):.2f}; nearest {near or 'no model atoms'}"
+        )
+    print(f"Report: {result.report_path}")
+    if result.status != METAL_FOUND:
+        print("Continue with 'nasolve postmr' as usual; nothing was added to the model.")
+        return 0
+    if result.heavy_atom_model is not None:
+        print(f"Heavy-atom model: {result.heavy_atom_model}")
+    print(f"Phaser model: {result.phaser_model}")
+    print(f"Phaser map: {result.phaser_map}")
+    if args.no_coot:
+        print(f"Open later with: nasolve show {result.run_directory} --stage metal")
+        return 0
+    try:
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_view(result.run_directory, coot.executable, stage="metal")
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(f"Open later with: nasolve show {result.run_directory} --stage metal")
+        return 0
+    print(f"Opened Coot (PID {view.pid}) with the Phaser model, AutoSol sites and Phaser map")
+    print(f"Coot log: {view.log_path}")
+    return 0
+
+
 def _autosol(args: argparse.Namespace) -> int:
+    if args.metal:
+        return _autosol_metal(args)
+    if args.rmsd is not None or args.allow_mr_review or args.no_coot:
+        print(
+            "AutoSol error: --rmsd, --allow-mr-review and --no-coot apply only to the "
+            "metal search; add --metal ELEMENT",
+            file=sys.stderr,
+        )
+        return 2
     try:
         config = load_config()
         run = _workspace_run(args.run, config)

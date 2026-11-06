@@ -382,6 +382,44 @@ Discovery prefers a unique `overall_best_denmod_map_coeffs.mtz`, then a unique
 unreadable view maps do not change phase acceptance. This viewing product is
 distinct from the HL-bearing `refinement_data` input.
 
+## Metal-search AutoSol contract
+
+`nasolve autosol RUN --metal ELEMENT` is a separate, optional MR-SAD search for
+metal ions, run directly after Phaser. It requires an AutoMR run with an
+accepted Phaser result (best TFZ >= 8; 7 <= TFZ < 8 only with
+`--allow-mr-review`) and may also run after PostMR, because it always uses the
+original Phaser solution PDB and never a modified model. Inputs follow the
+nucleotide branch: checksum-verified STARANISO reflections, the `summary.html`
+wavelength, a complete anomalous quartet confirmed by `phenix.mtz.dump`, and
+the frozen frame or run sequence. All checks complete before any directory is
+created, so a refused search leaves nothing behind.
+
+The first named metal is `autosol.atom_type`; additional metals go to
+`autosol.phasing.mad_ha_add_list`. `autosol.phasing.partpdb_rms` defaults to
+1.0 A (`--rmsd`). Sites are left unspecified and both
+`model_building.build` and `phase_improve_and_build` are false. After a
+successful exit, `autosol.eff` must confirm those settings and the requested
+`partpdb_rms`; a mismatch fails closed.
+
+Each search allocates a new `AutoSolMetal/attempt_NNN`. Outcomes are
+`METAL_SITES_FOUND` (at least one site of a requested element in a unique
+`overall_best_ha_pdb.pdb`), `METAL_NOT_FOUND` (no such site; a normal result),
+and `METAL_AUTOSOL_FAILED` (non-zero exit, ambiguous outputs, or unapplied
+settings). For each found site the attempt records the closest atom of the
+three nearest Phaser-model residues, using H3/R3/P1 symmetry when configured
+and same-asymmetric-unit distances otherwise.
+
+The attempt is appended to `report.json["metal_autosol"]` (`schema_version` 1,
+`attempts`, `latest`) with run-anchored references and SHA-256 checksums for
+the reflections, Phaser model and map, sequence, log, settings file and HA
+model, plus a copy in the attempt's own `report.json`. The run's `stage`,
+`status` and `message` are unchanged and `model_changed` is false: sites are
+for inspection only and never enter the model or AutoRefine automatically.
+The `metal` Coot view opens the Phaser model and the latest found HA model over
+the Phaser MTZ in `RUN/CootGUI/metal/`, refusing references that fail their
+checksums. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
+tests use a simulated AutoSol that accepts only the full PHIL paths above.
+
 ## AutoRefine contract
 
 AutoRefine separates immutable scientific inputs from evolving coordinates.
@@ -581,6 +619,8 @@ pointer. Without a registry, the default prefers accepted AutoSol with a usable
 density map, then completed PostMR, then Phaser. Profiles differ:
 
 - AutoMR: Phaser model and Phaser MTZ;
+- Metal (`--stage metal` only): Phaser model, the latest found metal-search
+  `overall_best_ha_pdb.pdb`, and the Phaser MTZ;
 - PostMR: ReadySet model and dictionaries with accepted AutoSol density when
   available, otherwise an explicitly labelled Phaser map;
 - AutoSol: ReadySet model and dictionaries, separate AutoSol HA model, and

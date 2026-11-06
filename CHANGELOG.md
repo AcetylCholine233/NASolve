@@ -8,6 +8,21 @@ entries are reconstructed from repository history.
 
 ## [Unreleased]
 
+### Added
+
+- `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
+  AutoSol directly after Phaser, with the original Phaser model as partial
+  model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals
+  via `autosol.phasing.mad_ha_add_list`, and no model building. Each search
+  writes `AutoSolMetal/attempt_NNN`; outcomes `METAL_SITES_FOUND`,
+  `METAL_NOT_FOUND` (normal) or `METAL_AUTOSOL_FAILED`. Found sites are listed
+  with their nearest residues and opened in Coot with the Phaser model and map
+  (`--no-coot` to skip; `nasolve show RUN --stage metal` to reopen). Schema:
+  additive `report.json["metal_autosol"]` (schema_version 1); the run's
+  stage/status are unchanged and sites are never added to the model.
+  `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
+  AutoSol only; live Phenix 2.2.1-6174 validation pending.
+
 ### Changed
 
 - Added schema-1 semantic `terminal_geometry_protection` checkpoint provenance. Protected sites, sigma, Phenix-derived ideal source, mechanism, and the run-local protection restraint artifact now inherit with refinement/manual children; attempts to stack a second protection record fail closed.
