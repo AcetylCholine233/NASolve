@@ -126,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     automr.add_argument(
+        "--no-coot", action="store_true",
+        help="with --execute: do not open the Phaser model and map in Coot afterwards",
+    )
+    automr.add_argument(
+        "--coot", help="with --execute: one-run Coot executable override"
+    )
+    automr.add_argument(
         "--phaser-data",
         metavar="{auto,intensities}",
         help=(
@@ -606,7 +613,33 @@ def _check(explicit: str | None) -> int:
     return 0 if na_version != "not installed" else 1
 
 
+def _open_phaser_view(args: argparse.Namespace, phaser) -> None:
+    """Open Phaser's model and map in Coot; a Coot problem never fails the run."""
+    later = f"Open later with: nasolve show {phaser.run_directory} --stage automr"
+    if phaser.solution_pdb is None or phaser.solution_mtz is None:
+        return
+    if args.no_coot:
+        print(later)
+        return
+    try:
+        config = load_config()
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_view(phaser.run_directory, coot.executable, stage="automr")
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(later)
+        return
+    print(f"Opened Coot (PID {view.pid}) with the Phaser model and map")
+    print(f"Coot log: {view.log_path}")
+
+
 def _automr(args: argparse.Namespace) -> int:
+    if not args.execute and (args.no_coot or args.coot):
+        print("AutoMR input error: --no-coot and --coot apply only with --execute",
+              file=sys.stderr)
+        return 2
     try:
         config = load_config()
         dataset = _workspace_dataset(args.dataset, config)
@@ -657,6 +690,7 @@ def _automr(args: argparse.Namespace) -> int:
             print(f"MR model: {phaser.solution_pdb}")
         if phaser.solution_mtz:
             print(f"MR reflections: {phaser.solution_mtz}")
+        _open_phaser_view(args, phaser)
         return phaser.exit_code
     print(f"{result.status}: {result.message}")
     print("Phaser executed: no (preflight milestone)")
