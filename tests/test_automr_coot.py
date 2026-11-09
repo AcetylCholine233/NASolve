@@ -53,7 +53,7 @@ class AutoMRCootTests(unittest.TestCase):
             coot.write_text("#!/bin/sh\n")
             launch = partial(launch_coot_view, launcher=lambda *a, **k: SimpleNamespace(pid=4321))
             code, out, errors, launched = self._main(
-                ["automr", str(dataset), "--execute"], self._phenix(root),
+                ["automr", str(dataset), "--execute", "--show"], self._phenix(root),
                 coot=CootInstallation(coot, "1.3.3", "test"), launch=launch,
             )
             self.assertEqual(code, 0, out + errors)
@@ -74,35 +74,38 @@ class AutoMRCootTests(unittest.TestCase):
             dataset = make_dataset(root / "dataset")
             launch = partial(launch_coot_view, launcher=lambda *a, **k: SimpleNamespace(pid=7))
             code, out, _, launched = self._main(
-                ["automr", str(dataset), "--execute"], self._phenix(root, tfz=4.4),
+                ["automr", str(dataset), "--execute", "--show"], self._phenix(root, tfz=4.4),
                 coot=CootInstallation(root / "coot", "1.3.3", "test"), launch=launch,
             )
             self.assertEqual(code, 4)
             self.assertIn("MR_FAILED", out)
             launched.assert_called_once()
 
-    def test_no_coot_missing_outputs_and_coot_errors_do_not_change_the_result(self):
+    def test_default_missing_outputs_and_coot_errors_do_not_open_or_change_the_result(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset = make_dataset(root / "dataset")
+            # Default: no Coot, only the command to open it later.
             code, out, _, launched = self._main(
-                ["automr", str(dataset), "--execute", "--no-coot"], self._phenix(root)
+                ["automr", str(dataset), "--execute"], self._phenix(root)
             )
             self.assertEqual(code, 0)
-            self.assertIn("nasolve show", out)
+            self.assertIn("Open in Coot with: nasolve show", out)
+            self.assertIn("--stage automr", out)
             launched.assert_not_called()
 
             no_outputs = root / "no_outputs"
             no_outputs.mkdir()
             code, out, _, launched = self._main(
-                ["automr", str(dataset), "--execute"],
+                ["automr", str(dataset), "--execute", "--show"],
                 self._phenix(no_outputs, create_outputs=False),
             )
             self.assertEqual(code, 4)
+            self.assertNotIn("nasolve show", out)
             launched.assert_not_called()
 
             code, out, errors, launched = self._main(
-                ["automr", str(dataset), "--execute"], self._phenix(root),
+                ["automr", str(dataset), "--execute", "--show"], self._phenix(root),
                 coot_error=CootDiscoveryError("Coot was not found"),
             )
             self.assertEqual(code, 0)
@@ -110,15 +113,20 @@ class AutoMRCootTests(unittest.TestCase):
             self.assertIn("--stage automr", out)
             launched.assert_not_called()
 
-    def test_coot_options_need_execute(self):
+    def test_show_needs_execute_and_coot_needs_show(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset = make_dataset(root / "dataset")
             code, _, errors, _ = self._main(
-                ["automr", str(dataset), "--no-coot"], self._phenix(root)
+                ["automr", str(dataset), "--show"], self._phenix(root)
             )
             self.assertEqual(code, 2)
-            self.assertIn("only with --execute", errors)
+            self.assertIn("--show applies only with --execute", errors)
+            code, _, errors, _ = self._main(
+                ["automr", str(dataset), "--execute", "--coot", "/x/coot"], self._phenix(root)
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("--coot applies only with --show", errors)
             self.assertFalse((dataset / "AutoMR").exists())
 
 

@@ -518,8 +518,13 @@ Run Phaser after the same guarded preflight:
 ./nasolve automr my_dataset -W --pair E:G --execute
 ```
 
-When Phaser writes a solution, NASolve opens its model and map in Coot (add
-`--no-coot` to skip). To reopen the Phaser result of any earlier run:
+Add `--show` to open Phaser's model and map in Coot when the run finishes:
+
+```bash
+./nasolve automr my_dataset -W --pair E:G --execute --show
+```
+
+To open the Phaser result of any earlier run:
 
 ```bash
 ./nasolve show my_dataset/AutoMR/run_003 --stage automr

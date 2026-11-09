@@ -126,11 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     automr.add_argument(
-        "--no-coot", action="store_true",
-        help="with --execute: do not open the Phaser model and map in Coot afterwards",
+        "--show", action="store_true",
+        help="with --execute: open the Phaser model and map in Coot afterwards",
     )
     automr.add_argument(
-        "--coot", help="with --execute: one-run Coot executable override"
+        "--coot", help="with --show: one-run Coot executable override"
     )
     automr.add_argument(
         "--phaser-data",
@@ -615,10 +615,10 @@ def _check(explicit: str | None) -> int:
 
 def _open_phaser_view(args: argparse.Namespace, phaser) -> None:
     """Open Phaser's model and map in Coot; a Coot problem never fails the run."""
-    later = f"Open later with: nasolve show {phaser.run_directory} --stage automr"
+    later = f"Open in Coot with: nasolve show {phaser.run_directory} --stage automr"
     if phaser.solution_pdb is None or phaser.solution_mtz is None:
         return
-    if args.no_coot:
+    if not args.show:
         print(later)
         return
     try:
@@ -636,9 +636,11 @@ def _open_phaser_view(args: argparse.Namespace, phaser) -> None:
 
 
 def _automr(args: argparse.Namespace) -> int:
-    if not args.execute and (args.no_coot or args.coot):
-        print("AutoMR input error: --no-coot and --coot apply only with --execute",
-              file=sys.stderr)
+    if args.show and not args.execute:
+        print("AutoMR input error: --show applies only with --execute", file=sys.stderr)
+        return 2
+    if args.coot and not args.show:
+        print("AutoMR input error: --coot applies only with --show", file=sys.stderr)
         return 2
     try:
         config = load_config()

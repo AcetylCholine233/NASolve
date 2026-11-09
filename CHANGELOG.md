@@ -51,14 +51,15 @@ entries are reconstructed from repository history.
   Column selection was checked against the column header of a real
   STARANISO MTZ and the Phenix 2.2.1-6174 `iotbx.mtz` and `phenix.phaser`
   sources; Phaser itself was simulated in tests (no live run yet).
-- `nasolve automr ... --execute` now opens Coot when Phaser has written a
+- `nasolve automr ... --execute --show` opens Coot when Phaser has written a
   model and map, whatever the TFZ result: Phaser's model and its map
   (`Phaser/mr_solution.pdb` and `.mtz`, byte-identical copies of
   `PHASER.1.pdb`/`.mtz`) in an isolated `CootGUI/automr` session, as
-  `nasolve show RUN --stage automr` does. `--no-coot` skips it and `--coot`
-  overrides the executable. A Coot problem prints an error but never changes
-  the AutoMR status or exit code. Existing runs reopen with
-  `nasolve show RUN`. Tested with a simulated Coot launch only.
+  `nasolve show RUN --stage automr` does; `--coot` overrides the executable.
+  Without `--show` nothing opens (unchanged default) and AutoMR prints the
+  `nasolve show` command instead. A Coot problem prints an error but never
+  changes the AutoMR status or exit code. Tested with a simulated Coot launch
+  only.
 
 ### Changed
 
