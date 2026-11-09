@@ -113,6 +113,23 @@ class AutoMRCootTests(unittest.TestCase):
             self.assertIn("--stage automr", out)
             launched.assert_not_called()
 
+    def test_one_letter_data_flags_reach_the_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = make_dataset(root / "dataset")
+            for argv, expected in ((["-I"], ("I", "IMEAN,SIGIMEAN")),
+                                   (["-F"], ("F", "F,SIGF")),
+                                   (["--phaser-data", "I"], ("I", "IMEAN,SIGIMEAN"))):
+                code, out, errors, _ = self._main(
+                    ["automr", str(dataset), *argv], self._phenix(root)
+                )
+                self.assertEqual(code, 0, out + errors)
+                run = sorted((dataset / "AutoMR").iterdir())[-1]
+                record = json.loads((run / "report.json").read_text())["phaser_data"]
+                self.assertEqual((record["requested"], record["labin"]), expected)
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                main(["automr", str(dataset), "-I", "-F"])
+
     def test_show_needs_execute_and_coot_needs_show(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

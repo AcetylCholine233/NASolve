@@ -132,14 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     automr.add_argument(
         "--coot", help="with --show: one-run Coot executable override"
     )
-    automr.add_argument(
-        "--phaser-data",
-        metavar="{F,I}",
+    phaser_data = automr.add_mutually_exclusive_group()
+    phaser_data.add_argument(
+        "-I", dest="phaser_data", action="store_const", const="I",
+        help="Phaser uses the MTZ's merged intensities (I/SIGI)",
+    )
+    phaser_data.add_argument(
+        "-F", dest="phaser_data", action="store_const", const="F",
         help=(
-            "reflection data for Phaser: F uses the MTZ's merged amplitudes "
-            "(F/SIGF), I its merged intensities (I/SIGI) (default: nasolve.txt "
-            "phaser_data, else F)"
+            "Phaser uses the MTZ's merged amplitudes (F/SIGF); the default "
+            "unless nasolve.txt sets phaser_data"
         ),
+    )
+    phaser_data.add_argument(
+        "--phaser-data", dest="phaser_data", metavar="{F,I}",
+        help="long form of -F/-I",
     )
     automr.add_argument(
         "--allow-p1-standard", action="store_true",

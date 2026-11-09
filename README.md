@@ -724,11 +724,13 @@ dataset in `[automr]`:
 phaser_data = I
 ```
 
-or for one run:
+or for one run with `-I` (intensities) or `-F` (amplitudes):
 
 ```bash
-./nasolve automr my_dataset -W --pair F:T --phaser-data I --execute
+./nasolve automr my_dataset -W --pair F:T -I --execute
 ```
+
+`--phaser-data I` / `--phaser-data F` is the long form.
 
 The preflight reads the MTZ column types with `phenix.mtz.dump` and selects
 the matching merged columns with their sigma (`F,SIGF` or `IMEAN,SIGIMEAN` in

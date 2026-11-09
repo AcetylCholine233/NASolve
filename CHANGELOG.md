@@ -33,9 +33,10 @@ entries are reconstructed from repository history.
   stage/status are unchanged and sites are never added to the model.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
-- AutoMR now always tells Phaser which data to use: `--phaser-data F`
-  (merged amplitudes, the default) or `--phaser-data I` (merged intensities,
-  as the Phenix GUI uses), or `phaser_data = F|I` in `[automr]` of
+- AutoMR now always tells Phaser which data to use: `-F` (merged
+  amplitudes, the default) or `-I` (merged intensities, as the Phenix GUI
+  uses); `--phaser-data F|I` is the long form. Or set `phaser_data = F|I` in
+  `[automr]` of
   `nasolve.txt`; the command line overrides the file. Previously `phaser.eff`
   had no `labin` and `phenix.phaser` chose for itself (`F,SIGF` whenever the
   MTZ had amplitudes). The preflight lists the MTZ column types with
