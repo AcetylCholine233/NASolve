@@ -303,7 +303,8 @@ sections document inputs, decisions, safeguards, and outputs.
 
 For each dataset, AutoMR:
 
-1. locates the reflection MTZ, `Data_1*.cif`, and `summary.html` files;
+1. locates the reflection MTZ and, when present, the `Data_1*.cif` and
+   `summary.html` files;
 2. chooses a standard 5W6W/3GBI search model or validates a user-supplied PDB;
 3. optionally mirrors the selected model through NARestraints, then checks the
    exact model that Phaser will use, including modified nucleotides written as
@@ -481,11 +482,17 @@ The filenames do not have to match this example exactly:
 - NASolve prefers the single top-level MTZ whose punctuation-insensitive name
   contains both `staraniso` and `alldata`. If none has that name, the only
   top-level MTZ is accepted.
-- The metadata file must be the single top-level `Data_1*.cif`, matched without
-  regard to case or punctuation.
-- The autoPROC summary must be the single top-level `summary.html`.
+- The metadata file `Data_1*.cif` is optional; if present there must be only
+  one, matched without regard to case or punctuation.
+- The autoPROC summary `summary.html` is optional; if present there must be
+  only one.
 
-Ambiguous or missing inputs stop the run instead of choosing a file silently.
+The MTZ header is the source of the space group and the X-ray wavelength.
+`Data_1*.cif` and `summary.html` are cross-checks: when a dataset has them they
+must agree with the MTZ, and when it does not (for example an older autoPROC
+run that left only the MTZ files and `report.pdf`) NASolve works from the MTZ
+alone. Other files such as autoPROC report PDFs are ignored. Ambiguous or
+missing required inputs stop the run instead of choosing a file silently.
 
 For a nonstandard run, add a good MR model in PDB format:
 
@@ -586,12 +593,15 @@ or set `NASOLVE_MR_FRAMES`.
 
 ### Standard-frame symmetry rule
 
-The W and 3GBI recipes are intended for H3/R3 data. NASolve compares the space
-group reported by:
+The W and 3GBI recipes are intended for H3/R3 data. NASolve takes the space
+group from the MTZ header (`phenix.mtz.dump`: the stored symbol and the
+symmetry matrices) and, when the files are present, compares it with:
 
-- `phenix.mtz.dump` for the MTZ header;
 - every explicit space-group entry in `Data_1*.cif`; and
 - the final `Spacegroup name` entry in `summary.html`.
+
+The run report lists the sources that were compared
+(`symmetry.evidence.compared_sources`).
 
 `H 3`, `H3`, `R 3`, `R3`, and `R 3 :H` are treated as equivalent and use one
 MR copy. The exact MTZ symbol is retained in the report so its notation can be

@@ -60,6 +60,14 @@ class MtzColumn:
     maximum: float | None = None
 
 
+@dataclass(frozen=True)
+class MtzDataset:
+    ordinal: int  # position in phenix.mtz.dump order
+    name: str | None
+    wavelength: float | None
+    columns: tuple[MtzColumn, ...]
+
+
 def describe(choice: str) -> str:
     return _DESCRIPTION.get(choice, choice)
 
@@ -84,6 +92,9 @@ _COLUMN_RE = re.compile(
     r"^\s+(\S+)\s+(\d+)\s+[0-9.]+%\s+(\S+)\s+(\S+)\s+([A-Za-z]):(?:\s|$)"
 )
 _DATASET_RE = re.compile(r"^\s*Dataset\s+(\d+)\s*:\s*$")
+_CRYSTAL_RE = re.compile(r"^\s*Crystal\s+(\d+)\s*:\s*$")
+_DATASET_NAME_RE = re.compile(r"^\s+Name:\s*(.*?)\s*$")
+_WAVELENGTH_RE = re.compile(r"^\s+Wavelength:\s*(\S+)\s*$")
 
 
 def _number(text: str) -> float | None:
@@ -109,6 +120,83 @@ def parse_mtz_dump_columns(text: str) -> tuple[MtzColumn, ...]:
                 dataset, label, kind.upper(), int(valid), _number(minimum), _number(maximum)
             ))
     return tuple(columns)
+
+
+def parse_mtz_dump_datasets(text: str) -> tuple[MtzDataset, ...]:
+    """Return each MTZ dataset's name, wavelength and columns."""
+    datasets: list[MtzDataset] = []
+    current: dict[str, object] | None = None
+
+    def close() -> None:
+        if current is not None:
+            datasets.append(MtzDataset(
+                len(datasets) + 1, current["name"], current["wavelength"],
+                tuple(current["columns"]),
+            ))
+
+    ordinal = 0
+    for line in text.splitlines():
+        if _CRYSTAL_RE.match(line):
+            close()
+            current = None
+            continue
+        if _DATASET_RE.match(line):
+            close()
+            ordinal += 1
+            current = {"name": None, "wavelength": None, "columns": []}
+            continue
+        if current is None:
+            continue
+        name = _DATASET_NAME_RE.match(line)
+        if name and current["name"] is None and not current["columns"]:
+            current["name"] = name.group(1)
+            continue
+        wavelength = _WAVELENGTH_RE.match(line)
+        if wavelength:
+            current["wavelength"] = _number(wavelength.group(1))
+            continue
+        match = _COLUMN_RE.match(line)
+        if match:
+            label, valid, minimum, maximum, kind = match.groups()
+            current["columns"].append(MtzColumn(
+                ordinal, label, kind.upper(), int(valid), _number(minimum), _number(maximum)
+            ))
+    close()
+    return tuple(datasets)
+
+
+def mtz_wavelength(text: str) -> tuple[float, str | None]:
+    """Return the X-ray wavelength recorded in the MTZ header.
+
+    Only datasets that hold reflection data count: the ``HKL_base`` dataset
+    carries just H, K, L and a placeholder wavelength. Every data dataset must
+    report the same plausible value.
+    """
+    data_sets = [
+        dataset for dataset in parse_mtz_dump_datasets(text)
+        if any(column.type != "H" for column in dataset.columns)
+    ]
+    if not data_sets:
+        raise ReflectionDataError(
+            "phenix.mtz.dump listed no MTZ dataset with reflection data, so the "
+            "wavelength could not be read from the MTZ header"
+        )
+    for dataset in data_sets:
+        if dataset.wavelength is None:
+            raise ReflectionDataError(
+                f"MTZ dataset {dataset.name!r} has no wavelength in its header"
+            )
+        if not 0.1 <= dataset.wavelength <= 5.0:
+            raise ReflectionDataError(
+                f"MTZ dataset {dataset.name!r} has an implausible wavelength "
+                f"{dataset.wavelength:g} A in its header"
+            )
+    reference = data_sets[0].wavelength
+    assert reference is not None
+    if any(abs(float(dataset.wavelength) - reference) > 5e-5 for dataset in data_sets):
+        values = ", ".join(f"{dataset.name}={dataset.wavelength:g}" for dataset in data_sets)
+        raise ReflectionDataError(f"MTZ datasets disagree on the wavelength: {values}")
+    return reference, data_sets[0].name
 
 
 def _is_anomalous_label(label: str) -> bool:
@@ -295,10 +383,13 @@ __all__ = [
     "DEFAULT_PHASER_DATA",
     "INTENSITIES",
     "MtzColumn",
+    "MtzDataset",
     "PHASER_DATA_CHOICES",
     "ReflectionDataError",
     "describe",
     "merged_arrays",
+    "mtz_wavelength",
+    "parse_mtz_dump_datasets",
     "normalize_phaser_data",
     "parse_mtz_dump_columns",
     "reported_data_kind",

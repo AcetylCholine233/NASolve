@@ -67,6 +67,27 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- The MTZ header is now the source of the space group and the X-ray
+  wavelength, and `Data_1*.cif` and `summary.html` are optional. Datasets
+  without them (for example the 2021 iCiU_Ag autoPROC run, which has only the
+  MTZ files and `report.pdf`) are accepted. When either file is present it is
+  still a cross-check and must agree with the MTZ. Standard-frame symmetry
+  compares the `phenix.mtz.dump` symbol and symmetry matrices with any CIF and
+  summary entries; AutoSol and the metal search read the wavelength of the MTZ
+  dataset that holds reflection data (the `HKL_base` placeholder is ignored),
+  and a present `summary.html` must agree within 1e-4 A (one without a
+  wavelength is recorded as not cross-checked). The MTZ stores the wavelength
+  to 5 decimals, so `autosol.lambda` may differ from the summary's 6-decimal
+  value by up to 5e-6 A. Schema: `report.json["inputs"]["metadata"]` and
+  `["summary"]` may be null; `symmetry.evidence` gains `compared_sources`
+  (`cif_symbols` empty, `summary_symbol` null when absent); the AutoSol and
+  metal-search `wavelength_source` is now an object (`method`, `path` of the
+  MTZ, `mtz_dataset`, `summary_cross_check`). Campaign plans omit absent
+  optional inputs. Existing runs are unchanged. Supersedes the unmerged
+  `wip/cif-wavelength` branch (wavelength from the CIF). Checked against the
+  Phenix 2.2.1-6174 `iotbx.mtz` dump format and the iCiU_Ag and FT_Hg MTZ
+  headers; Phenix programs simulated in tests.
+
 - Added schema-1 semantic `terminal_geometry_protection` checkpoint provenance. Protected sites, sigma, Phenix-derived ideal source, mechanism, and the run-local protection restraint artifact now inherit with refinement/manual children; attempts to stack a second protection record fail closed.
 - Generalized the OP3-specific policy into an explicit standard-phosphodiester backbone contract. `five_prime_phosphate_sites` is the preferred user-facing name (legacy `allow_op3_sites` remains readable). PostMR now treats a requested 5'-terminal phosphate as the complete P/OP1/OP2/OP3 group, preserving a complete group, completing missing OP3 from existing P/OP1/OP2, or seeding a whole missing group from O5'-C5' with recorded idealized starting geometry. Partial ambiguous groups still fail closed.
 - Terminal-phosphate native geometry remains owned by Phenix. NASolve now audits declared terminal phosphates from Phenix geometry output and provides provenance-tracked local `action = change` protection using Phenix-derived ideals; NARestraints remains responsible for reviewed pairing/stacking geometry and does not duplicate native terminal-phosphate restraints. Automatic first-AutoRefine protection is now implemented and live-validated: NASolve obtains native ideals from a pre-refinement `phenix.pdb_interpretation` geometry snapshot, applies six local sigma=1-degree P-centered `action = change` restraints, freezes the source geometry/log/protection artifact into checkpoint provenance, and inherits that protection without duplicate stacking.

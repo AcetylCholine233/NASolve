@@ -26,7 +26,12 @@ from nasolve.phenix_runtime import PhenixInstallation
 from nasolve.run_context import resolve_artifact_path
 
 from .helpers import pdb_record
-from .test_autosol import make_mtz_dump
+from .test_autosol import make_mtz_dump as _autosol_mtz_dump
+
+
+def make_mtz_dump(root: Path) -> Path:
+    # Same beamline wavelength as the fixture summary.html (0.9795 A).
+    return _autosol_mtz_dump(root, wavelength=0.9795)
 
 
 ENV = {"PATH": "/usr/bin:/bin"}

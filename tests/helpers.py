@@ -78,19 +78,30 @@ STARANISO_COLUMNS = (
 )
 
 
-def mtz_dump_columns_text(columns=STARANISO_COLUMNS) -> str:
-    """Return the column part of phenix.mtz.dump's summary (iotbx format)."""
-    lines = [
-        "Crystal 1:",
-        "  Name: HKL_base",
-        "  Number of datasets: 1",
-        "  Dataset 1:",
-        "    Name: HKL_base",
-        f"    Number of columns: {len(columns)}",
-        "    label        #valid  %valid    min     max type",
-    ]
-    for label, kind in columns:
-        lines.append(f"    {label:<12} 1635 100.00%   -1.00   99.00 {kind}: legend")
+def mtz_dump_columns_text(columns=STARANISO_COLUMNS, wavelength: float = 1.377618) -> str:
+    """Return the crystal/dataset part of phenix.mtz.dump's summary (iotbx format).
+
+    As in autoPROC files, H, K, L sit in the HKL_base dataset (placeholder
+    wavelength 9.999) and the data columns in one dataset with the real one.
+    """
+    def block(crystal, name, wave, selected):
+        lines = [
+            f"Crystal {crystal}:",
+            f"  Name: {name}",
+            "  Number of datasets: 1",
+            "  Dataset 1:",
+            f"    Name: {name}",
+            f"    Wavelength: {wave:.6g}",
+            f"    Number of columns: {len(selected)}",
+            "    label        #valid  %valid    min     max type",
+        ]
+        for label, kind in selected:
+            lines.append(f"    {label:<12} 1635 100.00%   -1.00   99.00 {kind}: legend")
+        return lines
+
+    indices = [column for column in columns if column[1] == "H"]
+    data = [column for column in columns if column[1] != "H"]
+    lines = block(1, "HKL_base", 9.999, indices) + block(2, "1", wavelength, data)
     return "\n".join(lines) + "\n"
 
 

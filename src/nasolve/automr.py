@@ -278,6 +278,10 @@ def _log_text(
              f"{site}={mode}" for site, mode in resolved.backbone_sites.items()
          )),
         f"Authoritative space group: {space_group}",
+        "Space-group sources compared: "
+        + (", ".join(symmetry.evidence.compared_sources) if symmetry else "none (nonstandard mode)"),
+        f"Data_1*.cif: {resolved.dataset.metadata.name if resolved.dataset.metadata else 'absent'}",
+        f"summary.html: {'present' if resolved.dataset.summary else 'absent'}",
         f"Planned MR copies: {copies}",
         f"Symmetry red flag: {symmetry_warning}",
         data_line,
@@ -510,8 +514,15 @@ def prepare_automr(
         "inputs": {
             "reflections": str(resolved.dataset.reflections),
             "reflections_sha256": file_sha256(resolved.dataset.reflections),
-            "metadata": str(resolved.dataset.metadata),
-            "summary": str(resolved.dataset.summary),
+            # Optional autoPROC files; None when the dataset does not have them.
+            "metadata": (
+                str(resolved.dataset.metadata)
+                if resolved.dataset.metadata is not None else None
+            ),
+            "summary": (
+                str(resolved.dataset.summary)
+                if resolved.dataset.summary is not None else None
+            ),
             "model": str(resolved.model),
             "model_sha256": source_assessment.sha256,
             "model_selector": resolved.model_selector,

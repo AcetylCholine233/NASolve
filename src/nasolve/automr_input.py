@@ -61,8 +61,10 @@ class AutoMRIntent:
 class DatasetFiles:
     root: Path
     reflections: Path
-    metadata: Path
-    summary: Path
+    # Optional autoPROC files: the MTZ header is the authority for space group
+    # and wavelength; these are cross-checks when present.
+    metadata: Path | None  # Data_1*.cif
+    summary: Path | None  # summary.html
 
 
 @dataclass(frozen=True)
@@ -364,8 +366,6 @@ def discover_dataset(root: Path) -> DatasetFiles:
         and path.suffix.casefold() == ".cif"
         and _normalized_name(path).startswith("data1")
     )
-    if not metadata_candidates:
-        raise AutoMRInputError("Missing required Data_1*.cif metadata file")
     if len(metadata_candidates) > 1:
         raise AutoMRInputError(
             "Ambiguous Data_1*.cif metadata files: "
@@ -375,14 +375,16 @@ def discover_dataset(root: Path) -> DatasetFiles:
         path for path in dataset.iterdir()
         if path.is_file() and path.name.casefold() == "summary.html"
     )
-    if not summaries:
-        raise AutoMRInputError("Missing required file: summary.html")
     if len(summaries) > 1:
         raise AutoMRInputError(
             "Ambiguous summary files: " + ", ".join(path.name for path in summaries)
         )
-    summary = summaries[0]
-    return DatasetFiles(dataset, reflections, metadata_candidates[0], summary)
+    return DatasetFiles(
+        dataset,
+        reflections,
+        metadata_candidates[0] if metadata_candidates else None,
+        summaries[0] if summaries else None,
+    )
 
 
 def _normalized_name(path: Path) -> str:
