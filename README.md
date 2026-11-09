@@ -691,6 +691,31 @@ Command-line frame and pair options override values from `nasolve.txt`; the
 effective configuration is always frozen in the new run directory. Use
 `--config PATH` to read a different input file.
 
+### Phaser data: amplitudes or intensities
+
+By default (`auto`) NASolve leaves the choice to `phenix.phaser`, which reads
+amplitudes (`F,SIGF`) whenever the MTZ has them. To make Phaser use merged
+intensities, as the Phenix GUI does, add one line to `[automr]`:
+
+```ini
+[automr]
+phaser_data = intensities
+```
+
+or pass it for one run:
+
+```bash
+./nasolve automr my_dataset -W --pair F:T --phaser-data intensities --execute
+```
+
+`I` is accepted as a short form. The preflight reads the MTZ column types with
+`phenix.mtz.dump`, selects the first merged intensity column with its sigma
+(`IMEAN,SIGIMEAN` in STARANISO files), and stops if the file has none. The
+labels are frozen in `report.json["phaser_data"]` and written as `labin` in
+`Phaser/phaser.eff`; Phaser's own `LABIN` line is recorded after the run, and a
+run that requested intensities but reports `LABIN F` fails. Campaigns do not
+support this setting yet.
+
 ## Residue aliases
 
 Aliases are case-sensitive. DNA and RNA tokens are deliberately distinct.

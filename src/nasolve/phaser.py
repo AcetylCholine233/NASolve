@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Mapping
 
 from .model_assessment import file_sha256
+from .reflection_data import (
+    AUTO,
+    INTENSITIES,
+    reported_data_kind,
+    reported_labin,
+)
 from .run_context import resolve_artifact_path
 
 
@@ -80,6 +86,26 @@ def _integer_field(value: object, label: str) -> int:
     return value
 
 
+def frozen_phaser_data(report: Mapping[str, object]) -> dict[str, object]:
+    """Return the preflight's data choice; reports before this field mean auto."""
+    record = report.get("phaser_data")
+    if record is None:
+        return {"requested": AUTO, "labin": None}
+    if not isinstance(record, Mapping):
+        raise PhaserExecutionError("Frozen phaser_data record is malformed")
+    requested = record.get("requested")
+    labin = record.get("labin")
+    if requested == AUTO and labin is None:
+        return dict(record)
+    if (
+        requested == INTENSITIES
+        and isinstance(labin, str)
+        and re.fullmatch(r"[^\s,\"\\]+(?:,[^\s,\"\\]+)+", labin)
+    ):
+        return dict(record)
+    raise PhaserExecutionError("Frozen phaser_data record is malformed")
+
+
 def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> str:
     """Build one explicit ensemble, one NA composition, and one search request."""
     inputs = report.get("inputs")
@@ -115,6 +141,9 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
     copies = 1
     if isinstance(symmetry, Mapping) and "mr_copies" in symmetry:
         copies = _integer_field(symmetry.get("mr_copies"), "MR copy count")
+    labin = frozen_phaser_data(report).get("labin")
+    # Without labin, phenix.phaser picks amplitudes whenever the MTZ has them.
+    data_lines = [f"  labin = {_phil_string(labin)}"] if labin else []
 
     # Do not set ``phaser.model`` as well as ``phaser.ensemble``.  The shortcut
     # can create an additional anonymous ensemble in some Phenix versions.
@@ -122,6 +151,7 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
         "phaser {",
         "  mode = MR_AUTO",
         f"  hklin = {_phil_string(str(reflections))}",
+        *data_lines,
         "  chain_type = dna",
         "  composition {",
         "    chain {",
@@ -250,6 +280,14 @@ def execute_phaser(
     log_path.write_text(output, encoding="utf-8")
 
     tfz, llg = parse_best_tfz(output)
+    phaser_data = frozen_phaser_data(report)
+    labin_echo = reported_labin(output)
+    used_kind = reported_data_kind(labin_echo)
+    data_mismatch = (
+        phaser_data.get("requested") == INTENSITIES
+        and used_kind is not None
+        and used_kind != INTENSITIES
+    )
     raw_pdb = _find_solution(phaser_directory, ".pdb")
     raw_mtz = _find_solution(phaser_directory, ".mtz")
     solution_pdb: Path | None = None
@@ -265,6 +303,12 @@ def execute_phaser(
     if return_code != 0:
         status = "MR_FAILED"
         message = f"Phaser exited with status {return_code}; inspect phaser.log"
+    elif data_mismatch:
+        status = "MR_FAILED"
+        message = (
+            f"Intensities ({phaser_data.get('labin')}) were requested but Phaser "
+            f"reported LABIN {labin_echo}; inspect phaser.log"
+        )
     elif tfz is None:
         status = "MR_FAILED"
         message = "Phaser did not report a TFZ; inspect phaser.log"
@@ -302,6 +346,12 @@ def execute_phaser(
             "preserve_heteroatoms": True,
             "model_rmsd": 1.0,
             "composition_nres": report["model_assessment"]["polymer_residue_count"],
+            "reflection_data": {
+                "requested": phaser_data.get("requested"),
+                "labin": phaser_data.get("labin"),
+                "phaser_reported_labin": labin_echo,
+                "phaser_reported_kind": used_kind,
+            },
             "search_copies": (
                 report["symmetry"].get("mr_copies", 1)
                 if isinstance(report.get("symmetry"), Mapping) else 1
@@ -324,6 +374,12 @@ def execute_phaser(
             "Ensembles: 1 (nasolve_model)",
             "Preserve heteroatoms: True",
             "Model RMSD: 1.0 A",
+            "Reflection data: "
+            + (
+                f"intensities ({phaser_data.get('labin')})"
+                if phaser_data.get("labin") else "Phenix default"
+            )
+            + (f"; Phaser reported LABIN {labin_echo}" if labin_echo else ""),
             f"Composition residues: {report['model_assessment']['polymer_residue_count']}",
             f"Search copies: {report['execution']['phaser']['search_copies']}",
             f"Best TFZ: {tfz if tfz is not None else 'not reported'}",
@@ -353,5 +409,6 @@ __all__ = [
     "PhaserExecutionResult",
     "build_phaser_eff",
     "execute_phaser",
+    "frozen_phaser_data",
     "parse_best_tfz",
 ]

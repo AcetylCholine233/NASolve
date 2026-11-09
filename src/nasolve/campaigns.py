@@ -266,6 +266,11 @@ def _plan_dataset(root: Path, dataset: Path, preset: ProjectPreset, staging: Pat
         if sequence_thread is not None and intent.sequence_reference is None:
             intent.sequence_reference = sequence_thread["sequence_reference"]
         entry["effective_config"] = _intent_config(intent)
+        if intent.phaser_data not in {None, "auto"}:
+            raise AutoMRInputError(
+                "phaser_data is not yet supported by campaigns; run "
+                "'nasolve automr' for this dataset or remove phaser_data"
+            )
         if (not intent.mode or intent.mode.strip().casefold() != "standard"
                 or not intent.frame or normalize_frame(intent.frame).name != "W"):
             raise AutoMRInputError("Campaign schema 1 supports only standard W/5W6W datasets")

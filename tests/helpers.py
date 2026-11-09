@@ -66,19 +66,52 @@ def make_dataset(root: Path, include_model: bool = True) -> Path:
     return root
 
 
+# Column layout of an autoPROC/STARANISO ``staraniso_alldata-unique.mtz``
+# (labels and types read from a real file header), in phenix.mtz.dump order.
+STARANISO_COLUMNS = (
+    ("H", "H"), ("K", "H"), ("L", "H"), ("F", "F"), ("SIGF", "Q"),
+    ("IMEAN", "J"), ("SIGIMEAN", "Q"), ("DANO", "D"), ("SIGDANO", "Q"),
+    ("ISYM", "Y"), ("I(+)", "K"), ("SIGI(+)", "M"), ("I(-)", "K"),
+    ("SIGI(-)", "M"), ("F(+)", "G"), ("SIGF(+)", "L"), ("F(-)", "G"),
+    ("SIGF(-)", "L"), ("SA_flag", "I"), ("FreeR_flag", "I"),
+    ("F_early", "F"), ("SIGF_early", "Q"), ("F_late", "F"), ("SIGF_late", "Q"),
+)
+
+
+def mtz_dump_columns_text(columns=STARANISO_COLUMNS) -> str:
+    """Return the column part of phenix.mtz.dump's summary (iotbx format)."""
+    lines = [
+        "Crystal 1:",
+        "  Name: HKL_base",
+        "  Number of datasets: 1",
+        "  Dataset 1:",
+        "    Name: HKL_base",
+        f"    Number of columns: {len(columns)}",
+        "    label        #valid  %valid    min     max type",
+    ]
+    for label, kind in columns:
+        lines.append(f"    {label:<12} 1635 100.00%   -1.00   99.00 {kind}: legend")
+    return "\n".join(lines) + "\n"
+
+
 def make_mtz_dump(
     root: Path,
     symbol: str = "H 3",
     number: int = 146,
     matrix_symbol: str | None = None,
+    columns=None,
 ) -> Path:
     executable = root / "phenix.mtz.dump"
     matrix = symbol if matrix_symbol is None else matrix_symbol
+    column_text = mtz_dump_columns_text(columns) if columns else ""
     executable.write_text(
         "#!/bin/sh\n"
         f"echo 'Space group symbol from file: {symbol}'\n"
         f"echo 'Space group number from file: {number}'\n"
         f"echo 'Space group from matrices: {matrix} (No. {number})'\n"
+        "cat <<'NASOLVE_COLUMNS'\n"
+        + column_text
+        + "NASOLVE_COLUMNS\n"
     )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     return executable
@@ -90,6 +123,7 @@ def make_phaser(
     llg: float = 121.0,
     return_code: int = 0,
     create_outputs: bool = True,
+    labin_echo: str | None = None,
 ) -> Path:
     executable = root / "phenix.phaser"
     output_commands = ""
@@ -102,8 +136,10 @@ def make_phaser(
         f"echo 'SOLU SET RFZ=9.1 TFZ={tfz} LLG={llg}'\n"
         if tfz is not None else "echo 'No placed solution'\n"
     )
+    labin_command = f"echo 'LABIN {labin_echo}'\n" if labin_echo else ""
     executable.write_text(
         "#!/bin/sh\n"
+        + labin_command
         + output_commands
         + score_command
         + f"exit {return_code}\n"

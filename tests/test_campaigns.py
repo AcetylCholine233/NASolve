@@ -356,6 +356,14 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("decode", entries["unicode"]["diagnostic"])
         self.assertIn("model is empty", entries["empty_model"]["diagnostic"])
 
+    def test_phaser_data_setting_blocks_a_campaign_dataset_instead_of_being_ignored(self):
+        self.dataset("intensities", config="[automr]\nphaser_data = intensities\n")
+        self.dataset("default", config="[automr]\nphaser_data = auto\n")
+        entries = {entry["id"]: entry for entry in self.plan()["datasets"]}
+        self.assertEqual(entries["intensities"]["status"], "BLOCKED")
+        self.assertIn("not yet supported by campaigns", entries["intensities"]["diagnostic"])
+        self.assertEqual(entries["default"]["status"], "DISCOVERED")
+
     def test_existing_state_directory_file_or_dangling_link_is_never_overwritten(self):
         self.dataset("dataset")
         plan = self.plan()

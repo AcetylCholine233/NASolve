@@ -126,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     automr.add_argument(
+        "--phaser-data",
+        metavar="{auto,intensities}",
+        help=(
+            "reflection data for Phaser: 'intensities' (or I) uses the MTZ's "
+            "merged I/SIGI columns; 'auto' keeps Phenix's choice, which is F/SIGF "
+            "when present (default: nasolve.txt phaser_data, else auto)"
+        ),
+    )
+    automr.add_argument(
         "--allow-p1-standard", action="store_true",
         help="strongly discouraged: allow a standard frame in P1 using three MR copies",
     )
@@ -616,6 +625,7 @@ def _automr(args: argparse.Namespace) -> int:
             mirror=args.mirror,
             mtz_dump_executable=installation.executables.get("phenix.mtz.dump"),
             phenix_environment=installation.environment,
+            phaser_data=args.phaser_data,
         )
         _remember_workspace(config, result.run_directory)
         save_config(config)
