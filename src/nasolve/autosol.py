@@ -114,6 +114,147 @@ def read_wavelength(summary_path: Path) -> tuple[float, str]:
     return reference, source
 
 
+_CIF_WAVELENGTH_TAG = "_diffrn_radiation_wavelength.wavelength"
+_CIF_WAVELENGTH_ID_TAG = "_diffrn_radiation_wavelength.id"
+_CIF_SELECTED_ID_TAG = "_diffrn_radiation.wavelength_id"
+# summary.html and the CIF round differently; they must agree within this.
+WAVELENGTH_AGREEMENT = 5e-4
+
+
+def _cif_values(text: str, tags: Sequence[str]) -> dict[str, list[str]]:
+    """Values of ``tags`` in every data block, from key-value pairs or loops."""
+    wanted = {tag.casefold(): tag for tag in tags}
+    values: dict[str, list[str]] = {tag: [] for tag in tags}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.casefold() == "loop_":
+            headers: list[str] = []
+            index += 1
+            while index < len(lines) and lines[index].strip().startswith("_"):
+                headers.append(lines[index].strip().split()[0])
+                index += 1
+            selected = [
+                (position, wanted[name.casefold()])
+                for position, name in enumerate(headers)
+                if name.casefold() in wanted
+            ]
+            tokens: list[str] = []
+            while index < len(lines):
+                row = lines[index].strip()
+                if not row or row.startswith(("_", "#", ";")) or row.casefold() in {
+                    "loop_", "stop_"
+                } or row.casefold().startswith("data_"):
+                    break
+                tokens.extend(item.strip("'\"") for item in row.split())
+                index += 1
+            if selected and headers:
+                for start in range(0, len(tokens) - len(headers) + 1, len(headers)):
+                    for position, tag in selected:
+                        values[tag].append(tokens[start + position])
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) == 2 and parts[0].casefold() in wanted:
+            values[wanted[parts[0].casefold()]].append(parts[1].strip().strip("'\""))
+        index += 1
+    return values
+
+
+def read_cif_wavelength(cif_path: Path) -> tuple[float, str]:
+    """Read the X-ray wavelength from an autoPROC ``Data_1*.cif``.
+
+    Uses ``_diffrn_radiation_wavelength.wavelength`` in every data block. When
+    a block lists several wavelengths, ``_diffrn_radiation.wavelength_id``
+    selects one; otherwise every value must agree.
+    """
+    try:
+        text = cif_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise AutoSolPreparationError(f"Could not read wavelength source {cif_path}: {exc}") from exc
+    found = _cif_values(text, (_CIF_WAVELENGTH_TAG, _CIF_WAVELENGTH_ID_TAG, _CIF_SELECTED_ID_TAG))
+    raw = found[_CIF_WAVELENGTH_TAG]
+    if not raw:
+        raise AutoSolPreparationError(f"No {_CIF_WAVELENGTH_TAG} entry was found in {cif_path.name}")
+    try:
+        numbers = [float(value) for value in raw]
+    except ValueError as exc:
+        raise AutoSolPreparationError(
+            f"Unreadable wavelength value in {cif_path.name}: {raw}"
+        ) from exc
+    ids = found[_CIF_WAVELENGTH_ID_TAG]
+    selected_ids = set(found[_CIF_SELECTED_ID_TAG])
+    if len(ids) == len(numbers) and len(selected_ids) == 1:
+        chosen = [n for n, i in zip(numbers, ids) if i in selected_ids]
+        numbers = chosen or numbers
+    if any(not 0.1 <= value <= 5.0 for value in numbers):
+        raise AutoSolPreparationError(f"Implausible wavelength value in {cif_path.name}: {numbers}")
+    reference = numbers[0]
+    if any(abs(value - reference) > 5e-5 for value in numbers):
+        raise AutoSolPreparationError(
+            f"Data_1 CIF lists more than one wavelength ({numbers}); NASolve needs a "
+            "single-wavelength dataset"
+        )
+    return reference, f"Data_1 CIF {_CIF_WAVELENGTH_TAG}"
+
+
+def resolve_wavelength(
+    report: Mapping[str, object], run: Path
+) -> tuple[float, dict[str, object]]:
+    """The run's X-ray wavelength and how it was obtained.
+
+    The autoPROC ``Data_1*.cif`` (``inputs.metadata``) is the source. When the
+    run also has a ``summary.html`` (``inputs.summary``), it is read as a
+    cross-check and must agree within ``WAVELENGTH_AGREEMENT``. Runs whose
+    metadata cannot be found or has no wavelength fall back to the summary,
+    as before.
+    """
+    inputs = report.get("inputs")
+    inputs = inputs if isinstance(inputs, Mapping) else {}
+
+    def optional(key: str) -> Path | None:
+        value = inputs.get(key)
+        if value is None:
+            return None
+        path = resolve_artifact_path(value, run, verify_checksum=False)
+        return path if path is not None and path.is_file() else None
+
+    metadata = optional("metadata")
+    summary = optional("summary")
+    cif_value = cif_error = None
+    if metadata is not None:
+        try:
+            cif_value, cif_method = read_cif_wavelength(metadata)
+        except AutoSolPreparationError as exc:
+            cif_error = str(exc)
+    if cif_value is not None:
+        record: dict[str, object] = {"path": str(metadata), "method": cif_method}
+        if summary is not None:
+            try:
+                summary_value, summary_method = read_wavelength(summary)
+            except AutoSolPreparationError as exc:
+                record["summary_check"] = f"not used: {exc}"
+            else:
+                if abs(summary_value - cif_value) > WAVELENGTH_AGREEMENT:
+                    raise AutoSolPreparationError(
+                        f"Wavelength sources disagree: Data_1 CIF {cif_value:g} A, "
+                        f"summary.html {summary_value:g} A"
+                    )
+                record["summary_check"] = f"agrees ({summary_value:g} A, {summary_method})"
+        return cif_value, record
+    if summary is not None:
+        summary_value, summary_method = read_wavelength(summary)
+        record = {"path": str(summary), "method": summary_method}
+        if cif_error:
+            record["cif_check"] = f"not used: {cif_error}"
+        return summary_value, record
+    if cif_error:
+        raise AutoSolPreparationError(cif_error)
+    raise AutoSolPreparationError(
+        "No wavelength source: the run records neither a readable Data_1*.cif nor summary.html"
+    )
+
+
 def _run_mtz_dump(
     mtz_path: Path,
     executable: Path,
@@ -721,7 +862,6 @@ def execute_autosol(
     log_path = autosol_directory / "autosol.console.log"
     try:
         reflections = _required_path(report, "inputs", "reflections", run)
-        summary = _required_path(report, "inputs", "summary", run)
         inputs = report.get("inputs")
         assert isinstance(inputs, Mapping)
         _verify_frozen_checksum(
@@ -737,7 +877,7 @@ def execute_autosol(
             "PostMR prepared model",
         )
         phaser_model = _original_phaser_model(run, report)
-        wavelength, wavelength_source = read_wavelength(summary)
+        wavelength, wavelength_source = resolve_wavelength(report, run)
         input_dump = _run_mtz_dump(reflections, mtz_dump_executable, environment)
         labels = anomalous_labels(input_dump)
         sequence_source, generated_sequence = _sequence_source(report, run)
@@ -851,10 +991,7 @@ def execute_autosol(
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "element": element,
         "wavelength": wavelength,
-        "wavelength_source": {
-            "path": str(summary),
-            "method": wavelength_source,
-        },
+        "wavelength_source": wavelength_source,
         "input_reflections": str(reflections),
         "input_labels": list(labels),
         "input_model": str(phaser_model),
@@ -919,5 +1056,7 @@ __all__ = [
     "anomalous_labels",
     "execute_autosol",
     "nearest_symmetry_distance",
+    "read_cif_wavelength",
     "read_wavelength",
+    "resolve_wavelength",
 ]

@@ -130,7 +130,10 @@ def _frozen_selection(root: Path, dataset: dict[str, Any], attempt: Path) -> Res
         root=root / name,
         reflections=_reference(root, inputs.get("reflections"), dataset=name),
         metadata=_reference(root, inputs.get("metadata"), dataset=name),
-        summary=_reference(root, inputs.get("summary"), dataset=name),
+        summary=(
+            _reference(root, inputs["summary"], dataset=name)
+            if inputs.get("summary") is not None else None
+        ),
     )
     resolved = ResolvedAutoMRInput(
         dataset=files, mode="standard", frame=normalize_frame("W"),

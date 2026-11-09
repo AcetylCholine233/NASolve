@@ -20,7 +20,7 @@ class SpaceGroupEvidence:
     mtz_number: int | None
     mtz_matrix_symbol: str | None
     cif_symbols: tuple[str, ...]
-    summary_symbol: str
+    summary_symbol: str | None  # None when the dataset has no summary.html
     normalized_class: str
 
 
@@ -144,29 +144,37 @@ def read_mtz_space_group(
 def assess_standard_symmetry(
     mtz_path: Path,
     cif_path: Path,
-    summary_path: Path,
+    summary_path: Path | None,
     mtz_dump_executable: Path,
     environment: Mapping[str, str] | None = None,
     allow_p1_standard: bool = False,
 ) -> StandardSymmetryAssessment:
-    """Cross-check authoritative symmetry sources and apply the standard-frame gate."""
+    """Cross-check authoritative symmetry sources and apply the standard-frame gate.
+
+    The MTZ and every explicit ``Data_1*.cif`` entry are always compared; the
+    final ``summary.html`` entry joins the comparison when that file exists.
+    """
     mtz_symbol, mtz_number, matrix_symbol = read_mtz_space_group(
         mtz_path, mtz_dump_executable, environment
     )
     cif_symbols = read_cif_space_groups(cif_path)
-    summary_symbol = read_final_summary_space_group(summary_path)
+    summary_symbol = (
+        read_final_summary_space_group(summary_path) if summary_path is not None else None
+    )
     normalized_values = {
         normalized_space_group(mtz_symbol),
-        normalized_space_group(summary_symbol),
         *(normalized_space_group(value) for value in cif_symbols),
     }
+    if summary_symbol is not None:
+        normalized_values.add(normalized_space_group(summary_symbol))
     if matrix_symbol:
         normalized_values.add(normalized_space_group(matrix_symbol))
     if len(normalized_values) != 1:
         raise SymmetryError(
             "Authoritative space-group sources disagree: "
             f"MTZ={mtz_symbol!r}, CIF={list(cif_symbols)!r}, "
-            f"final summary={summary_symbol!r}"
+            + (f"final summary={summary_symbol!r}" if summary_symbol is not None
+               else "no summary.html")
         )
     normalized = next(iter(normalized_values))
     evidence = SpaceGroupEvidence(

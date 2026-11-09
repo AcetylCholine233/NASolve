@@ -60,7 +60,7 @@ class DatasetFiles:
     root: Path
     reflections: Path
     metadata: Path
-    summary: Path
+    summary: Path | None  # optional autoPROC summary.html
 
 
 @dataclass(frozen=True)
@@ -361,13 +361,13 @@ def discover_dataset(root: Path) -> DatasetFiles:
         path for path in dataset.iterdir()
         if path.is_file() and path.name.casefold() == "summary.html"
     )
-    if not summaries:
-        raise AutoMRInputError("Missing required file: summary.html")
+    # summary.html is optional: the wavelength comes from Data_1*.cif, and the
+    # summary only adds a third space-group cross-check when it is present.
     if len(summaries) > 1:
         raise AutoMRInputError(
             "Ambiguous summary files: " + ", ".join(path.name for path in summaries)
         )
-    summary = summaries[0]
+    summary = summaries[0] if summaries else None
     return DatasetFiles(dataset, reflections, metadata_candidates[0], summary)
 
 

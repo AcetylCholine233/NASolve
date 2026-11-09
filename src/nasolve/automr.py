@@ -487,7 +487,10 @@ def prepare_automr(
             "reflections": str(resolved.dataset.reflections),
             "reflections_sha256": file_sha256(resolved.dataset.reflections),
             "metadata": str(resolved.dataset.metadata),
-            "summary": str(resolved.dataset.summary),
+            "summary": (
+                str(resolved.dataset.summary)
+                if resolved.dataset.summary is not None else None
+            ),
             "model": str(resolved.model),
             "model_sha256": source_assessment.sha256,
             "model_selector": resolved.model_selector,

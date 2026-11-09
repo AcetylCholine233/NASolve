@@ -55,7 +55,7 @@ from .autosol import (
     _verify_frozen_checksum,
     anomalous_labels,
     nearest_symmetry_distance,
-    read_wavelength,
+    resolve_wavelength,
 )
 from .model_assessment import file_sha256
 from .run_context import artifact_reference, resolve_artifact_path
@@ -308,13 +308,12 @@ def execute_metal_search(
     run, report = _read_report(run_directory)
     tfz = _check_phaser_accepted(report, allow_mr_review)
     reflections = _required_path(report, "inputs", "reflections", run)
-    summary = _required_path(report, "inputs", "summary", run)
     inputs = report.get("inputs")
     assert isinstance(inputs, Mapping)
     _verify_frozen_checksum(reflections, inputs.get("reflections_sha256"), "reflections")
     phaser_model = _original_phaser_model(run, report)
     phaser_map = _phaser_map(run, report)
-    wavelength, wavelength_source = read_wavelength(summary)
+    wavelength, wavelength_source = resolve_wavelength(report, run)
     labels = anomalous_labels(_run_mtz_dump(reflections, mtz_dump_executable, environment))
     sequence_source, generated_sequence = _sequence_source(report, run)
     nproc = max(1, processor_count if processor_count is not None else (os.cpu_count() or 1))
