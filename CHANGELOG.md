@@ -33,21 +33,25 @@ entries are reconstructed from repository history.
   stage/status are unchanged and sites are never added to the model.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
-- AutoMR can make Phaser use merged intensities instead of amplitudes:
-  `nasolve automr ... --phaser-data intensities` (or `I`), or
-  `phaser_data = intensities` in `[automr]` of `nasolve.txt`; the command line
-  overrides the file. Previously `phaser.eff` had no `labin`, so
-  `phenix.phaser` always chose `F,SIGF` when the MTZ had amplitudes; the Phenix
-  GUI uses I/SIGI. The preflight picks the first merged intensity array from
-  the MTZ column types listed by `phenix.mtz.dump` (`J` followed by `Q`,
-  grouped as `iotbx.mtz` does; `IMEAN,SIGIMEAN` for STARANISO files) and stops
-  if there is none. The default (`auto`) is unchanged and writes no `labin`.
-  Schema: additive `report.json["phaser_data"]` (schema_version 1) and
+- AutoMR now always tells Phaser which data to use: `--phaser-data F`
+  (merged amplitudes, the default) or `--phaser-data I` (merged intensities,
+  as the Phenix GUI uses), or `phaser_data = F|I` in `[automr]` of
+  `nasolve.txt`; the command line overrides the file. Previously `phaser.eff`
+  had no `labin` and `phenix.phaser` chose for itself (`F,SIGF` whenever the
+  MTZ had amplitudes). The preflight lists the MTZ column types with
+  `phenix.mtz.dump` and groups them as `iotbx.mtz` does: `I` takes the first
+  merged intensity array (`J` then `Q`; `IMEAN,SIGIMEAN` for STARANISO files);
+  `F` takes `F,SIGF` or `FOBS,SIGFOBS`, else the first merged non-`FC`
+  amplitude array (phenix.phaser's own preference). The preflight stops before
+  allocating a run if the requested columns are missing, and now needs
+  `phenix.mtz.dump` in nonstandard mode too. The choice is always written to
+  `nasolve.input.txt`. Schema: additive `report.json["phaser_data"]`
+  (schema_version 2: `requested` F|I, `labin`) and
   `execution.phaser.reflection_data`, which also records Phaser's own `LABIN`
-  echo; a run that asked for intensities but whose log reports `LABIN F` is
-  `MR_FAILED`. `phaser_data` appears in `nasolve.input.txt` only when set.
-  Reports without `phaser_data` run as before. Campaigns do not support the
-  setting yet and block a dataset that sets it rather than ignoring it.
+  echo; a run whose log reports the other kind of data is `MR_FAILED`. Reports
+  frozen before this record, and schema-1 records from the first version of
+  this option (`auto`/`intensities`), still run as they did. Campaigns use `F`
+  and block a dataset that sets `phaser_data = I` rather than ignoring it.
   Column selection was checked against the column header of a real
   STARANISO MTZ and the Phenix 2.2.1-6174 `iotbx.mtz` and `phenix.phaser`
   sources; Phaser itself was simulated in tests (no live run yet).

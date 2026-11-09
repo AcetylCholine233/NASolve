@@ -9,11 +9,11 @@ from nasolve.phaser import PhaserExecutionError, build_phaser_eff, execute_phase
 from nasolve.reflection_data import (
     MtzColumn,
     ReflectionDataError,
-    mean_intensity_label_strings,
+    merged_arrays,
     normalize_phaser_data,
     parse_mtz_dump_columns,
     reported_data_kind,
-    select_intensity_labels,
+    select_labels,
 )
 
 from .helpers import (
@@ -33,11 +33,13 @@ def _columns(*pairs):
 
 
 class ColumnSelectionTests(unittest.TestCase):
-    def test_staraniso_mtz_selects_imean_not_amplitudes(self):
+    def test_staraniso_mtz_gives_f_sigf_and_imean_sigimean(self):
         columns = parse_mtz_dump_columns(mtz_dump_columns_text())
         self.assertEqual(len(columns), len(STARANISO_COLUMNS))
-        self.assertEqual(columns[5], MtzColumn(1, "IMEAN", "J"))
-        self.assertEqual(select_intensity_labels(columns), "IMEAN,SIGIMEAN")
+        self.assertEqual(columns[5].label, "IMEAN")
+        self.assertEqual(columns[5].type, "J")
+        self.assertEqual(select_labels(columns, "F"), "F,SIGF")
+        self.assertEqual(select_labels(columns, "I"), "IMEAN,SIGIMEAN")
 
     def test_header_and_summary_lines_are_not_columns(self):
         text = (
@@ -48,60 +50,78 @@ class ColumnSelectionTests(unittest.TestCase):
         labels = [column.label for column in parse_mtz_dump_columns(text)]
         self.assertEqual(labels, ["H", "I", "SIGI"])
 
-    def test_amplitude_only_mtz_is_rejected_with_its_columns(self):
-        columns = _columns(("H", "H"), ("F", "F"), ("SIGF", "Q"), ("FreeR_flag", "I"))
+    def test_missing_requested_kind_is_rejected_with_the_columns(self):
+        amplitudes_only = _columns(("H", "H"), ("F", "F"), ("SIGF", "Q"), ("FreeR_flag", "I"))
         with self.assertRaisesRegex(ReflectionDataError, r"type J.*F\(F\), SIGF\(Q\)"):
-            select_intensity_labels(columns)
+            select_labels(amplitudes_only, "I")
+        intensities_only = _columns(("H", "H"), ("IMEAN", "J"), ("SIGIMEAN", "Q"))
+        with self.assertRaisesRegex(ReflectionDataError, r"phaser_data = F needs .*type F"):
+            select_labels(intensities_only, "F")
 
-    def test_anomalous_only_intensities_are_not_treated_as_merged(self):
-        anomalous = _columns(("I(+)", "K"), ("SIGI(+)", "M"), ("I(-)", "K"), ("SIGI(-)", "M"))
-        self.assertEqual(mean_intensity_label_strings(anomalous), [])
+    def test_anomalous_columns_are_not_treated_as_merged(self):
+        anomalous = _columns(("I(+)", "K"), ("SIGI(+)", "M"), ("I(-)", "K"), ("SIGI(-)", "M"),
+                             ("F(+)", "G"), ("SIGF(+)", "L"), ("F(-)", "G"), ("SIGF(-)", "L"))
+        self.assertEqual(merged_arrays(anomalous), [])
         mislabelled = _columns(("I(+)", "J"), ("SIGI(+)", "Q"), ("I(-)", "J"), ("SIGI(-)", "Q"))
-        self.assertEqual(mean_intensity_label_strings(mislabelled), [])
+        self.assertEqual(merged_arrays(mislabelled), [])
 
-    def test_iotbx_fqdq_group_does_not_lend_its_sigma_to_an_intensity(self):
-        columns = _columns(
-            ("F", "F"), ("SIGF", "Q"), ("DANO", "D"), ("SIGDANO", "Q"),
-            ("I", "J"), ("SIGI", "Q"),
+    def test_iotbx_fqdq_group_is_one_amplitude_array_with_isym(self):
+        # ctruncate order: iotbx reads F SIGF DANO SIGDANO (+ISYM) as one array.
+        columns = (
+            MtzColumn(1, "F", "F"), MtzColumn(1, "SIGF", "Q"),
+            MtzColumn(1, "DANO", "D"), MtzColumn(1, "SIGDANO", "Q"),
+            MtzColumn(1, "ISYM", "Y", 1635, 0.0, 2.0),
+            MtzColumn(1, "IMEAN", "J"), MtzColumn(1, "SIGIMEAN", "Q"),
         )
-        self.assertEqual(mean_intensity_label_strings(columns), ["I,SIGI"])
+        self.assertEqual(
+            merged_arrays(columns),
+            [("F", "F,SIGF,DANO,SIGDANO,ISYM"), ("I", "IMEAN,SIGIMEAN")],
+        )
+        self.assertEqual(select_labels(columns, "F"), "F,SIGF,DANO,SIGDANO,ISYM")
+
+    def test_amplitude_preference_follows_phenix_phaser(self):
+        columns = _columns(("FC", "F"), ("SIGFC", "Q"), ("F_early", "F"), ("SIGF_early", "Q"),
+                           ("FOBS", "F"), ("SIGFOBS", "Q"))
+        self.assertEqual(select_labels(columns, "F"), "FOBS,SIGFOBS")
+        self.assertEqual(select_labels(columns[:4], "F"), "F_early,SIGF_early")
 
     def test_columns_do_not_pair_across_datasets(self):
         columns = (MtzColumn(1, "I", "J"), MtzColumn(2, "SIGI", "Q"))
-        self.assertEqual(mean_intensity_label_strings(columns), [])
+        self.assertEqual(merged_arrays(columns), [])
 
-    def test_setting_aliases(self):
-        for value in ("intensities", "I", "isigi", " I/SIGI "):
-            self.assertEqual(normalize_phaser_data(value), "intensities")
-        self.assertEqual(normalize_phaser_data(None), "auto")
-        with self.assertRaises(ReflectionDataError):
-            normalize_phaser_data("F")
+    def test_setting_values(self):
+        for value in ("I", "i", "intensities", " I/SIGI "):
+            self.assertEqual(normalize_phaser_data(value), "I")
+        for value in ("F", "f", "amplitudes", "F,SIGF"):
+            self.assertEqual(normalize_phaser_data(value), "F")
+        self.assertEqual(normalize_phaser_data(None), "F")
+        with self.assertRaisesRegex(ReflectionDataError, "F .*or I"):
+            normalize_phaser_data("auto")
 
     def test_phaser_labin_echo_classification(self):
-        self.assertEqual(reported_data_kind("I = I SIGI = SIGI"), "intensities")
-        self.assertEqual(reported_data_kind("F = F SIGF = SIGF"), "amplitudes")
+        self.assertEqual(reported_data_kind("I = I SIGI = SIGI"), "I")
+        self.assertEqual(reported_data_kind("F = F SIGF = SIGF"), "F")
         self.assertIsNone(reported_data_kind(None))
 
 
 class PhaserDataPipelineTests(unittest.TestCase):
     def _preflight(self, root: Path, **kwargs):
         dataset = make_dataset(root / "dataset")
-        dump = make_mtz_dump(root, columns=kwargs.pop("columns", STARANISO_COLUMNS))
+        dump = make_mtz_dump(root / "tools", columns=kwargs.pop("columns", STARANISO_COLUMNS))
         return prepare_automr(
             dataset, valid_ligand_codes=VALID, mtz_dump_executable=dump, **kwargs
         )
 
     def test_intensities_reach_phaser_eff_as_labin(self):
-        # Regression: phaser.eff had no labin, so Phenix always chose F,SIGF.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            preflight = self._preflight(root, phaser_data="intensities")
+            preflight = self._preflight(root, phaser_data="I")
             report = json.loads(preflight.report_path.read_text())
-            self.assertEqual(report["phaser_data"]["requested"], "intensities")
+            self.assertEqual(report["phaser_data"]["requested"], "I")
             self.assertEqual(report["phaser_data"]["labin"], "IMEAN,SIGIMEAN")
             snapshot = (preflight.run_directory / "nasolve.input.txt").read_text()
-            self.assertIn("phaser_data = intensities", snapshot)
-            self.assertIn("Phaser data: intensities (IMEAN,SIGIMEAN)",
+            self.assertIn("phaser_data = I\n", snapshot)
+            self.assertIn("Phaser data: I - intensities (IMEAN,SIGIMEAN)",
                           (preflight.run_directory / "automr.log").read_text())
 
             result = execute_phaser(
@@ -115,24 +135,25 @@ class PhaserDataPipelineTests(unittest.TestCase):
             self.assertEqual(result.status, "MR_SUCCESS")
             executed = json.loads(result.report_path.read_text())
             data = executed["execution"]["phaser"]["reflection_data"]
-            self.assertEqual(data["labin"], "IMEAN,SIGIMEAN")
-            self.assertEqual(data["phaser_reported_kind"], "intensities")
-            self.assertIn("Reflection data: intensities (IMEAN,SIGIMEAN)",
+            self.assertEqual((data["requested"], data["labin"]), ("I", "IMEAN,SIGIMEAN"))
+            self.assertEqual(data["phaser_reported_kind"], "I")
+            self.assertIn("Reflection data: I - intensities (IMEAN,SIGIMEAN)",
                           (result.run_directory / "automr.log").read_text())
 
-    def test_default_keeps_phenix_choice_and_writes_no_labin(self):
+    def test_default_is_an_explicit_f_choice(self):
+        # Regression: the default left labin unset ("auto"), so Phaser chose.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             preflight = self._preflight(root)
             report = json.loads(preflight.report_path.read_text())
-            self.assertEqual(report["phaser_data"]["requested"], "auto")
-            self.assertIsNone(report["phaser_data"]["labin"])
+            self.assertEqual(report["phaser_data"]["requested"], "F")
+            self.assertEqual(report["phaser_data"]["labin"], "F,SIGF")
             snapshot = (preflight.run_directory / "nasolve.input.txt").read_text()
-            self.assertNotIn("phaser_data", snapshot)
+            self.assertIn("phaser_data = F\n", snapshot)
             result = execute_phaser(
                 preflight.report_path, make_phaser(root, labin_echo="F = F SIGF = SIGF")
             )
-            self.assertNotIn("labin", result.parameter_path.read_text())
+            self.assertIn('  labin = "F,SIGF"', result.parameter_path.read_text())
             self.assertEqual(result.status, "MR_SUCCESS")
 
     def test_nasolve_txt_setting_is_read_and_cli_overrides_it(self):
@@ -142,59 +163,82 @@ class PhaserDataPipelineTests(unittest.TestCase):
             config = dataset / "nasolve.txt"
             config.write_text("[automr]\nmode = nonstandard\nmodel = search.pdb\nphaser_data = I\n")
             intent = read_intent(config)
-            self.assertEqual(intent.phaser_data, "intensities")
+            self.assertEqual(intent.phaser_data, "I")
             resolved = resolve_automr_input(dataset, intent, valid_ligand_codes=VALID)
-            self.assertEqual(resolved.phaser_data, "intensities")
-            self.assertIn("phaser_data = intensities", format_intent(resolved))
+            self.assertEqual(resolved.phaser_data, "I")
+            self.assertIn("phaser_data = I\n", format_intent(resolved))
             overridden = resolve_automr_input(
-                dataset, intent, valid_ligand_codes=VALID, phaser_data_override="auto"
+                dataset, intent, valid_ligand_codes=VALID, phaser_data_override="F"
             )
-            self.assertEqual(overridden.phaser_data, "auto")
-            self.assertNotIn("phaser_data", format_intent(overridden))
+            self.assertEqual(overridden.phaser_data, "F")
+            self.assertIn("phaser_data = F\n", format_intent(overridden))
             self.assertEqual(
                 resolve_automr_input(dataset, AutoMRIntent(), valid_ligand_codes=VALID).phaser_data,
-                "auto",
+                "F",
             )
-            config.write_text("[automr]\nphaser_data = F\n")
+            config.write_text("[automr]\nphaser_data = auto\n")
             with self.assertRaisesRegex(AutoMRInputError, "phaser_data"):
                 read_intent(config)
 
-    def test_preflight_stops_when_mtz_has_no_merged_intensities(self):
+    def test_preflight_stops_when_mtz_lacks_the_requested_columns(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaisesRegex(AutoMRInputError, "merged intensity column"):
                 self._preflight(
-                    root, phaser_data="intensities",
+                    root, phaser_data="I",
                     columns=(("H", "H"), ("K", "H"), ("L", "H"), ("F", "F"), ("SIGF", "Q")),
+                )
+            with self.assertRaisesRegex(AutoMRInputError, "merged amplitude column"):
+                self._preflight(
+                    root, columns=(("H", "H"), ("K", "H"), ("L", "H"), ("I", "J"), ("SIGI", "Q")),
                 )
             self.assertFalse((root / "dataset" / "AutoMR").exists())
 
-    def test_intensities_need_mtz_dump(self):
+    def test_preflight_needs_mtz_dump(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = make_dataset(Path(directory) / "dataset")
             with self.assertRaisesRegex(AutoMRInputError, "phenix.mtz.dump"):
-                prepare_automr(dataset, valid_ligand_codes=VALID, phaser_data="I")
+                prepare_automr(dataset, valid_ligand_codes=VALID)
+            self.assertFalse((dataset / "AutoMR").exists())
 
-    def test_phaser_reporting_amplitudes_after_intensity_request_fails(self):
+    def test_phaser_reporting_the_other_kind_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            preflight = self._preflight(root, phaser_data="intensities")
+            preflight = self._preflight(root / "i", phaser_data="I")
             result = execute_phaser(
-                preflight.report_path, make_phaser(root, labin_echo="F = F SIGF = SIGF")
+                preflight.report_path, make_phaser(root / "i", labin_echo="F = F SIGF = SIGF")
             )
             self.assertEqual(result.status, "MR_FAILED")
+            self.assertIn("Intensities (IMEAN,SIGIMEAN) were requested", result.message)
             self.assertIn("reported LABIN F = F SIGF = SIGF", result.message)
 
-    def test_reports_without_phaser_data_still_run_and_tampering_is_rejected(self):
+            preflight = self._preflight(root / "f", phaser_data="F")
+            result = execute_phaser(
+                preflight.report_path, make_phaser(root / "f", labin_echo="I = I SIGI = SIGI")
+            )
+            self.assertEqual(result.status, "MR_FAILED")
+            self.assertIn("Amplitudes (F,SIGF) were requested", result.message)
+
+    def test_older_reports_still_build_and_tampering_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            preflight = self._preflight(root, phaser_data="intensities")
+            preflight = self._preflight(root, phaser_data="I")
             report = json.loads(preflight.report_path.read_text())
             phaser_directory = preflight.run_directory / "Phaser"
             legacy = dict(report)
             legacy.pop("phaser_data")
             self.assertNotIn("labin", build_phaser_eff(legacy, phaser_directory))
+            schema_1_auto = {**report, "phaser_data": {
+                "schema_version": 1, "requested": "auto", "labin": None}}
+            self.assertNotIn("labin", build_phaser_eff(schema_1_auto, phaser_directory))
+            schema_1_intensities = {**report, "phaser_data": {
+                "schema_version": 1, "requested": "intensities", "labin": "IMEAN,SIGIMEAN"}}
+            self.assertIn('labin = "IMEAN,SIGIMEAN"',
+                          build_phaser_eff(schema_1_intensities, phaser_directory))
             report["phaser_data"]["labin"] = 'IMEAN" }\nphaser { mode = EP_AUTO'
+            with self.assertRaisesRegex(PhaserExecutionError, "malformed"):
+                build_phaser_eff(report, phaser_directory)
+            report["phaser_data"].update(requested="auto", labin=None)
             with self.assertRaisesRegex(PhaserExecutionError, "malformed"):
                 build_phaser_eff(report, phaser_directory)
 

@@ -39,7 +39,7 @@ from .sequence_family import prepare_sequence_family, freeze_sequence_family
 from .search_model_comparison import freeze_search_model_comparison
 from .frame_postmr import frame_postmr_spec
 from .symmetry import StandardSymmetryAssessment, SymmetryError, assess_standard_symmetry
-from .reflection_data import ReflectionDataError, resolve_phaser_data
+from .reflection_data import ReflectionDataError, describe, resolve_phaser_data
 
 
 @dataclass(frozen=True)
@@ -259,10 +259,11 @@ def _log_text(
     space_group = symmetry.evidence.mtz_symbol if symmetry else "not gated (nonstandard mode)"
     copies = str(symmetry.mr_copies) if symmetry else "not set by standard-frame rule"
     symmetry_warning = symmetry.red_flag if symmetry and symmetry.red_flag else "none"
-    if phaser_data and phaser_data.get("labin"):
-        data_line = f"Phaser data: {phaser_data['requested']} ({phaser_data['labin']})"
-    else:
-        data_line = "Phaser data: Phenix default (amplitudes when present)"
+    data_line = (
+        f"Phaser data: {phaser_data['requested']} - "
+        f"{describe(str(phaser_data['requested']))} ({phaser_data['labin']})"
+        if phaser_data else "Phaser data: not recorded"
+    )
     return "\n".join([
         "NASolve AutoMR preflight",
         f"Status: {status}",
@@ -375,15 +376,6 @@ def prepare_automr(
             )
         except SymmetryError as exc:
             raise AutoMRInputError(str(exc)) from exc
-    try:
-        phaser_data_record = resolve_phaser_data(
-            resolved.phaser_data,
-            resolved.dataset.reflections,
-            mtz_dump_executable,
-            environment=phenix_environment,
-        )
-    except ReflectionDataError as exc:
-        raise AutoMRInputError(str(exc)) from exc
     if resolved.phosphate_intent is not None:
         try:
             validate_phosphate_intent(resolved.phosphate_intent, resolved.allow_op3_sites)
@@ -406,6 +398,17 @@ def prepare_automr(
         except SequenceReferenceError as exc:
             raise AutoMRInputError(f"Sequence-family target preparation failed: {exc}") from exc
     effective_text = format_intent(resolved)
+    # After the model checks, before a run is allocated: the MTZ must have the
+    # requested merged F or I columns.
+    try:
+        phaser_data_record = resolve_phaser_data(
+            resolved.phaser_data,
+            resolved.dataset.reflections,
+            mtz_dump_executable,
+            environment=phenix_environment,
+        )
+    except ReflectionDataError as exc:
+        raise AutoMRInputError(str(exc)) from exc
 
     generated = existing_config is None and resolved_input is None
     if generated:

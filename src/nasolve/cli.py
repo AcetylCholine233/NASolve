@@ -134,11 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     automr.add_argument(
         "--phaser-data",
-        metavar="{auto,intensities}",
+        metavar="{F,I}",
         help=(
-            "reflection data for Phaser: 'intensities' (or I) uses the MTZ's "
-            "merged I/SIGI columns; 'auto' keeps Phenix's choice, which is F/SIGF "
-            "when present (default: nasolve.txt phaser_data, else auto)"
+            "reflection data for Phaser: F uses the MTZ's merged amplitudes "
+            "(F/SIGF), I its merged intensities (I/SIGI) (default: nasolve.txt "
+            "phaser_data, else F)"
         ),
     )
     automr.add_argument(

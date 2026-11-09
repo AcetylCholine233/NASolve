@@ -16,7 +16,10 @@ VALID = {"DA", "DC"}
 class PhaserExecutionTests(unittest.TestCase):
     def _preflight(self, root: Path):
         dataset = make_dataset(root / "dataset")
-        return prepare_automr(dataset, valid_ligand_codes=VALID)
+        return prepare_automr(
+            dataset, valid_ligand_codes=VALID,
+            mtz_dump_executable=make_mtz_dump(root / "tools"),
+        )
 
     def test_non_ascii_and_special_paths_reach_phaser_unchanged(self):
         # Regression: JSON-style quoting wrote 学... into phaser.eff, which

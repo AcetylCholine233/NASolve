@@ -12,7 +12,7 @@ from typing import Collection, Mapping
 from .phosphate import PhosphateError, validate_op3_sites, validate_phosphate_intent
 from .backbone import BackboneError, validate_backbone_sites
 from .presets import PresetError, ProjectPreset, load_preset
-from .reflection_data import AUTO, ReflectionDataError, normalize_phaser_data
+from .reflection_data import DEFAULT_PHASER_DATA, ReflectionDataError, normalize_phaser_data
 from .residue_aliases import LigandCodeError, ResolvedLigand, resolve_ligand, resolve_pair
 
 
@@ -94,7 +94,7 @@ class ResolvedAutoMRInput:
     model_family: str | None = None
     model_provider: dict[str, object] | None = None
     frame_sequence_source: Path | None = None
-    phaser_data: str = AUTO
+    phaser_data: str = DEFAULT_PHASER_DATA
 
 
 _ALLOWED_SECTIONS = {"automr", "sequences", "mutations", "backbones"}
@@ -670,12 +670,12 @@ def resolve_automr_input(
     model_provider: dict[str, object] | None = None
     frame_sequence_source: Path | None = None
     effective_allow_p1 = bool(allow_p1_standard or intent.allow_p1_standard)
-    # The command line overrides nasolve.txt; neither means Phenix's default.
+    # The command line overrides nasolve.txt; neither means F (amplitudes).
     phaser_data = (
         _validated_phaser_data(phaser_data_override, "--phaser-data")
         if phaser_data_override is not None
         else _validated_phaser_data(intent.phaser_data, "[automr] phaser_data")
-    ) or AUTO
+    ) or DEFAULT_PHASER_DATA
     effective_mirror = bool(mirror_override or intent.mirror)
     if mode == "standard":
         if not selected_frame:
@@ -881,9 +881,8 @@ def format_intent(resolved: ResolvedAutoMRInput) -> str:
         lines.append("mirror = true")
     if resolved.allow_unreviewed_backbone:
         lines.append("allow_unreviewed_backbone = true")
-    # Written only when chosen, so snapshots of default runs are unchanged.
-    if resolved.phaser_data != AUTO:
-        lines.append(f"phaser_data = {resolved.phaser_data}")
+    # Always frozen: reopening a snapshot must not adopt a later default.
+    lines.append(f"phaser_data = {resolved.phaser_data}")
     # Always freeze even an empty list: reopening a snapshot must not adopt a
     # later recipe version's phosphate sites.
     lines.append("allow_op3_sites = " + ", ".join(resolved.allow_op3_sites))

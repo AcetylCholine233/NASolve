@@ -99,8 +99,9 @@ def make_mtz_dump(
     symbol: str = "H 3",
     number: int = 146,
     matrix_symbol: str | None = None,
-    columns=None,
+    columns=STARANISO_COLUMNS,
 ) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     executable = root / "phenix.mtz.dump"
     matrix = symbol if matrix_symbol is None else matrix_symbol
     column_text = mtz_dump_columns_text(columns) if columns else ""

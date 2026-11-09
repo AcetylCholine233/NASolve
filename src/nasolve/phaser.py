@@ -13,8 +13,9 @@ from typing import Mapping
 
 from .model_assessment import file_sha256
 from .reflection_data import (
-    AUTO,
+    AMPLITUDES,
     INTENSITIES,
+    describe,
     reported_data_kind,
     reported_labin,
 )
@@ -86,23 +87,33 @@ def _integer_field(value: object, label: str) -> int:
     return value
 
 
+# Values written by the first (schema 1) version of the record.
+_LEGACY_REQUESTED = {"auto": None, "intensities": INTENSITIES}
+
+
 def frozen_phaser_data(report: Mapping[str, object]) -> dict[str, object]:
-    """Return the preflight's data choice; reports before this field mean auto."""
+    """Return the preflight's data choice.
+
+    Reports frozen before the record existed (and schema-1 ``auto`` records)
+    have no labels: Phaser then keeps its own choice, as those runs did.
+    """
     record = report.get("phaser_data")
     if record is None:
-        return {"requested": AUTO, "labin": None}
+        return {"requested": None, "labin": None}
     if not isinstance(record, Mapping):
         raise PhaserExecutionError("Frozen phaser_data record is malformed")
     requested = record.get("requested")
     labin = record.get("labin")
-    if requested == AUTO and labin is None:
-        return dict(record)
+    if record.get("schema_version") == 1 and requested in _LEGACY_REQUESTED:
+        requested = _LEGACY_REQUESTED[requested]
+        if requested is None and labin is None:
+            return {**record, "requested": None}
     if (
-        requested == INTENSITIES
+        requested in {AMPLITUDES, INTENSITIES}
         and isinstance(labin, str)
         and re.fullmatch(r"[^\s,\"\\]+(?:,[^\s,\"\\]+)+", labin)
     ):
-        return dict(record)
+        return {**record, "requested": requested}
     raise PhaserExecutionError("Frozen phaser_data record is malformed")
 
 
@@ -142,7 +153,7 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
     if isinstance(symmetry, Mapping) and "mr_copies" in symmetry:
         copies = _integer_field(symmetry.get("mr_copies"), "MR copy count")
     labin = frozen_phaser_data(report).get("labin")
-    # Without labin, phenix.phaser picks amplitudes whenever the MTZ has them.
+    # Only reports frozen before phaser_data existed have no labin.
     data_lines = [f"  labin = {_phil_string(labin)}"] if labin else []
 
     # Do not set ``phaser.model`` as well as ``phaser.ensemble``.  The shortcut
@@ -283,10 +294,11 @@ def execute_phaser(
     phaser_data = frozen_phaser_data(report)
     labin_echo = reported_labin(output)
     used_kind = reported_data_kind(labin_echo)
+    requested_kind = phaser_data.get("requested")
     data_mismatch = (
-        phaser_data.get("requested") == INTENSITIES
+        requested_kind is not None
         and used_kind is not None
-        and used_kind != INTENSITIES
+        and used_kind != requested_kind
     )
     raw_pdb = _find_solution(phaser_directory, ".pdb")
     raw_mtz = _find_solution(phaser_directory, ".mtz")
@@ -306,8 +318,8 @@ def execute_phaser(
     elif data_mismatch:
         status = "MR_FAILED"
         message = (
-            f"Intensities ({phaser_data.get('labin')}) were requested but Phaser "
-            f"reported LABIN {labin_echo}; inspect phaser.log"
+            f"{describe(str(requested_kind)).capitalize()} ({phaser_data.get('labin')}) "
+            f"were requested but Phaser reported LABIN {labin_echo}; inspect phaser.log"
         )
     elif tfz is None:
         status = "MR_FAILED"
@@ -376,8 +388,9 @@ def execute_phaser(
             "Model RMSD: 1.0 A",
             "Reflection data: "
             + (
-                f"intensities ({phaser_data.get('labin')})"
-                if phaser_data.get("labin") else "Phenix default"
+                f"{requested_kind} - {describe(str(requested_kind))} "
+                f"({phaser_data.get('labin')})"
+                if phaser_data.get("labin") else "Phenix default (legacy report)"
             )
             + (f"; Phaser reported LABIN {labin_echo}" if labin_echo else ""),
             f"Composition residues: {report['model_assessment']['polymer_residue_count']}",
