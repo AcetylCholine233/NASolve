@@ -48,8 +48,18 @@ _LLG_RE = re.compile(rf"\bLLG\s*={{0,2}}\s*({_NUMBER})", re.I)
 
 
 def _phil_string(value: str | Path) -> str:
-    """Return a double-quoted PHIL string with conservative escaping."""
-    return json.dumps(str(value))
+    """Return a double-quoted PHIL string, escaped the way libtbx.phil reads it.
+
+    Inside quotes PHIL only decodes ``\\\\`` and ``\\"`` (libtbx
+    ``quote_python_str``); any other backslash sequence is kept literally. JSON
+    escaping therefore broke non-ASCII paths: ``\\u5b66`` reached Phaser as
+    six literal characters and the file could not be found. Characters are
+    written as they are; the parameter file is UTF-8.
+    """
+    text = str(value)
+    if any(character in text for character in "\r\n\x00"):
+        raise PhaserExecutionError(f"Path cannot be written to a PHIL file: {text!r}")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _load_report(report_path: Path) -> dict[str, object]:

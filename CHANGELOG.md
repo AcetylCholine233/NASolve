@@ -8,6 +8,17 @@ entries are reconstructed from repository history.
 
 ## [Unreleased]
 
+### Fixed
+
+- AutoMR's `phaser.eff` quoted paths with JSON escaping, so non-ASCII
+  characters were written as `\uXXXX`. PHIL keeps such sequences literally,
+  and Phaser stopped with "Couldn't find the file" for any dataset whose path
+  contained, for example, Chinese characters. Paths are now written as UTF-8
+  and only `\` and `"` are escaped, matching `libtbx.phil` quoting (as
+  AutoRefine already did). Checked against the Phenix 2.2.1-6174 PHIL parser
+  (parse only, not a Phaser run). Existing failed runs are unchanged; rerun
+  AutoMR to create a new run.
+
 ### Added
 
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD

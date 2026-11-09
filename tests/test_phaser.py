@@ -18,6 +18,39 @@ class PhaserExecutionTests(unittest.TestCase):
         dataset = make_dataset(root / "dataset")
         return prepare_automr(dataset, valid_ligand_codes=VALID)
 
+    def test_non_ascii_and_special_paths_reach_phaser_unchanged(self):
+        # Regression: JSON-style quoting wrote 学... into phaser.eff, which
+        # PHIL keeps literally, so Phaser could not find the reflections.
+        def phil_value(eff: str, key: str) -> str:
+            line = next(l.strip() for l in eff.splitlines() if l.strip().startswith(key + " = "))
+            quoted = line.split(" = ", 1)[1]
+            self.assertTrue(quoted.startswith('"') and quoted.endswith('"'), quoted)
+            out, chars, i = [], quoted[1:-1], 0
+            while i < len(chars):  # libtbx.phil: only \\ and \" are escapes
+                if chars[i] == "\\" and i + 1 < len(chars) and chars[i + 1] in '\\"':
+                    out.append(chars[i + 1])
+                    i += 2
+                else:
+                    out.append(chars[i])
+                    i += 1
+            return "".join(out)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "学习一个" / "Structural Biology" / 'FT"Hg\\set'
+            preflight = self._preflight(root)
+            result = execute_phaser(
+                preflight.report_path, make_phaser(root), phenix_version="2.2.1"
+            )
+            eff = result.parameter_path.read_text(encoding="utf-8")
+            self.assertNotIn("\\u", eff)
+            self.assertIn("学习一个", eff)
+            report = json.loads(preflight.report_path.read_text())
+            hklin = Path(phil_value(eff, "hklin"))
+            self.assertEqual(hklin, Path(report["inputs"]["reflections"]))
+            self.assertTrue(hklin.is_file())
+            self.assertTrue(Path(phil_value(eff, "pdb")).is_file())
+            self.assertEqual(Path(phil_value(eff, "output_dir")), result.parameter_path.parent.resolve())
+
     def test_one_ensemble_uses_checker_residue_count_and_preserves_hetatm(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
