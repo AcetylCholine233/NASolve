@@ -53,8 +53,11 @@ entries are reconstructed from repository history.
   anomalous group per site. The PHIL is deliberately not in the AutoRefine
   restraint stack, to avoid duplicate groups. `autosol_required` still
   reflects nucleotide heavy atoms only. With an older NARestraints, PostMR
-  stops with a clear message when such a metal is present. Checked on the
-  real 7CU_Ag model with its merged Ag (one group, `chain Z and resid 1 and
+  stops with a clear message when such a metal is present. For PostMR runs
+  made before this change (no `metal_sites` key), AutoRefine and the refine
+  doctor scan the checksum-verified PostMR prepared model the same way, in
+  memory, without rewriting the frozen PostMR record. Checked on the real
+  7CU_Ag PostMR (Ag at B:101 after Coot's merge: `chain B and resid 101 and
   name AG`); phenix.refine itself not yet run.
 - dU (`DU`, the DNA `U` token, for example `--pair C:U`) is now a curated
   PostMR residue. `data/ligands/DU.cif` is the official wwPDB CCD definition

@@ -1080,7 +1080,9 @@ hand. AutoRefine refines the same sites as anomalous scatterers against the
 F(+)/F(-) data and writes their groups itself, so that PHIL is not part of the
 AutoRefine restraint stack. Metals do not trigger the nucleotide AutoSol
 branch. This needs the NARestraints anomalous-scatterers branch; with an older
-NARestraints, PostMR stops if the model contains such a metal.
+NARestraints, PostMR stops if the model contains such a metal. For a PostMR run
+made before metal detection existed, AutoRefine finds the metals in the PostMR
+model itself, so the run does not need to be prepared again.
 
 After ReadySet, PostMR scans nucleotide-like residues for configurable
 anomalous elements. The initial trigger set is iodine, bromine, and selenium;

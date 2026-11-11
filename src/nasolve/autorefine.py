@@ -230,6 +230,39 @@ def _anomalous_candidates(report: Mapping[str, object]) -> list[dict[str, object
     return result
 
 
+def with_postmr_metal_sites(report: dict[str, object], run: Path) -> dict[str, object]:
+    """Add metal anomalous scatterers for PostMR runs made before metal detection.
+
+    Newer PostMR reports always carry ``anomalous.metal_sites`` (possibly
+    empty). For older ones the PostMR prepared model is scanned the same way,
+    in memory only: the frozen PostMR record is not rewritten.
+    """
+    postmr = report.get("postmr")
+    anomalous = postmr.get("anomalous") if isinstance(postmr, Mapping) else None
+    if not isinstance(anomalous, Mapping) or "metal_sites" in anomalous:
+        return report
+    model = resolve_artifact_path(postmr.get("prepared_model"), run)  # type: ignore[union-attr]
+    if model is None:
+        return report
+    expected = postmr.get("prepared_sha256")  # type: ignore[union-attr]
+    if isinstance(expected, str) and file_sha256(model) != expected.casefold():
+        raise AutoRefineError("The PostMR prepared model changed after PostMR")
+    from .postmr import PostMRPreparationError, scan_metal_anomalous_sites
+
+    try:
+        sites, _, _ = scan_metal_anomalous_sites(model)
+    except PostMRPreparationError as exc:
+        raise AutoRefineError(str(exc)) from exc
+    if not sites:
+        return report
+    updated = json.loads(json.dumps(report))
+    updated["postmr"]["anomalous"]["metal_sites"] = sites
+    updated["postmr"]["anomalous"]["metal_sites_source"] = (
+        "derived by AutoRefine from the PostMR prepared model (PostMR predates metal detection)"
+    )
+    return updated
+
+
 def build_reflection_plan(
     report: Mapping[str, object],
     observations: Path,
@@ -1556,7 +1589,7 @@ def execute_autorefine(
         )
     except CheckpointError as exc:
         raise AutoRefineError(str(exc)) from exc
-    report = _run_report(run)
+    report = with_postmr_metal_sites(_run_report(run), run)
     try:
         terminal_phosphate_sites = requested_op3_sites(report)
     except PhosphateError as exc:

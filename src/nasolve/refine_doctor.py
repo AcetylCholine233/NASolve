@@ -19,6 +19,7 @@ from .autorefine import (
     execute_autorefine,
     reflection_selector_policy,
     validate_refined_model,
+    with_postmr_metal_sites,
     write_terminal_phosphate_protection as _write_terminal_phosphate_protection,
 )
 from .checkpoints import (
@@ -545,9 +546,13 @@ def execute_refine_doctor(
     if not isinstance(observations, Path) or not isinstance(model, Path):
         raise RefineDoctorError("Selected checkpoint has incomplete crystallographic inputs")
     try:
-        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        report = with_postmr_metal_sites(
+            json.loads((run / "report.json").read_text(encoding="utf-8")), run
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise RefineDoctorError(f"Could not read run report: {exc}") from exc
+    except AutoRefineError as exc:
+        raise RefineDoctorError(str(exc)) from exc
     try:
         validate_refined_model(model, report)
     except AutoRefineError as exc:

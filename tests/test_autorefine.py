@@ -15,6 +15,7 @@ from nasolve.autorefine import (
     _cached_file_referencer,
     _run_report,
     anomalous_selections,
+    with_postmr_metal_sites,
     build_reflection_plan,
     execute_autorefine,
     parse_refinement_statistics,
@@ -916,6 +917,33 @@ class AutoRefineTests(unittest.TestCase):
             plan = build_reflection_plan(metal_only, observations, make_mtz_dump(root))
             self.assertTrue(plan.anomalous)
             self.assertEqual(plan.observation_labels, ("F(+)", "SIGF(+)", "F(-)", "SIGF(-)"))
+
+    def test_postmr_from_before_metal_detection_gets_metal_sites_from_its_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            report = json.loads((run / "report.json").read_text())
+            report["postmr"]["anomalous"].pop("metal_sites", None)
+            prepared = run / "prepared_with_silver.pdb"
+            prepared.write_text(
+                "HETATM    1 AG    AG B 101       1.000   2.000   3.000  1.00 20.00          AG\nEND\n"
+            )
+            report["postmr"]["prepared_model"] = str(prepared)
+            report["postmr"]["prepared_sha256"] = file_sha256(prepared)
+            derived = with_postmr_metal_sites(report, run)
+            self.assertEqual(
+                [(s["site"], s["atom_name"]) for s in derived["postmr"]["anomalous"]["metal_sites"]],
+                [("B:101", "AG")],
+            )
+            self.assertIn("chain B and resid 101 and name AG", anomalous_selections(derived))
+            self.assertNotIn("metal_sites", report["postmr"]["anomalous"])  # not rewritten
+            # A newer PostMR record (key present, even empty) is used as is.
+            report["postmr"]["anomalous"]["metal_sites"] = []
+            self.assertIs(with_postmr_metal_sites(report, run), report)
+            prepared.write_text("changed\n")
+            del report["postmr"]["anomalous"]["metal_sites"]
+            with self.assertRaisesRegex(AutoRefineError, "changed after PostMR"):
+                with_postmr_metal_sites(report, run)
 
     def test_success_is_quiet_checkpointed_and_reused_by_next_round(self):
         with tempfile.TemporaryDirectory() as directory:
