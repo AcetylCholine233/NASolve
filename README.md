@@ -142,7 +142,8 @@ dataset/
 Its `report.json` names the AutoMR run it came from. If AutoSol finds a site of
 a requested metal, NASolve lists the nearest residues and opens Coot with the
 Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
-later with `./nasolve show dataset/AutoSolMetal/run_001`, or the latest search
+later with `./nasolve show dataset/AutoSolMetal/run_001` (a relative path is
+tried from the current folder, then from the active dataset), or the latest search
 that found sites with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to
 skip).
 To keep the sites, use the **NASolve** button that NASolve adds to Coot's

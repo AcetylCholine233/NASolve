@@ -302,7 +302,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.add_argument(
         "target", nargs="?",
-        help="run directory, 'last', or omit to use the active workspace run",
+        help=(
+            "AutoMR/run_NNN or AutoSolMetal/run_NNN folder (relative paths are "
+            "tried from here, then from the active dataset), 'last', or omit to "
+            "use the active workspace run"
+        ),
     )
     show.add_argument(
         "dataset", nargs="?", type=Path,
@@ -1380,7 +1384,13 @@ def _show(args: argparse.Namespace) -> int:
                 dataset = _workspace_dataset(
                     None, config, current_directory_fallback=False
                 )
-            run = resolve_run(args.target, dataset)
+            run = resolve_run(
+                args.target,
+                dataset,
+                active_dataset=(
+                    Path(config.workspace.dataset) if config.workspace.dataset else None
+                ),
+            )
         coot = discover_coot(config, explicit=args.coot)
         remember_coot(config, coot)
         save_config(config)

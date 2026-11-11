@@ -55,6 +55,11 @@ entries are reconstructed from repository history.
   or used automatically. Coot calls follow the Coot 1.3.3 Python API bundled
   with Phenix 2.2.1-6174; tested against a simulated Coot (not yet in a live
   Coot session).
+- `nasolve show PATH` looks a relative `PATH` up from the current folder and
+  then from the active workspace dataset, so `nasolve show
+  AutoSolMetal/run_001` works outside the dataset folder. When neither has a
+  `report.json`, the error names both places and says which folders are
+  expected, instead of the misleading "AutoMR report is missing".
 - AutoMR now always tells Phaser which data to use: `-F` (merged
   amplitudes, the default) or `-I` (merged intensities, as the Phenix GUI
   uses); `--phaser-data F|I` is the long form. Or set `phaser_data = F|I` in

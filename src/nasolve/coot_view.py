@@ -172,16 +172,38 @@ def find_last_run(dataset: Path) -> Path:
     return max(candidates, key=lambda item: item[0])[1]
 
 
-def resolve_run(target: Path | str, dataset: Path | None = None) -> Path:
+def resolve_run(
+    target: Path | str,
+    dataset: Path | None = None,
+    *,
+    active_dataset: Path | None = None,
+) -> Path:
+    """Resolve a result folder: an AutoMR run or a metal-search folder.
+
+    A relative path is looked up from the current folder first and then, if
+    it is not there, from the active workspace dataset.
+    """
     if str(target).casefold() == "last":
         if dataset is None:
             raise CootViewError("'nasolve show last' requires a dataset directory")
         return find_last_run(dataset)
     if dataset is not None:
         raise CootViewError("A dataset is accepted only with 'nasolve show last DATASET'")
-    run = Path(target).expanduser().resolve()
-    _required_file(run / "report.json", "AutoMR report")
-    return run
+    given = Path(target).expanduser()
+    candidates = [given.resolve()]
+    if not given.is_absolute() and active_dataset is not None:
+        in_dataset = (active_dataset.expanduser() / given).resolve()
+        if in_dataset not in candidates:
+            candidates.append(in_dataset)
+    for candidate in candidates:
+        if (candidate / "report.json").is_file():
+            return candidate
+    raise CootViewError(
+        "No NASolve report.json in "
+        + " or ".join(str(candidate) for candidate in candidates)
+        + ". Give an AutoMR/run_NNN or AutoSolMetal/run_NNN folder; a relative path "
+        "is looked up from the current folder, then from the active dataset."
+    )
 
 
 def _postmr_dictionaries(
@@ -674,7 +696,7 @@ def resolve_view_profile(
     run = run_directory.expanduser().resolve()
     if checkpoint is not None:
         checkpoint = _checkpoint_component(checkpoint)
-    report = _read_json(_required_file(run / "report.json", "AutoMR report"), "run report")
+    report = _read_json(_required_file(run / "report.json", "NASolve report"), "run report")
     if report.get("workflow") == "metal_autosol":
         # DATASET/AutoSolMetal/run_NNN opened directly.
         if checkpoint is not None or stage not in {None, "metal"}:

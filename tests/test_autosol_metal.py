@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ from nasolve.autosol_metal import (
 from nasolve.cli import build_parser, main
 from nasolve.config import AppConfig
 from nasolve.coot_runtime import CootInstallation
-from nasolve.coot_view import CootViewError, launch_coot_view, resolve_view_profile
+from nasolve.coot_view import CootViewError, launch_coot_view, resolve_run, resolve_view_profile
 from nasolve.model_assessment import file_sha256
 from nasolve.phenix_runtime import PhenixInstallation
 from nasolve.run_context import resolve_artifact_path
@@ -400,6 +401,50 @@ class MetalViewTests(unittest.TestCase):
             profile = resolve_view_profile(run, stage="metal")
             self.assertEqual(profile.extra_model_paths, (sites.resolve(),))
             self.assertIn("attempt_001", profile.source)
+
+    def test_show_finds_a_metal_search_from_the_dataset_or_the_active_dataset(self):
+        # Regression: "show AutoSolMetal/run_001" from outside the dataset said
+        # "AutoMR report is missing" without explaining what was expected.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            run = make_run(root)
+            result = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root)
+            dataset = root / "dataset"
+            elsewhere = root / "elsewhere"
+            elsewhere.mkdir()
+            previous = os.getcwd()
+            try:
+                os.chdir(dataset)
+                self.assertEqual(resolve_run("AutoSolMetal/run_001"), result.output_directory)
+                os.chdir(elsewhere)
+                with self.assertRaisesRegex(
+                    CootViewError, r"No NASolve report\.json in .*elsewhere.*AutoSolMetal/run_NNN"
+                ):
+                    resolve_run("AutoSolMetal/run_001")
+                self.assertEqual(
+                    resolve_run("AutoSolMetal/run_001", active_dataset=dataset),
+                    result.output_directory,
+                )
+
+                config = AppConfig()
+                config.workspace.dataset = str(dataset)
+                output = io.StringIO()
+                with (
+                    patch("nasolve.cli.load_config", return_value=config),
+                    patch("nasolve.cli.save_config"), patch("nasolve.cli.remember_coot"),
+                    patch("nasolve.cli.discover_coot",
+                          return_value=CootInstallation(root / "coot", "1.3.3", "test")),
+                    patch("nasolve.cli.launch_coot_view", side_effect=partial(
+                        launch_coot_view, launcher=lambda *a, **k: SimpleNamespace(pid=7))),
+                    redirect_stdout(output), redirect_stderr(io.StringIO()),
+                ):
+                    (root / "coot").write_text("#!/bin/sh\n")
+                    code = main(["show", "AutoSolMetal/run_001"])
+                self.assertEqual(code, 0, output.getvalue())
+                self.assertIn("Opened metal in run: " + str(result.output_directory), output.getvalue())
+                self.assertIn("Merge metal sites and save", output.getvalue())
+            finally:
+                os.chdir(previous)
 
     def test_view_refuses_a_changed_heavy_atom_model(self):
         with tempfile.TemporaryDirectory() as directory:
