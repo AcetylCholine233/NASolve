@@ -1,18 +1,13 @@
-"""`nasolve autofdp` is specified but not implemented (docs/autofdp.md).
-
-The command must exist with its documented options, refuse to run, and write
-nothing; every engine function is a stub.
+"""`nasolve autofdp` is specified in docs/autofdp.md. Step 1 (B start) is
+implemented and tested in test_autofdp_bstart.py; the later steps must stay
+documented stubs until they are implemented.
 """
 
-import contextlib
 import inspect
-import io
-import tempfile
 import unittest
-from pathlib import Path
 
 import nasolve.autofdp as autofdp
-from nasolve.cli import build_parser, main
+from nasolve.cli import build_parser
 
 
 class AutoFDPSpecificationTests(unittest.TestCase):
@@ -23,23 +18,13 @@ class AutoFDPSpecificationTests(unittest.TestCase):
                        "--b-step", "--occupancy-floor", "--map-sigma",
                        "--no-confirm-b", "--final", "--plan"):
             self.assertIn(option, help_text)
+        self.assertIn("Only step 1 is implemented", help_text)
         self.assertIn("NOT IMPLEMENTED", help_text)
 
-    def test_command_refuses_and_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            run = Path(directory) / "AutoMR" / "run_001"
-            run.mkdir(parents=True)
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                code = main(["autofdp", str(run), "--site", "B:101", "--plan"])
-            self.assertEqual(code, 1)
-            self.assertIn("not implemented", stderr.getvalue())
-            self.assertEqual(list(run.iterdir()), [])
-
     def test_engine_functions_are_documented_stubs(self):
-        names = [name for name in autofdp.__all__
-                 if inspect.isfunction(getattr(autofdp, name))]
-        self.assertIn("execute_autofdp", names)
+        names = ["plan_autofdp", "execute_autofdp", "theoretical_scattering", "fdp_round",
+                 "map_value_at_site", "decide_site_update", "identity_check",
+                 "confirm_b_round", "final_round"]
         for name in names:
             function = getattr(autofdp, name)
             with self.subTest(function=name):

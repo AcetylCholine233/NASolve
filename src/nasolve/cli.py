@@ -256,12 +256,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp = subparsers.add_parser(
         "autofdp",
-        help="measure metal occupancy by f'' refinement (specified, not implemented yet)",
+        help="measure metal occupancy by f'' refinement (step 1 of the plan implemented)",
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
-            "within the tolerance of theory. NOT IMPLEMENTED YET: prints a message "
-            "and exits 1 without running or writing anything. See docs/autofdp.md."
+            "within the tolerance of theory. Only step 1 is implemented: copy an "
+            "AutoRefine result, set each metal's B to the mean B of its neighbouring "
+            "nucleotides, and save the copy as a new checkpoint. The f'' rounds are "
+            "NOT IMPLEMENTED YET. See docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -270,35 +272,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--from", dest="from_checkpoint",
-        help="checkpoint ID or bookmark to start from (default: current)",
+        help="AutoRefine checkpoint ID or bookmark to start from (default: current)",
     )
     autofdp.add_argument(
         "--site", action="append", default=[], metavar="SITE",
-        help="site to calibrate, e.g. B:101; repeatable (default: every anomalous scatterer)",
+        help="metal site to calibrate, e.g. B:101; repeatable (default: every metal site)",
     )
     autofdp.add_argument(
         "--element", action="append", default=[], metavar="SITE=ELEMENT",
-        help="treat a site as another element, e.g. B:101=HG (renamed in a new checkpoint)",
+        help="(later step, not used yet) treat a site as another element, e.g. B:101=HG (renamed in a new checkpoint)",
     )
     autofdp.add_argument(
         "--candidates", metavar="ELEMENT[,ELEMENT...]",
-        help="elements compared in the identity check (default: AG,HG plus the model's)",
+        help="(later step, not used yet) elements compared in the identity check (default: AG,HG plus the model's)",
     )
     autofdp.add_argument(
         "--theory", action="append", default=[], metavar="ELEMENT=FDP",
-        help="override the theoretical f'' (default: cctbx Henke at the MTZ wavelength)",
+        help="(later step, not used yet) override the theoretical f'' (default: cctbx Henke at the MTZ wavelength)",
     )
     autofdp.add_argument(
         "--tolerance", type=float, default=1.0, metavar="E",
-        help="converged when |refined f'' - theory| <= E electrons (default: 1.0)",
+        help="(later step, not used yet) converged when |refined f'' - theory| <= E electrons (default: 1.0)",
     )
     autofdp.add_argument(
         "--max-iterations", type=int, default=8, metavar="N",
-        help="f'' rounds before review (default: 8)",
+        help="(later step, not used yet) f'' rounds before review (default: 8)",
     )
     autofdp.add_argument(
         "--cycles", type=int, default=3, metavar="N",
-        help="phenix.refine macrocycles per f'' round (default: 3)",
+        help="(later step, not used yet) phenix.refine macrocycles per f'' round (default: 3)",
     )
     autofdp.add_argument(
         "--b-start", default="surrounding", metavar="surrounding|model|VALUE",
@@ -306,27 +308,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--b-step", type=float, default=20.0, metavar="A2",
-        help="B change when the difference map calls for B instead of occupancy (default: 20)",
+        help="(later step, not used yet) B change when the difference map calls for B instead of occupancy (default: 20)",
     )
     autofdp.add_argument(
         "--occupancy-floor", type=float, default=0.05, metavar="Q",
-        help="below this occupancy the site goes to identity review (default: 0.05)",
+        help="(later step, not used yet) below this occupancy the site goes to identity review (default: 0.05)",
     )
     autofdp.add_argument(
         "--map-sigma", type=float, default=3.0, metavar="S",
-        help="mFo-DFc peak or hole at the site that counts as significant (default: 3.0)",
+        help="(later step, not used yet) mFo-DFc peak or hole at the site that counts as significant (default: 3.0)",
     )
     autofdp.add_argument(
         "--no-confirm-b", action="store_true",
-        help="skip the round that refines only the sites' B at fixed occupancy and f''",
+        help="(later step, not used yet) skip the round that refines only the sites' B at fixed occupancy and f''",
     )
     autofdp.add_argument(
         "--final", action="store_true",
-        help="after convergence, refine XYZ, B, occupancy and f'' together (f' stays fixed)",
+        help="(later step, not used yet) after convergence, refine XYZ, B, occupancy and f'' together (f' stays fixed)",
     )
     autofdp.add_argument(
         "--plan", action="store_true",
-        help="run the preflight and print the plan without running phenix.refine",
+        help="show the metal sites and B changes without writing anything",
     )
     doctor = subparsers.add_parser(
         "refine-doctor",
@@ -1517,11 +1519,66 @@ def _show(args: argparse.Namespace) -> int:
 
 
 def _autofdp(args: argparse.Namespace) -> int:
-    """Specified, not implemented: report that and change nothing."""
-    from .autofdp import NOT_IMPLEMENTED_MESSAGE
+    """AutoFDP step 1: B start from the neighbouring nucleotides."""
+    from .autofdp import AutoFDPError, parse_b_start, prepare_start_model
 
-    print(f"AutoFDP: {NOT_IMPLEMENTED_MESSAGE}", file=sys.stderr)
-    return 1
+    if args.element:
+        print("AutoFDP error: --element is not implemented yet", file=sys.stderr)
+        return 2
+    try:
+        b_start = parse_b_start(args.b_start)
+        config = load_config()
+        run = _workspace_run(args.run, config)
+        result = prepare_start_model(
+            run,
+            from_checkpoint=args.from_checkpoint,
+            sites=tuple(args.site),
+            b_start=b_start,
+            plan_only=args.plan,
+        )
+    except (AutoFDPError, ConfigError) as exc:
+        print(f"AutoFDP error: {exc}", file=sys.stderr)
+        return 1
+
+    def shown(path: Path) -> str:
+        try:
+            return str(path.relative_to(result.run_directory))
+        except ValueError:
+            return str(path)
+
+    print("AutoFDP step 1: metal B factors from neighbouring nucleotides")
+    print(f"Source: {result.source_checkpoint} ({shown(result.source_model)})")
+    for site in result.sites:
+        print(
+            f"  {site.site} {site.atom_name} ({site.element}), occupancy "
+            f"{site.occupancy:.2f}: B {site.b_before:.2f} -> {site.b_after:.2f}"
+        )
+        if site.neighbour_b is not None:
+            print(f"    {site.neighbour_b.method}:")
+            for item in site.neighbour_b.neighbours:
+                print(
+                    f"      {item.residue} {item.residue_name}  mean B {item.mean_b:.2f}"
+                    f"  ({item.atoms} atoms, closest {item.contact})"
+                )
+        elif site.b_source == "model":
+            print("    kept the model's B (--b-start model)")
+        else:
+            print("    set from --b-start")
+    for warning in result.warnings:
+        print(f"Warning: {warning}")
+    if result.plan_only:
+        print("Plan only: nothing was written.")
+        return 0
+    assert result.start_model is not None and result.output_directory is not None
+    print(f"Start model: {shown(result.start_model)}")
+    print(f"Record: {shown(result.output_directory)}")
+    print(f"Checkpoint: {result.checkpoint_id} (current checkpoint unchanged)")
+    print(
+        f"View: nasolve show {shlex.quote(str(result.run_directory))} "
+        f"--checkpoint {result.checkpoint_id}"
+    )
+    print("The f'' refinement rounds are not implemented yet.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -36,15 +36,29 @@ entries are reconstructed from repository history.
 
 ### Added
 
-- `nasolve autofdp` is specified but not implemented. It will measure metal
+- `nasolve autofdp` step 1 (B start): `nasolve autofdp RUN --from refine-NNN`
+  copies the AutoRefine result to `AutoFDP/fdp_NNN/source_model.pdb`, finds
+  the metal HETATM sites as PostMR does, and sets each one's B to the mean B
+  of its neighbouring nucleotides, chosen with the NARestraints metal-pair
+  search (the bridged pair; otherwise base contacts within 3.6 A; otherwise
+  nucleotides within 6 A). Only the B columns change. The result,
+  `start_model.pdb`, is a new model-edit checkpoint `autofdp-NNN` (kind
+  `manual`, recipe `AutoFDP/b-start`, status REVIEW); the current checkpoint
+  is unchanged. `--plan` prints the changes without writing; `--b-start
+  model|VALUE` keeps the model's B or sets a number; `--element` is refused for
+  now. The start must be an AutoRefine checkpoint (a PostMR or imported one is
+  refused with the list of AutoRefine checkpoints). Schema: new
+  `AutoFDP/fdp_NNN/report.json` (`workflow: "autofdp"`, schema 1, status
+  `AUTOFDP_PREPARED`) and an `autofdp` block on the checkpoint. Pure Python;
+  no Phenix program runs in this step.
+- `nasolve autofdp` is specified but not implemented beyond step 1. It will measure metal
   occupancy by f'' refinement, following the mmDNA supplements (Adv. Mater.
   2023, JACS 2023, Small 2025, Sci. Adv. 2026): coordinates, B and occupancy
   held, f' fixed at theory for the MTZ-header wavelength, f'' refined alone, and
   occupancy adjusted until f'' is within 1 e- of theory, with an identity check,
   a B-confirmation round and an optional final all-parameter round. The
-  contract, defaults and open questions are in `docs/autofdp.md`. For now the
-  command only prints that it is not implemented and exits 1, writing nothing;
-  `nasolve.autofdp` holds documented stubs.
+  contract, defaults and open questions are in `docs/autofdp.md`; the later
+  steps are documented stubs in `nasolve.autofdp`.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals

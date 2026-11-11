@@ -1,11 +1,13 @@
 # AutoFDP: occupancy from f″ refinement
 
-**Status: specified, not implemented (2026-11-11).** `nasolve autofdp` is
-registered so its options and help text can be reviewed, but it only prints a
-"not implemented" message and exits with code 1. Nothing is run or written.
-Every function in `src/nasolve/autofdp.py` is a documented stub that raises
-`NotImplementedError`. The defaults marked *(to confirm)* follow my reading of
-the papers below and have not yet been checked by the lab.
+**Status: step 1 implemented, later steps specified only (2026-11-11).**
+`nasolve autofdp` runs step 1 (B start, below): it copies an AutoRefine result
+and sets each metal's B to the mean B of its neighbouring nucleotides, as a
+new checkpoint, then stops. The f'' rounds (steps 2-6) are documented stubs in
+`src/nasolve/autofdp.py` that raise `NotImplementedError`; options that belong
+to them are accepted but have no effect yet, and `--element` is refused. The
+defaults marked *(to confirm)* follow my reading of the papers below and have
+not yet been checked by the lab.
 
 ## Purpose
 
@@ -51,21 +53,21 @@ nasolve autofdp [RUN] [--from CHECKPOINT]
 | Option | Default | Meaning |
 |---|---|---|
 | `RUN` | active workspace run | AutoMR run folder with a completed PostMR |
-| `--from` | current checkpoint | starting model (checkpoint ID or bookmark) |
-| `--site` | every anomalous scatterer | restrict to these sites, e.g. `B:101`; repeatable |
+| `--from` | current checkpoint | starting model: an AutoRefine checkpoint ID or bookmark |
+| `--site` | every metal site | restrict to these metal sites, e.g. `B:101`; repeatable |
 | `--element` | element in the model | treat a site as another element, e.g. `B:101=HG`; renames the atom in a new checkpoint |
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17` |
 | `--tolerance` | 1.0 e⁻ | convergence: \|refined f″ − theory\| ≤ tolerance |
 | `--max-iterations` | 8 *(to confirm)* | f″ rounds before giving up |
 | `--cycles` | 3 | phenix.refine macrocycles per f″ round |
-| `--b-start` | `surrounding` | site B at the start: mean of coordinating nucleotides, the model's own, or a number |
+| `--b-start` | `surrounding` | site B at the start: mean of the neighbouring nucleotides, the model's own (`model`), or a number |
 | `--b-step` | 20 Å² *(to confirm)* | B change when the map says to adjust B instead of occupancy |
 | `--occupancy-floor` | 0.05 *(to confirm)* | below this, the site is sent to identity review |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the B-confirmation round |
 | `--final` | off | after convergence, refine XYZ, B, occupancy and f″ together (Adv. Mater. ending) |
-| `--plan` | off | run the preflight and print the plan without running phenix.refine |
+| `--plan` | off | print the sites and B changes without writing anything (later: the full preflight) |
 
 ## What one run does
 
@@ -88,23 +90,61 @@ nasolve autofdp [RUN] [--from CHECKPOINT]
 `--plan` stops here and prints the sites, elements, theoretical values,
 starting occupancy and B, and the settings.
 
-### 1. Starting state
+### 1. B start (implemented)
 
-AutoFDP writes a new checkpoint from the starting model in which, for each
-site:
+`nasolve autofdp RUN --from refine-NNN`:
 
-- occupancy is the model's value, capped at 1.0;
-- B is set by `--b-start`. By default this is the mean B of the coordinating
-  nucleotides: residues with a base N, O or S within 3.6 Å of the site (the
-  NARestraints metal-pair rule). If there are none, the mean B of nucleotides
-  with any atom within 6 Å is used.
+1. **Source.** The starting checkpoint (`--from`, default the current one)
+   must be an AutoRefine refinement (`kind: refinement`) that is usable. Its
+   model checksum is verified. A PostMR or imported checkpoint is refused with
+   the list of AutoRefine checkpoints. This matters because rounds that end in
+   review are not selected as current, so the current checkpoint is often
+   still `postmr`.
+2. **Copy.** The model is copied unchanged to
+   `AutoFDP/fdp_NNN/source_model.pdb`, and the copy's checksum is checked.
+3. **Find the metals.** As in PostMR: NARestraints `find_heavy_atoms`, HETATM
+   records with Z >= 21 outside nucleotides, without Li, Be, Na, Mg, Al, K or
+   Ca. `--site` restricts the list. No metal, or an unknown `--site`, stops
+   with an error. A metal with an ANISOU record is refused, because AutoFDP
+   sets isotropic B only.
+4. **Neighbours.** Found with the NARestraints metal-pair search
+   (`restraints.metal_pairs`), in this order:
+   1. the two nucleotides of the base pair the ion bridges
+      (`find_metal_mediated_pairs`: base N, O, S or Se within 3.6 A of the ion
+      in two nucleotides that are not chain neighbours, closest pair kept);
+   2. otherwise every nucleotide with a base N, O, S or Se within 3.6 A;
+   3. otherwise every nucleotide with any atom within 6 A.
 
-No other atom changes. AutoFDP does not place or delete sites. Spurious or
-duplicate sites are removed by the user before AutoFDP, as in the papers.
+   No nucleotide within 6 A is an error: remove the ion, or leave it out with
+   `--site`.
+5. **Set B.** The site's B becomes the mean B over all atoms of those
+   nucleotides (first model), rounded to 0.01 (`--b-start surrounding`).
+   `--b-start model` keeps the model's B; a number sets that B. Only the
+   B-factor columns (61-66) of the metal lines change. Occupancy, coordinates
+   and every other atom are unchanged. The result is
+   `AutoFDP/fdp_NNN/start_model.pdb`.
+6. **Checkpoint.** The start model is registered as checkpoint `autofdp-NNN`
+   under the source checkpoint. It is a model edit outside phenix.refine, like
+   an imported model, so it has kind `manual`, with recipe `AutoFDP/b-start`,
+   status REVIEW, the parent's observations, phases and restraints, and an
+   `autofdp` block listing the edits. `nasolve show RUN --checkpoint
+   autofdp-NNN` shows it with its parent's maps. The current checkpoint is not
+   changed.
+7. **Record.** `AutoFDP/fdp_NNN/report.json` (status `AUTOFDP_PREPARED`) and
+   `autofdp.log` hold, for each site: occupancy, B before and after, the
+   neighbour rule used, and each neighbour's residue, mean B, atom count and
+   closest contact.
 
-AutoFDP expects to start from a model that has already been refined, such as a
-normal `nasolve autorefine` round. It does not do the initial coordinate
-refinement itself.
+`--plan` does steps 1-5 in memory and prints them, writing nothing. Each run
+gets a new `fdp_NNN` folder and checkpoint; nothing is overwritten.
+
+For 7CU_Ag `refine-002`, the Ag B:101 (B 379.99) bridges B:4 DU (residue mean
+B 293.1) and A:12 DC (311.6).
+
+AutoFDP expects to start from a model that has already been refined. It does
+not do the initial coordinate refinement itself, and it does not place or
+delete sites. Spurious or duplicate sites are removed by the user before
+AutoFDP, as in the papers.
 
 ### 2. f″ round
 
@@ -146,8 +186,8 @@ Let *q* be the occupancy, *f″ref* the refined value and *f″th* the theory.
   - f″ that barely changes (by less than 0.2 × tolerance *(to confirm)*) after
     an occupancy change: flagged "unresponsive". The JACS paper took this as a
     sign of two metals or a wrong model.
-- AutoFDP writes a checkpoint with the new occupancy/B values (kind
-  `autofdp-edit`) and runs the next f″ round, for the sites that are not yet
+- AutoFDP writes a checkpoint with the new occupancy/B values (a model-edit
+  checkpoint like step 1's) and runs the next f″ round, for the sites that are not yet
   converged.
 - After `--max-iterations` rounds, sites that have not converged go to review.
 
@@ -192,6 +232,8 @@ Every phenix.refine run is an ordinary AutoRefine round and checkpoint, so
 step. The AutoFDP record goes to `AutoMR/run_NNN/AutoFDP/fdp_NNN/`, beside
 `AutoRefine/` and `RefineDoctor/`:
 
+- `source_model.pdb` (unchanged copy of the AutoRefine result) and
+  `start_model.pdb` (metal B set), from step 1;
 - `report.json`, with `workflow: "autofdp"` and schema 1, containing:
   - the settings, the Phenix version, and the wavelength with its source;
   - the theory table: f′ and f″ per element, and whether each value came from
@@ -212,6 +254,7 @@ checkpoint metadata.
 
 | Status | Exit | When |
 |---|---|---|
+| `AUTOFDP_PREPARED` | 0 | step 1 done (the only step implemented so far) |
 | `AUTOFDP_CONVERGED` | 0 | every site within tolerance and B confirmation passed |
 | `AUTOFDP_REVIEW` | 2 | any site not converged, hit an occupancy bound, unresponsive, coupled, ambiguous in identity, or with B drift; per-site reasons are in the report |
 | `AUTOFDP_FAILED` | 1 | phenix.refine failed; completed rounds and checkpoints are kept |
@@ -246,8 +289,10 @@ prints `nasolve checkpoints use RUN autofdp-NNN`.
 1. Is occupancy adjusted proportionally (*q × f″ref / f″th*) or by hand in
    steps?
 2. Is f″ restarted from 0 in every round, or from the previous value?
-3. Is "B fixed to match surrounding residues" the mean B of the coordinating
-   nucleotides?
+3. "B roughly the same as its neighbours" is implemented as the atom-weighted
+   mean B of the bridged pair (with the fallbacks above). Should it be all
+   atoms of those nucleotides (current), only their base atoms, or also the
+   stacked neighbours?
 4. When should B change instead of occupancy? Is the threshold `--map-sigma`
    3σ, and is `--b-step` 20 Å² a fixed step, or should it scale with
    resolution?
