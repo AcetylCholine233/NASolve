@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,6 +25,14 @@ _CHECKPOINT_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 @dataclass(frozen=True)
+class MetalMerge:
+    """Where the in-Coot "merge metal sites and save" command writes."""
+    output_directory: Path
+    merged_stem: str  # "<starting model>-merged"; ".pdb" (or "-2.pdb", ...) is added
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ViewProfile:
     stage: str
     model_path: Path
@@ -34,6 +43,7 @@ class ViewProfile:
     map_source: str
     checkpoint_id: str | None = None
     anomalous_map_paths: tuple[Path, ...] = ()
+    metal_merge: MetalMerge | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,7 @@ class CootViewResult:
     source: str
     map_source: str
     checkpoint_id: str | None
+    metal_merge: MetalMerge | None = None
 
 
 def _required_file(path: Path, description: str) -> Path:
@@ -247,8 +258,58 @@ def _phaser_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
     )
 
 
+def _site_position_warnings(model: Path, record: Mapping[str, object]) -> tuple[str, ...]:
+    """Sites AutoSol placed next to a symmetry copy rather than the model itself.
+
+    The search records each site's closest residue with crystal symmetry
+    applied; if the site as placed is clearly farther from the model, merging
+    its raw coordinates would put the ion away from the bases it binds.
+    """
+    atoms = []
+    try:
+        lines = model.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    for line in lines:
+        if line[0:6] in ("ATOM  ", "HETATM") and len(line) >= 54:
+            try:
+                atoms.append(tuple(float(line[a:b]) for a, b in ((30, 38), (38, 46), (46, 54))))
+            except ValueError:
+                continue
+    sites = record.get("sites")
+    if not atoms or not isinstance(sites, list):
+        return ()
+    warnings = []
+    for site in sites:
+        if not isinstance(site, Mapping):
+            continue
+        coordinates = site.get("coordinates")
+        nearest = site.get("nearest_residues")
+        if (
+            not isinstance(coordinates, list) or len(coordinates) != 3
+            or not isinstance(nearest, list) or not nearest
+            or not isinstance(nearest[0], Mapping)
+        ):
+            continue
+        try:
+            xyz = tuple(float(value) for value in coordinates)
+            with_symmetry = float(nearest[0]["distance"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        as_placed = min(math.dist(atom, xyz) for atom in atoms)
+        if as_placed > with_symmetry + 0.5:
+            closest = nearest[0]
+            warnings.append(
+                f"{site.get('element')} site {site.get('index')} is {as_placed:.1f} A from "
+                f"the model as placed but {with_symmetry:.1f} A from "
+                f"{closest.get('chain')}:{closest.get('residue_number')} in a symmetry "
+                "copy; move it next to the model before refining"
+            )
+    return tuple(warnings)
+
+
 def _metal_view(
-    anchor: Path, record: Mapping[str, object], label: str
+    anchor: Path, record: Mapping[str, object], label: str, output_directory: Path
 ) -> ViewProfile:
     """Phaser model + AutoSol metal sites over the Phaser map for one search."""
     inputs = record.get("inputs")
@@ -268,6 +329,11 @@ def _metal_view(
         (),
         f"Phaser solution with AutoSol metal sites ({label})",
         "Phaser MR map",
+        metal_merge=MetalMerge(
+            output_directory=output_directory,
+            merged_stem=f"{model.stem}-merged",
+            warnings=_site_position_warnings(model, record),
+        ),
     )
 
 
@@ -278,7 +344,7 @@ def _metal_run_profile(metal_run: Path, report: Mapping[str, object]) -> ViewPro
             f"This metal search did not find sites ({report.get('status')}); "
             "there is nothing to show"
         )
-    return _metal_view(metal_run, report, f"AutoSolMetal/{metal_run.name}")
+    return _metal_view(metal_run, report, f"AutoSolMetal/{metal_run.name}", metal_run)
 
 
 def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
@@ -309,7 +375,11 @@ def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
             "'nasolve autosol RUN --metal ELEMENT'"
         )
     attempt = legacy[-1]
-    return _metal_view(run, attempt, str(attempt.get("attempt")))
+    name = str(attempt.get("attempt"))
+    attempt_directory = run / "AutoSolMetal" / name
+    return _metal_view(
+        run, attempt, name, attempt_directory if attempt_directory.is_dir() else run
+    )
 
 
 def _prepared_model(run: Path, report: Mapping[str, object]) -> Path:
@@ -706,6 +776,128 @@ except Exception as exc:
     )
 
 
+def _metal_merge_script(model: Path, sites: Path, merge: MetalMerge) -> str:
+    """In-Coot command: merge the (possibly edited) sites into a copy of the model.
+
+    Adds a "NASolve" toolbar button with "Merge metal sites and save" and the
+    Python function ``nasolve_merge_metal_sites()``. The open molecules are
+    used as they are, so sites deleted or moved in Coot stay deleted or moved.
+    Occupancies above 1 (AutoSol's relative scale) are set to 1.0. Nothing is
+    overwritten: an existing name gets "-2", "-3", ... appended.
+    """
+    settings = {
+        "model": str(model),
+        "sites": str(sites),
+        "output_directory": str(merge.output_directory),
+        "stem": merge.merged_stem,
+        "warnings": list(merge.warnings),
+    }
+    return (
+        "\n\n# --- NASolve: merge metal sites into the starting model ---\n"
+        f"NASOLVE_MERGE = {json.dumps(settings)}\n"
+        '''
+
+def _nasolve_find_molecule(path):
+    target = os.path.realpath(path)
+    for imol in range(coot.graphics_n_molecules()):
+        if coot.is_valid_model_molecule(imol):
+            name = coot.molecule_name(imol) or ""
+            if os.path.realpath(name) == target:
+                return imol
+    return -1
+
+
+def _nasolve_merged_path():
+    directory = NASOLVE_MERGE["output_directory"]
+    stem = NASOLVE_MERGE["stem"]
+    candidate = os.path.join(directory, stem + ".pdb")
+    number = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, "%s-%d.pdb" % (stem, number))
+        number += 1
+    return candidate
+
+
+def _nasolve_cap_occupancies(imol):
+    import coot_utils
+    changes = []
+    notes = []
+    n_atoms = 0
+    for chain_id in coot_utils.chain_ids(imol):
+        for serial in range(coot.chain_n_residues(chain_id, imol)):
+            resno = coot.seqnum_from_serial_number(imol, chain_id, serial)
+            ins_code = coot.insertion_code_from_serial_number(imol, chain_id, serial)
+            for atom in coot.residue_info_py(imol, chain_id, resno, ins_code) or []:
+                n_atoms += 1
+                name, alt_conf = atom[0][0], atom[0][1]
+                occupancy = atom[1][0]
+                if occupancy > 1.0:
+                    changes.append([imol, chain_id, resno, ins_code, name, alt_conf, "occ", 1.0])
+                    notes.append("%s %s%s: occupancy %.2f set to 1.00"
+                                 % (name.strip(), chain_id, resno, occupancy))
+    if changes:
+        coot.set_atom_attributes_py(changes)
+    return n_atoms, notes
+
+
+def nasolve_merge_metal_sites(*_ignored):
+    """Merge the open metal sites into a copy of the starting model and save it."""
+    imol_model = _nasolve_find_molecule(NASOLVE_MERGE["model"])
+    imol_sites = _nasolve_find_molecule(NASOLVE_MERGE["sites"])
+    if imol_model < 0 or imol_sites < 0:
+        message = ("NASolve: the starting model or overall_best_ha_pdb.pdb is no longer "
+                   "open in Coot, so nothing was merged.")
+        coot.info_dialog(message)
+        print("NASOLVE_MERGED_MODEL " + json.dumps({"status": "missing-molecule"}), flush=True)
+        return None
+    sites_copy = coot.copy_molecule(imol_sites)
+    n_sites, notes = _nasolve_cap_occupancies(sites_copy)
+    merged = coot.copy_molecule(imol_model)
+    coot.merge_molecules_py([sites_copy], merged)
+    coot.close_molecule(sites_copy)
+    output = _nasolve_merged_path()
+    coot.write_pdb_file(merged, output)
+    if not os.path.isfile(output):
+        coot.info_dialog("NASolve: Coot did not write " + output)
+        print("NASOLVE_MERGED_MODEL " + json.dumps({"status": "write-failed", "path": output}),
+              flush=True)
+        return None
+    coot.set_molecule_name(merged, output)
+    lines = ["NASolve saved the merged model:", output,
+             "%d metal-site atom(s) merged into a copy of the starting model." % n_sites]
+    lines += notes
+    if NASOLVE_MERGE["warnings"]:
+        lines.append("Check before refining:")
+        lines += NASOLVE_MERGE["warnings"]
+    coot.info_dialog("\\n".join(lines))
+    print("NASOLVE_MERGED_MODEL " + json.dumps({
+        "status": "saved", "path": output, "sites": n_sites, "occupancy_changes": notes,
+        "warnings": NASOLVE_MERGE["warnings"]}), flush=True)
+    return output
+
+
+def _nasolve_add_merge_button():
+    try:
+        import coot_gui
+        menu = coot_gui.attach_module_menu_button("NASolve")
+        coot_gui.add_simple_action_to_menu(
+            menu, "Merge metal sites and save", "nasolve_merge_metal_sites",
+            lambda _action, _parameter: nasolve_merge_metal_sites())
+        print("NASOLVE_MERGE_READY toolbar", flush=True)
+    except Exception as exc:
+        print("NASOLVE_MERGE_READY scripting-only " + str(exc), flush=True)
+    return False
+
+
+try:
+    from gi.repository import GLib
+    GLib.timeout_add(500, _nasolve_add_merge_button)
+except Exception:
+    _nasolve_add_merge_button()
+'''
+    )
+
+
 def launch_coot_view(
     run_directory: Path,
     coot_executable: Path,
@@ -750,8 +942,14 @@ def launch_coot_view(
         command.extend(["--dictionary", str(dictionary)])
     command.extend(["--auto", str(profile.map_path)])
     anomalous_paths = profile.anomalous_map_paths or (profile.map_path,)
+    startup_script = _anomalous_map_script(anomalous_paths)
+    if profile.metal_merge is not None and profile.extra_model_paths:
+        # One startup script: the merge command is appended to the map loader.
+        startup_script += _metal_merge_script(
+            profile.model_path, profile.extra_model_paths[0], profile.metal_merge
+        )
     try:
-        map_script.write_text(_anomalous_map_script(anomalous_paths), encoding="utf-8")
+        map_script.write_text(startup_script, encoding="utf-8")
     except OSError as exc:
         raise CootViewError(f"Could not write Coot map startup script: {exc}") from exc
     command.extend(["--script", str(map_script)])
@@ -792,6 +990,15 @@ def launch_coot_view(
                     "script": str(map_script),
                     "log_marker": "NASOLVE_ANOMALOUS_MAP",
                 },
+                "metal_merge": (
+                    {
+                        "output_directory": str(profile.metal_merge.output_directory),
+                        "merged_name": profile.metal_merge.merged_stem + ".pdb",
+                        "warnings": list(profile.metal_merge.warnings),
+                        "log_marker": "NASOLVE_MERGED_MODEL",
+                    }
+                    if profile.metal_merge is not None else None
+                ),
                 "command": command,
             },
             indent=2,
@@ -812,12 +1019,14 @@ def launch_coot_view(
         source=profile.source,
         map_source=profile.map_source,
         checkpoint_id=profile.checkpoint_id,
+        metal_merge=profile.metal_merge,
     )
 
 
 __all__ = [
     "CootViewError",
     "CootViewResult",
+    "MetalMerge",
     "ViewProfile",
     "find_last_run",
     "launch_coot_view",

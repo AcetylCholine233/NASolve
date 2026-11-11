@@ -40,6 +40,21 @@ entries are reconstructed from repository history.
   `AutoSolMetal/run_NNN` as a dataset-level run.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
+- The metal Coot view (after `nasolve autosol --metal` finds sites, or
+  `nasolve show DATASET/AutoSolMetal/run_NNN`) adds a **NASolve** toolbar
+  button, "Merge metal sites and save", and the Coot Python command
+  `nasolve_merge_metal_sites()`. It merges the open (possibly edited)
+  `overall_best_ha_pdb.pdb` molecule into a copy of the starting Phaser model
+  and writes `<model>-merged.pdb` (for example `mr_solution-merged.pdb`) in the
+  metal-search folder, adding `-2`, `-3`, ... rather than overwriting.
+  Occupancies above 1 are set to 1.00 and listed; sites whose recorded
+  symmetry-aware nearest residue is clearly closer than the site as placed are
+  flagged as belonging next to a symmetry copy. The open molecules are not
+  changed. `launch.json` records `metal_merge`, and the Coot log records
+  `NASOLVE_MERGED_MODEL`. The merged model is not entered into any run record
+  or used automatically. Coot calls follow the Coot 1.3.3 Python API bundled
+  with Phenix 2.2.1-6174; tested against a simulated Coot (not yet in a live
+  Coot session).
 - AutoMR now always tells Phaser which data to use: `-F` (merged
   amplitudes, the default) or `-I` (merged intensities, as the Phenix GUI
   uses); `--phaser-data F|I` is the long form. Or set `phaser_data = F|I` in

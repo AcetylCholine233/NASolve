@@ -620,6 +620,19 @@ def _check(explicit: str | None) -> int:
     return 0 if na_version != "not installed" else 1
 
 
+def _print_metal_merge_hint(merge) -> None:
+    if merge is None:
+        return
+    print(
+        "To keep the sites: in Coot click the NASolve toolbar button -> "
+        "'Merge metal sites and save' (or run nasolve_merge_metal_sites() in "
+        "Calculate > Scripting > Python)."
+    )
+    print(f"Merged model will be saved as: {merge.output_directory / (merge.merged_stem + '.pdb')}")
+    for warning in merge.warnings:
+        print(f"Warning: {warning}")
+
+
 def _open_phaser_view(args: argparse.Namespace, phaser) -> None:
     """Open Phaser's model and map in Coot; a Coot problem never fails the run."""
     later = f"Open in Coot with: nasolve show {phaser.run_directory} --stage automr"
@@ -884,6 +897,7 @@ def _autosol_metal(args: argparse.Namespace) -> int:
         return 0
     print(f"Opened Coot (PID {view.pid}) with the Phaser model, AutoSol sites and Phaser map")
     print(f"Coot log: {view.log_path}")
+    _print_metal_merge_hint(view.metal_merge)
     return 0
 
 
@@ -1390,6 +1404,7 @@ def _show(args: argparse.Namespace) -> int:
     print(f"Coot working directory: {result.working_directory}")
     print(f"Coot log: {result.log_path}")
     print(f"PID: {result.pid}")
+    _print_metal_merge_hint(result.metal_merge)
     return 0
 
 

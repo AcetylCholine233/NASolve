@@ -145,7 +145,15 @@ Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
 later with `./nasolve show dataset/AutoSolMetal/run_001`, or the latest search
 that found sites with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to
 skip).
-Finding no site is a normal result and usually means the ion is not
+To keep the sites, use the **NASolve** button that NASolve adds to Coot's
+toolbar in this view and choose **Merge metal sites and save** (or type
+`nasolve_merge_metal_sites()` in Calculate > Scripting > Python). It merges the
+sites as they currently are in Coot (delete or move unwanted ones first) into
+a copy of the Phaser model and saves `mr_solution-merged.pdb` in the metal
+search folder (`-2`, `-3`, ... if that name exists; nothing is overwritten).
+AutoSol's relative occupancies above 1 are set to 1.00, and a site that AutoSol
+placed next to a symmetry copy instead of the model is flagged before you
+refine. Finding no site is a normal result and usually means the ion is not
 incorporated. Sites are never added to the model automatically, and the run's
 stage and status do not change, so continue with PostMR either way:
 

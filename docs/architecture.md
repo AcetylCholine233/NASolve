@@ -424,7 +424,11 @@ for inspection only and never enter the model or AutoRefine automatically.
 The `metal` Coot view opens the Phaser model and the HA model over the Phaser
 MTZ in `CootGUI/metal/` of the directory that was opened (the search directory
 after `nasolve autosol --metal`), refusing references that fail their
-checksums. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
+checksums. Its startup script also adds a NASolve toolbar action (and
+`nasolve_merge_metal_sites()`) that merges the open HA molecule into a copy of
+the Phaser model, caps occupancies at 1.00, and writes a new
+`<model>-merged[-N].pdb` in the metal-search directory without overwriting.
+That file is a user-curated output and is not referenced by any report. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
 tests use a simulated AutoSol that accepts only the full PHIL paths above.
 
 ## AutoRefine contract
