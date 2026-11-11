@@ -44,6 +44,9 @@ NASolve documentation is organized by role, not chronology.
   [`construct-registration-live-checks.md`](construct-registration-live-checks.md)
   keeps the minimum human/real-workflow validation queue, including the completed
   renamed-real-W Scout v2 shadow validation and the remaining live-wiring gates.
+- [`autofdp.md`](autofdp.md) — `nasolve autofdp`, occupancy and identity
+  of metal sites from f'' refinement (specified, not implemented; open
+  questions for the lab listed).
 - [`campaign-model-roadmap.md`](campaign-model-roadmap.md) — forward-looking
   model/sequence/processing architecture and the current Campaign Doctor
   implementation boundary.

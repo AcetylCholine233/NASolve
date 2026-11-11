@@ -36,6 +36,15 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autofdp` is specified but not implemented. It will measure metal
+  occupancy by f'' refinement, following the mmDNA supplements (Adv. Mater.
+  2023, JACS 2023, Small 2025, Sci. Adv. 2026): coordinates, B and occupancy
+  held, f' fixed at theory for the MTZ-header wavelength, f'' refined alone, and
+  occupancy adjusted until f'' is within 1 e- of theory, with an identity check,
+  a B-confirmation round and an optional final all-parameter round. The
+  contract, defaults and open questions are in `docs/autofdp.md`. For now the
+  command only prints that it is not implemented and exits 1, writing nothing;
+  `nasolve.autofdp` holds documented stubs.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals

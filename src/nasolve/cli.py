@@ -254,6 +254,80 @@ def build_parser() -> argparse.ArgumentParser:
         "--cycles", type=int, default=5,
         help="number of refinement macrocycles (default: 5)",
     )
+    autofdp = subparsers.add_parser(
+        "autofdp",
+        help="measure metal occupancy by f'' refinement (specified, not implemented yet)",
+        description=(
+            "Hold coordinates, B and occupancy, fix f' at theory for the collection "
+            "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
+            "within the tolerance of theory. NOT IMPLEMENTED YET: prints a message "
+            "and exits 1 without running or writing anything. See docs/autofdp.md."
+        ),
+    )
+    autofdp.add_argument(
+        "run", nargs="?", type=Path,
+        help="AutoMR run with a completed PostMR (default: active workspace run)",
+    )
+    autofdp.add_argument(
+        "--from", dest="from_checkpoint",
+        help="checkpoint ID or bookmark to start from (default: current)",
+    )
+    autofdp.add_argument(
+        "--site", action="append", default=[], metavar="SITE",
+        help="site to calibrate, e.g. B:101; repeatable (default: every anomalous scatterer)",
+    )
+    autofdp.add_argument(
+        "--element", action="append", default=[], metavar="SITE=ELEMENT",
+        help="treat a site as another element, e.g. B:101=HG (renamed in a new checkpoint)",
+    )
+    autofdp.add_argument(
+        "--candidates", metavar="ELEMENT[,ELEMENT...]",
+        help="elements compared in the identity check (default: AG,HG plus the model's)",
+    )
+    autofdp.add_argument(
+        "--theory", action="append", default=[], metavar="ELEMENT=FDP",
+        help="override the theoretical f'' (default: cctbx Henke at the MTZ wavelength)",
+    )
+    autofdp.add_argument(
+        "--tolerance", type=float, default=1.0, metavar="E",
+        help="converged when |refined f'' - theory| <= E electrons (default: 1.0)",
+    )
+    autofdp.add_argument(
+        "--max-iterations", type=int, default=8, metavar="N",
+        help="f'' rounds before review (default: 8)",
+    )
+    autofdp.add_argument(
+        "--cycles", type=int, default=3, metavar="N",
+        help="phenix.refine macrocycles per f'' round (default: 3)",
+    )
+    autofdp.add_argument(
+        "--b-start", default="surrounding", metavar="surrounding|model|VALUE",
+        help="site B at the start: mean of coordinating nucleotides (default), the model's, or a number",
+    )
+    autofdp.add_argument(
+        "--b-step", type=float, default=20.0, metavar="A2",
+        help="B change when the difference map calls for B instead of occupancy (default: 20)",
+    )
+    autofdp.add_argument(
+        "--occupancy-floor", type=float, default=0.05, metavar="Q",
+        help="below this occupancy the site goes to identity review (default: 0.05)",
+    )
+    autofdp.add_argument(
+        "--map-sigma", type=float, default=3.0, metavar="S",
+        help="mFo-DFc peak or hole at the site that counts as significant (default: 3.0)",
+    )
+    autofdp.add_argument(
+        "--no-confirm-b", action="store_true",
+        help="skip the round that refines only the sites' B at fixed occupancy and f''",
+    )
+    autofdp.add_argument(
+        "--final", action="store_true",
+        help="after convergence, refine XYZ, B, occupancy and f'' together (f' stays fixed)",
+    )
+    autofdp.add_argument(
+        "--plan", action="store_true",
+        help="run the preflight and print the plan without running phenix.refine",
+    )
     doctor = subparsers.add_parser(
         "refine-doctor",
         aliases=["refine_doctor"],
@@ -1442,6 +1516,14 @@ def _show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _autofdp(args: argparse.Namespace) -> int:
+    """Specified, not implemented: report that and change nothing."""
+    from .autofdp import NOT_IMPLEMENTED_MESSAGE
+
+    print(f"AutoFDP: {NOT_IMPLEMENTED_MESSAGE}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "configure" and args.configure_target == "phenix":
@@ -1468,6 +1550,8 @@ def main(argv: list[str] | None = None) -> int:
         return _autorefine(args)
     if args.command in {"refine-doctor", "refine_doctor"}:
         return _refine_doctor(args)
+    if args.command == "autofdp":
+        return _autofdp(args)
     if args.command == "checkpoints":
         return _checkpoints(args)
     if args.command == "show":
