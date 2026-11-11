@@ -1381,11 +1381,53 @@ def prepare_postmr(
         family = load_frozen_sequence_family(report, run)
     except SequenceReferenceError as exc:
         raise PostMRPreparationError(str(exc)) from exc
-    # Validate opt-in frozen targets and mutation routes before creating PostMR.
-    family_actions = (
+    # Plan the mutations and check every dictionary and required program
+    # before PostMR/ exists, so a missing input never leaves a half-made
+    # PostMR folder that blocks the next attempt.
+    actions = (
         build_mutation_plan(report, source_model, run_directory=run)
-        if family is not None else None
+        if family is not None else build_mutation_plan(report, source_model)
     )
+    target_ligand_codes = sorted({
+        action.after for action in actions if action.method == "coot-parent-overlap"
+    })
+    ligand_specs = {code: ligand_definition(code) for code in target_ligand_codes}
+    ligand_sources: dict[str, Path] = {}
+    for code in target_ligand_codes:
+        try:
+            dictionary = ligand_dictionary(code, data_root).resolve()
+            validate_ligand_dictionary(code, dictionary)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+        ligand_sources[code] = dictionary
+    # Curated residues already in the model keep their dictionaries too.
+    replaced_sites = {action.site for action in actions if action.method != "none"}
+    for line in _coordinate_records(source_model):
+        identity = _record_identity(line)
+        if (
+            identity is None
+            or identity[2] not in CURATED_LIGANDS
+            or f"{identity[0]}:{identity[1]}" in replaced_sites
+        ):
+            continue
+        try:
+            validate_ligand_dictionary(
+                identity[2], ligand_dictionary(identity[2], data_root).resolve()
+            )
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+
+    coot_actions = tuple(
+        action
+        for action in actions
+        if action.method in {"coot-mutate-base", "coot-parent-overlap"}
+    )
+    if coot_actions and coot_executable is None:
+        sites = ", ".join(action.site for action in coot_actions)
+        raise PostMRPreparationError(
+            f"Coot is required for supported mutation site(s) {sites}"
+        )
+
     postmr = run / "PostMR"
     try:
         postmr.mkdir()
@@ -1402,28 +1444,6 @@ def prepare_postmr(
 
     original = model_dir / "mr_solution.pdb"
     shutil.copyfile(source_model, original)
-    actions = (
-        family_actions if family_actions is not None
-        else build_mutation_plan(report, original)
-    )
-    target_ligand_codes = sorted({
-        action.after for action in actions if action.method == "coot-parent-overlap"
-    })
-    ligand_specs = {code: ligand_definition(code) for code in target_ligand_codes}
-    ligand_sources: dict[str, Path] = {}
-    for code in target_ligand_codes:
-        try:
-            dictionary = ligand_dictionary(code, data_root).resolve()
-            validate_ligand_dictionary(code, dictionary)
-        except (KeyError, FileNotFoundError, ValueError) as exc:
-            raise PostMRPreparationError(str(exc)) from exc
-        ligand_sources[code] = dictionary
-
-    coot_actions = tuple(
-        action
-        for action in actions
-        if action.method in {"coot-mutate-base", "coot-parent-overlap"}
-    )
     overlap_actions = tuple(
         action for action in coot_actions if action.method == "coot-parent-overlap"
     )

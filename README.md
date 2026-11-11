@@ -929,7 +929,7 @@ After a run reaches `MR_SUCCESS`, prepare it for refinement with:
 For the W/5W6W frame, PostMR uses the fixed standard sites `A:12` and `B:4`.
 It applies ordinary DNA/RNA base changes through headless Coot. For a supported
 modified nucleotide, Coot first mutates the site to its clean canonical parent
-(`DT` for `DE`/`DF`/`5IU`, `DA` for `1AP`, `DG` for `S6G`, or `DC` for
+(`DT` for `DE`/`DF`/`5IU`/`DU`, `DA` for `1AP`, `DG` for `S6G`, or `DC` for
 `C38`), builds the component from its dictionary, overlaps it, and
 replaces the parent. NASolve then restores the
 coordinates, occupancies, and B factors of every atom shared with the parent.

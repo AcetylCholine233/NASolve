@@ -260,7 +260,9 @@ Problematic Phenix components are explicit curated-library entries. User token
 `E` maps to the laboratory PDB-compatible `DE`, not official CCD `8RO`, whose
 topology describes a different sulfur-ring compound. `F` maps to `DF`, with
 official deposition identity `A1AAZ`; `D` maps to official `1AP`; and `Q` maps
-to official `S6G` with canonical parent `DG`. The registry
+to official `S6G` with canonical parent `DG`. DNA `U` maps to official `DU`
+(2'-deoxyuridine), whose packaged CIF is the unchanged wwPDB definition from
+Phenix 2.2.1-6174 and whose canonical parent is `DT`. The registry
 defines canonical parents and required/forbidden sulfur bonds, which are
 validated before Coot or ReadySet runs. ReadySet receives the curated CIF,
 executes with `actions.hydrogens=False`, and is run with `cwd` set to its own

@@ -715,6 +715,79 @@ class PostMRTests(unittest.TestCase):
             self.assertIn("ligand_imol, 'A', 1", script)
             self.assertIn("delete_hydrogen_atoms", script)
 
+    def test_du_target_uses_the_packaged_ccd_dictionary_with_dt_parent(self):
+        # Regression: C:U (dU at B:4) stopped with "No local CCD dictionary for DU".
+        packaged = Path(__file__).parents[1] / "src" / "nasolve" / "data" / "ligands" / "DU.cif"
+        validate_curated_dictionary("DU", packaged)
+        self.assertIn("_chem_comp.type                                  \"DNA LINKING\"",
+                      packaged.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.pdb"
+            model.write_text(postmr_model_text("DT", "DT"))
+            run = root / "run"
+            report = json.loads(make_postmr_report(
+                run, model, first="DC", second="DU", requested="C:U").read_text())
+            actions = build_mutation_plan(report, model)
+            self.assertEqual(
+                [(a.site, a.after, a.method, a.parent_code) for a in actions],
+                [("A:12", "DC", "coot-mutate-base", None),
+                 ("B:4", "DU", "coot-parent-overlap", "DT")],
+            )
+            script = _coot_script(model, root / "raw.pdb", actions, {"DU": packaged},
+                                  {"B:4": root / "B4-DT.pdb"})
+            # B:4 is already the parent DT, so Coot only builds and overlays DU.
+            self.assertNotIn("mutate_base(imol, 'B', 4, '', 'DT')", script)
+            self.assertIn("get_monomer_from_dictionary('DU', 0)", script)
+
+    def test_du_keeps_every_dt_coordinate_and_drops_the_methyl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent, raw, output = root / "parent.pdb", root / "raw.pdb", root / "out.pdb"
+            ring = ("N1", "C2", "O2", "N3", "C4", "O4", "C5", "C6")
+            parent.write_text("".join(
+                pdb_record("ATOM", i, atom, "DT", "B", 4,
+                           element="P" if atom == "P" else atom[0], x=float(i), y=1.0, z=2.0)
+                for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring + ("C7",), 1)
+            ) + "END\n")
+            raw.write_text("".join(
+                pdb_record("HETATM", i, atom, "DU", "B", 4,
+                           element="P" if atom == "P" else atom[0], x=float(i) + 50.0)
+                for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring, 1)
+            ) + "END\n")
+            action = MutationAction("B:4", "DT", "DU", "coot-parent-overlap",
+                                    parent_code="DT", deposition_code="DU")
+            restoration = _restore_shared_parent_coordinates(raw, output, (action,),
+                                                            {"B:4": parent})
+            atoms = {line[12:16].strip(): float(line[30:38])
+                     for line in output.read_text().splitlines() if line.startswith("HETATM")}
+            self.assertNotIn("C7", atoms)
+            self.assertEqual(restoration["B:4"]["count"], len(atoms))
+            for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring, 1):
+                self.assertEqual(atoms[atom], float(i))
+
+    def test_missing_dictionary_or_coot_never_leaves_a_postmr_folder(self):
+        # Regression: the dictionary was looked up after PostMR/ was created,
+        # so the failure left a folder that blocked every later attempt.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.pdb"
+            model.write_text(postmr_model_text("DT", "DT"))
+            run = root / "run"
+            make_postmr_report(run, model, first="DT", second="DU", requested="T:U")
+            data_root = make_data_root(root)  # has no DU.cif
+            with self.assertRaisesRegex(PostMRPreparationError, "No local CCD dictionary for DU"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               coot_executable=root / "coot",
+                               narestraints_builder=lambda *a: None)
+            self.assertFalse((run / "PostMR").exists())
+            shutil.copyfile(Path(__file__).parents[1] / "src" / "nasolve" / "data"
+                            / "ligands" / "DU.cif", data_root / "ligands" / "DU.cif")
+            with self.assertRaisesRegex(PostMRPreparationError, "Coot is required"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               narestraints_builder=lambda *a: None)
+            self.assertFalse((run / "PostMR").exists())
+
     def test_shared_parent_coordinates_are_restored(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -40,6 +40,20 @@ entries are reconstructed from repository history.
   `AutoSolMetal/run_NNN` as a dataset-level run.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
+- dU (`DU`, the DNA `U` token, for example `--pair C:U`) is now a curated
+  PostMR residue. `data/ligands/DU.cif` is the official wwPDB CCD definition
+  copied unchanged from Phenix 2.2.1-6174
+  (`chem_data/chemical_components/d/data_DU.cif`, DNA LINKING, wwPDB
+  modified date 2011-06-04). PostMR builds DU on its parent DT: Coot overlays
+  DU on the DT already in the model and every DU atom takes the DT
+  coordinates, so the result is the original dT without its methyl C7.
+  ReadySet now receives DU.cif instead of generating a non-polymer DU
+  dictionary. Previously PostMR stopped with "No local CCD dictionary for DU".
+- PostMR now plans its mutations and checks every needed ligand dictionary
+  (targets and curated residues already in the model) and the Coot
+  executable before creating `PostMR/`. Previously a missing dictionary or
+  Coot left a half-made `PostMR/` folder that made every later attempt fail
+  with "refusing to overwrite".
 - The metal Coot view (after `nasolve autosol --metal` finds sites, or
   `nasolve show DATASET/AutoSolMetal/run_NNN`) adds a **NASolve** toolbar
   button, "Merge metal sites and save", and the Coot Python command

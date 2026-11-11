@@ -103,6 +103,22 @@ CURATED_LIGANDS: dict[str, CuratedLigand] = {
         forbidden_bonds=(("C4", "I"), ("C6", "I")),
         ring_substituents=(RingSubstituent("I", "C5", ("C4", "C6")),),
     ),
+    "DU": CuratedLigand(
+        code="DU",
+        dictionary_filename="DU.cif",
+        accepted_model_labels=("DU",),
+        narestraints_label="DU",
+        description=(
+            "2'-deoxyuridine-5'-monophosphate (official wwPDB CCD DU, as bundled "
+            "with Phenix 2.2.1-6174)"
+        ),
+        # dU is dT without the 5-methyl: every DU atom is a DT atom, so Coot
+        # overlays DU on DT and all coordinates come back from the parent.
+        parent_code="DT",
+        deposition_code="DU",
+        required_bonds=(("C1'", "N1"), ("C2", "O2"), ("C4", "O4"), ("C5", "C6"), ("P", "O5'")),
+        forbidden_bonds=(("C5", "C7"),),
+    ),
     "5IU": CuratedLigand(
         code="5IU",
         dictionary_filename="5IU.cif",
