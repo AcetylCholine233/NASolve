@@ -349,8 +349,8 @@ checksummed copy under `Model/` and AutoSol copies that run-local snapshot into
 its input. Legacy runs recover the exact declared frame directory without
 requiring the old pair-model filename to remain present. For a nonstandard
 model, complete sequences recorded in the frozen run may be written to the same
-input instead. The wavelength is read from `summary.html`, preferring the
-high-precision assignment and rejecting inconsistent repeated values.
+input instead. The wavelength is read from the MTZ header (the dataset that
+holds reflection data); a present `summary.html` must agree within 1e-4 A.
 `phenix.mtz.dump` must confirm a complete anomalous intensity or amplitude
 quartet before execution.
 
@@ -587,8 +587,13 @@ at its first numerical pass, technical failure, or trial budget. Both
 
 Source anomalous benchmarks retain their wavelength, occupancy, B factor and
 checkpoint. For selected anomalous observations, default Doctor trials use
-explicit Henke f'/f'' values calculated with Phenix/CCTBX at the recorded
-AutoSol wavelength. The sequence tries ML and eligible MLHL with those values
+explicit Henke f'/f'' values calculated with Phenix/CCTBX at the wavelength
+in the MTZ header of the refinement observations (the dataset that holds
+reflection data, read from the same `phenix.mtz.dump` output that selects the
+labels). A recorded AutoSol wavelength is the fallback when the header has
+none; a disagreement above 1e-4 A is recorded and the MTZ value is used. The
+same wavelength gives the calculated f'' in every AutoRefine round's anomalous
+diagnostics. The sequence tries ML and eligible MLHL with those values
 fixed, then f''-only refinement, coordinate-only, and B-only fixed-scattering
 fallbacks. Missing wavelength or failed calculation skips these recipes for
 inspection; zero is not substituted. A successful f''-only execution can supply

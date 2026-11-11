@@ -1,5 +1,6 @@
 import json
 import shutil
+import shlex
 import stat
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ from nasolve.autorefine import (
 from nasolve.checkpoints import initialize_registry, list_checkpoints
 from nasolve.model_assessment import file_sha256
 
-from .helpers import pdb_record
+from .helpers import mtz_dump_columns_text, pdb_record
 
 
 PHENIX_120 = "1.20.1-4487"
@@ -100,18 +101,27 @@ def make_refine_run(root: Path, *, autosol: bool = True) -> Path:
     return run
 
 
-def make_mtz_dump(root: Path, *, anomalous: bool = True) -> Path:
+def make_mtz_dump(
+    root: Path, *, anomalous: bool = True, wavelength: float | None = None,
+) -> Path:
+    """Fake phenix.mtz.dump; with ``wavelength`` it also prints the dataset
+    blocks (iotbx summary format) that carry the MTZ header wavelength."""
     executable = root / "phenix.mtz.dump"
     anomalous_lines = (
         "printf '%s\\n' 'F(+) 1 G' 'SIGF(+) 1 L' 'F(-) 1 G' 'SIGF(-) 1 L'\n"
         if anomalous else ""
     )
+    header_lines = ""
+    if wavelength is not None:
+        header = mtz_dump_columns_text(wavelength=wavelength)
+        header_lines = "".join(f"     printf '%s\\n' {shlex.quote(line)}\n" for line in header.splitlines())
     executable.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  *overall_best*) printf '%s\\n' 'HLAM 1 A' 'HLBM 1 A' 'HLCM 1 A' 'HLDM 1 A';;\n"
         "  *) printf '%s\\n' 'IMEAN 1 J' 'SIGIMEAN 1 Q' 'FreeR_flag 1 I';\n"
         f"     {anomalous_lines}"
+        f"{header_lines}"
         "     printf '%s\\n' 'Resolution range: 20.0 5.27';\n"
         "     ;;\n"
         "esac\n"

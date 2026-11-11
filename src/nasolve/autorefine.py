@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -43,6 +43,11 @@ class ReflectionPlan:
     anomalous_fallback: bool
     fallback_is_error: bool
     resolution_limit: float | None
+    # X-ray wavelength for calculated (Henke) f'/f''. The MTZ header of the
+    # observations is the authority; a recorded AutoSol wavelength is used only
+    # when the header has no usable one.
+    wavelength: float | None = None
+    wavelength_source: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -263,6 +268,71 @@ def with_postmr_metal_sites(report: dict[str, object], run: Path) -> dict[str, o
     return updated
 
 
+MTZ_WAVELENGTH_METHOD = "MTZ header (phenix.mtz.dump)"
+AUTOSOL_WAVELENGTH_METHOD = "autosol.wavelength"
+_WAVELENGTH_AGREEMENT = 1e-4
+
+
+def _usable_wavelength(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _autosol_wavelength(report: Mapping[str, object]) -> float | None:
+    autosol = report.get("autosol")
+    return _usable_wavelength(autosol.get("wavelength")) if isinstance(autosol, Mapping) else None
+
+
+def resolve_refinement_wavelength(
+    report: Mapping[str, object],
+    mtz_dump_output: str,
+) -> tuple[float | None, dict[str, object]]:
+    """Return the wavelength for scattering calculations and where it came from.
+
+    The wavelength recorded in the observations' MTZ header is used whenever it
+    is readable, so a metal-only structure with no AutoSol run still gets
+    calculated f'/f''. The AutoSol record is a fallback for MTZ files without a
+    usable header wavelength, and a cross-check otherwise.
+    """
+    from .reflection_data import ReflectionDataError, mtz_wavelength
+
+    autosol = _autosol_wavelength(report)
+    source: dict[str, object] = {
+        "method": None,
+        "mtz_dataset": None,
+        "mtz_error": None,
+        "autosol_wavelength": autosol,
+        "warnings": [],
+    }
+    try:
+        value, dataset = mtz_wavelength(mtz_dump_output)
+    except ReflectionDataError as exc:
+        source["mtz_error"] = str(exc)
+        if autosol is None:
+            return None, source
+        source["method"] = AUTOSOL_WAVELENGTH_METHOD
+        return autosol, source
+    source["method"] = MTZ_WAVELENGTH_METHOD
+    source["mtz_dataset"] = dataset
+    if autosol is not None and abs(autosol - value) > _WAVELENGTH_AGREEMENT:
+        source["warnings"].append(  # type: ignore[union-attr]
+            f"AutoSol recorded wavelength {autosol:g} A but the MTZ header says "
+            f"{value:g} A; the MTZ header value is used"
+        )
+    return value, source
+
+
+def _missing_wavelength_message(source: Mapping[str, object] | None) -> str:
+    detail = source.get("mtz_error") if isinstance(source, Mapping) else None
+    message = (
+        "No usable wavelength for the scattering calculation: the MTZ header has none"
+        " and no AutoSol wavelength is recorded"
+    )
+    return f"{message} ({detail})" if detail else message
+
+
 def build_reflection_plan(
     report: Mapping[str, object],
     observations: Path,
@@ -309,6 +379,7 @@ def build_reflection_plan(
                 f"Approved phase file has no complete Hendrickson-Lattman quartet: {phase_file}"
             )
         phases = discovered
+    wavelength, wavelength_source = resolve_refinement_wavelength(report, dump)
     return ReflectionPlan(
         observation_labels=selected,
         free_r_label=free_r,
@@ -319,6 +390,8 @@ def build_reflection_plan(
         anomalous_fallback=fallback,
         fallback_is_error=fallback and approved_autosol,
         resolution_limit=_resolution_limit(dump),
+        wavelength=wavelength,
+        wavelength_source=wavelength_source,
     )
 
 
@@ -573,15 +646,24 @@ def calculated_anomalous_groups(
     report: Mapping[str, object],
     refine_executable: Path,
     environment: Mapping[str, str] | None,
+    plan: ReflectionPlan | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Obtain explicit Henke values using the recorded AutoSol wavelength."""
-    autosol = report.get("autosol")
-    wavelength = autosol.get("wavelength") if isinstance(autosol, Mapping) else None
-    if (
-        isinstance(wavelength, bool) or not isinstance(wavelength, (int, float))
-        or not math.isfinite(wavelength) or wavelength <= 0
-    ):
-        raise AutoRefineError("No finite positive AutoSol wavelength is recorded for scattering calculation")
+    """Obtain explicit Henke values at the data wavelength.
+
+    With a reflection plan, its wavelength (MTZ header first, AutoSol record as
+    fallback) is used; without one, only the recorded AutoSol wavelength is
+    available.
+    """
+    if plan is not None:
+        wavelength = _usable_wavelength(plan.wavelength)
+        wavelength_method = plan.wavelength_source.get("method")
+        if wavelength is None:
+            raise AutoRefineError(_missing_wavelength_message(plan.wavelength_source))
+    else:
+        wavelength = _autosol_wavelength(report)
+        wavelength_method = AUTOSOL_WAVELENGTH_METHOD
+        if wavelength is None:
+            raise AutoRefineError(_missing_wavelength_message(None))
     selections = anomalous_selections(report)
     elements = {}
     for candidate, selection in zip(_anomalous_candidates(report), selections):
@@ -625,7 +707,7 @@ def calculated_anomalous_groups(
             result[selection] = {
                 "f_prime": pair[0], "f_double_prime": pair[1], "element": element,
                 "wavelength": wavelength, "source": "cctbx-henke",
-                "wavelength_source": "autosol.wavelength",
+                "wavelength_source": wavelength_method,
             }
         return result
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
@@ -673,13 +755,17 @@ def anomalous_scatterer_diagnostics(
     *,
     anomalous_mode: str = "refine",
     anomalous_groups: Mapping[str, Mapping[str, object]] | None = None,
+    plan: ReflectionPlan | None = None,
 ) -> list[dict[str, object]]:
     """Compare refined anomalous strength with wavelength-calculated values."""
     if model_path is None or not model_path.is_file():
         return []
-    autosol = report.get("autosol")
-    wavelength_value = autosol.get("wavelength") if isinstance(autosol, Mapping) else None
-    wavelength = float(wavelength_value) if isinstance(wavelength_value, (int, float)) else None
+    if plan is not None:
+        wavelength = _usable_wavelength(plan.wavelength)
+        wavelength_method = plan.wavelength_source.get("method") if wavelength is not None else None
+    else:
+        wavelength = _autosol_wavelength(report)
+        wavelength_method = AUTOSOL_WAVELENGTH_METHOD if wavelength is not None else None
     refined_values = _final_anomalous_values(log_text)
     final_primes = {match.group(1): float(match.group(2)) for match in _ANOMALOUS_GROUP.finditer(log_text)}
     lines = model_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -733,6 +819,7 @@ def anomalous_scatterer_diagnostics(
             "atom_name": atom_name,
             "element": element,
             "wavelength": wavelength,
+            "wavelength_source": wavelength_method,
             "resolution_limit": resolution_limit,
             "refined_f_double_prime": refined,
             "refined_f_prime": final_prime if anomalous_mode == "refine" else None,
@@ -1886,6 +1973,7 @@ def execute_autorefine(
         plan.resolution_limit,
         anomalous_mode=anomalous_mode,
         anomalous_groups=anomalous_groups,
+        plan=plan,
     ) if plan.anomalous else []
     _write_metrics_tsv(round_directory / "metrics.tsv", statistics)
     compatibility: dict[str, object] = {"validated": False}
@@ -2097,6 +2185,8 @@ def execute_autorefine(
             "free_r_test_value": plan.free_r_test_value,
             "phase_file": str(phase_file) if phase_file else None,
             "phase_labels": list(plan.phase_labels),
+            "wavelength": plan.wavelength,
+            "wavelength_source": json.loads(json.dumps(plan.wavelength_source)),
             "restraints": [str(path) for path in restraints],
             "extra_restraints": [
                 str(path) for path in resolved_extra_restraints
@@ -2182,6 +2272,7 @@ __all__ = [
     "audit_terminal_phosphate_geometry",
     "build_refine_command",
     "build_reflection_plan",
+    "resolve_refinement_wavelength",
     "execute_autorefine",
     "parse_refinement_statistics",
     "reflection_selector_policy",

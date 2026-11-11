@@ -689,7 +689,7 @@ def execute_refine_doctor(
         spec.anomalous_mode in {"fixed", "fdp-only"} for spec in pool
     ):
         try:
-            scattering = calculated_anomalous_groups(report, refine_executable, environment)
+            scattering = calculated_anomalous_groups(report, refine_executable, environment, plan)
         except AutoRefineError as exc:
             scattering_error = str(exc)
     recipe_records: list[dict[str, object]] = []

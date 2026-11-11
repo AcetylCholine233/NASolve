@@ -214,8 +214,9 @@ It requires an available, valid Free-R audit, tries eligible sibling branches
 in declared order, and stops at the first numerical pass or a technical error.
 The ordinary mean-data path includes grouped-B, eligible individual-ADP,
 coordinate-only and B-only recipes. Anomalous data use explicit calculated
-scattering values and an optional f''-only trial; the recorded AutoSol
-wavelength is required. Existing anomalous benchmarks remain in the report.
+scattering values and an optional f''-only trial, calculated at the
+wavelength in the MTZ header (an AutoSol record is the fallback when the header
+has none). Existing anomalous benchmarks remain in the report.
 The default limit is five trials of three macrocycles each; `--max-trials` and
 `--cycles` each accept 1-10.
 

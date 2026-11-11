@@ -18,6 +18,21 @@ entries are reconstructed from repository history.
   AutoRefine already did). Checked against the Phenix 2.2.1-6174 PHIL parser
   (parse only, not a Phaser run). Existing failed runs are unchanged; rerun
   AutoMR to create a new run.
+- AutoRefine and Refine Doctor took the X-ray wavelength only from an AutoSol
+  record, so a structure refined without AutoSol (for example 7CU_Ag, whose Ag
+  site came from the metal search) reported no calculated f'' and Doctor
+  skipped every fixed and f''-only scattering recipe. The wavelength now comes
+  from the MTZ header of the refinement observations, read from the same
+  `phenix.mtz.dump` output that selects the labels (the dataset that holds
+  reflection data, as for AutoSol). A recorded AutoSol wavelength is used only
+  when the header has no usable one, and a disagreement of more than 1e-4 A is
+  recorded as a warning, with the MTZ value used. Schema: each AutoRefine
+  round's `inputs` gains `wavelength` and `wavelength_source` (`method`,
+  `mtz_dataset`, `mtz_error`, `autosol_wavelength`, `warnings`); anomalous
+  diagnostics and calculated scattering groups record `wavelength_source` as
+  the method used. Existing rounds are unchanged. Phenix programs simulated in
+  tests; the parser is the one that read 1.00743 A from the 7CU_Ag MTZ in its
+  metal search (Phenix 2.2.1-6174).
 
 ### Added
 

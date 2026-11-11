@@ -1085,7 +1085,9 @@ def _autorefine(args: argparse.Namespace) -> int:
             expected_at_occ = _format_metric(
                 item.get("calculated_f_double_prime_at_occupancy"), 3
             )
-            print(f"  {label}: wavelength {wavelength} A")
+            source = item.get("wavelength_source")
+            origin = f" (from {source})" if isinstance(source, str) and wavelength != "—" else ""
+            print(f"  {label}: wavelength {wavelength} A{origin}")
             print(f"    f'' refined {refined_fdp}; calculated {calculated_fdp} e-")
             print(
                 f"    occupancy {occupancy}; calculated f'' x occupancy "
