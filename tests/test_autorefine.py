@@ -893,6 +893,30 @@ class AutoRefineTests(unittest.TestCase):
                 ("chain B and resid 4 and name I",),
             )
 
+    def test_postmr_metal_sites_are_refined_as_anomalous_scatterers(self):
+        # Regression: only nucleotide I/Br/Se candidates reached phenix.refine.
+        report = {"postmr": {"anomalous": {
+            "candidates": [{"site": "A:8", "atom_name": "I5", "element": "I"}],
+            "metal_sites": [{"site": "Z:1", "atom_name": "AG", "element": "AG", "kind": "metal"}],
+        }}}
+        self.assertEqual(
+            anomalous_selections(report),
+            ("chain A and resid 8 and name I5", "chain Z and resid 1 and name AG"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            metal_only = json.loads((run / "report.json").read_text())
+            metal_only["postmr"]["anomalous"] = {
+                "candidates": [], "autosol_required": False,
+                "metal_sites": [{"site": "Z:1", "atom_name": "AG", "element": "AG"}],
+            }
+            self.assertEqual(anomalous_selections(metal_only), ("chain Z and resid 1 and name AG",))
+            observations = Path(metal_only["inputs"]["reflections"])
+            plan = build_reflection_plan(metal_only, observations, make_mtz_dump(root))
+            self.assertTrue(plan.anomalous)
+            self.assertEqual(plan.observation_labels, ("F(+)", "SIGF(+)", "F(-)", "SIGF(-)"))
+
     def test_success_is_quiet_checkpointed_and_reused_by_next_round(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -217,12 +217,17 @@ def _resolution_limit(output: str) -> float | None:
 
 
 def _anomalous_candidates(report: Mapping[str, object]) -> list[dict[str, object]]:
+    """Nucleotide heavy atoms plus metal ions recorded by PostMR."""
     postmr = report.get("postmr")
     anomalous = postmr.get("anomalous") if isinstance(postmr, Mapping) else None
-    candidates = anomalous.get("candidates") if isinstance(anomalous, Mapping) else None
-    if not isinstance(candidates, list):
+    if not isinstance(anomalous, Mapping):
         return []
-    return [dict(candidate) for candidate in candidates if isinstance(candidate, Mapping)]
+    result: list[dict[str, object]] = []
+    for key in ("candidates", "metal_sites"):
+        values = anomalous.get(key)
+        if isinstance(values, list):
+            result.extend(dict(item) for item in values if isinstance(item, Mapping))
+    return result
 
 
 def build_reflection_plan(

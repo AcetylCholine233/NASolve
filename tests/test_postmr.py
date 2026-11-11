@@ -28,6 +28,7 @@ from nasolve.postmr import (
     prepare_postmr,
     residue_name,
     scan_anomalous_candidates,
+    scan_metal_anomalous_sites,
 )
 
 from nasolve.model_assessment import file_sha256
@@ -141,6 +142,50 @@ class PostMRTests(unittest.TestCase):
             self.assertEqual(postmr["input_model_source"], "metal-merged")
             self.assertEqual(postmr["input_sha256"], file_sha256(merged))
             self.assertEqual(postmr["metal_merge"]["name"], merged.name)
+
+            # The merged Ag becomes an anomalous scatterer; Mg (Z < 21) does not,
+            # and metals never trigger the nucleotide AutoSol branch.
+            anomalous = postmr["anomalous"]
+            self.assertEqual(
+                [(m["site"], m["atom_name"], m["element"], m["kind"])
+                 for m in anomalous["metal_sites"]],
+                [("Z:1", "AG", "AG", "metal")],
+            )
+            self.assertFalse(anomalous["autosol_required"])
+            self.assertEqual(anomalous["candidates"], [])
+            phil = result.anomalous_scatterer_phil
+            self.assertEqual(phil, result.postmr_directory / "Restraints" / "anomalous_scatterers.phil")
+            text = phil.read_text()
+            self.assertIn('selection = "chain Z and resid 1 and name AG"', text)
+            self.assertIn("*group_anomalous", text)
+            self.assertIn("refine = *f_prime *f_double_prime", text)
+            self.assertEqual(anomalous["metal_scatterer_phil"]["sha256"], file_sha256(phil))
+            self.assertNotIn(phil, result.restraint_paths)  # AutoRefine writes its own groups
+            self.assertIn("Metal anomalous scatterers: AG Z:1 AG",
+                          (result.postmr_directory / "postmr.log").read_text())
+
+    def test_metal_scan_needs_the_anomalous_narestraints_only_when_a_metal_is_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plain = root / "plain.pdb"
+            plain.write_text(postmr_model_text())  # DE, DG and a Mg ion
+            silver = root / "silver.pdb"
+            silver.write_text(postmr_model_text().replace("END\n", "") + pdb_record(
+                "HETATM", 4, "AG", "AG", "Z", 1, element="AG") + "END\n")
+            iodine = root / "iodine.pdb"
+            iodine.write_text("".join([
+                pdb_record("HETATM", 1, "C1'", "5IU", "A", 8, element="C"),
+                pdb_record("HETATM", 2, "C2'", "5IU", "A", 8, element="C"),
+                pdb_record("HETATM", 3, "I5", "5IU", "A", 8, element="I"),
+                "END\n",
+            ]))
+            self.assertEqual(scan_metal_anomalous_sites(plain)[0], [])
+            self.assertEqual(scan_metal_anomalous_sites(iodine)[0], [])  # nucleotide, not metal
+            self.assertEqual(len(scan_metal_anomalous_sites(silver)[0]), 1)
+            with patch.dict(sys.modules, {"restraints.anomalous": None}):
+                self.assertEqual(scan_metal_anomalous_sites(plain)[0], [])
+                with self.assertRaisesRegex(PostMRPreparationError, "anomalous-scatterer support"):
+                    scan_metal_anomalous_sites(silver)
 
     def test_original_model_option_ignores_a_merged_model(self):
         with tempfile.TemporaryDirectory() as directory:

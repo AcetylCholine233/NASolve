@@ -780,6 +780,13 @@ def _postmr(args: argparse.Namespace) -> int:
         )
         print(f"Starting model: {result.input_model} ({source})")
     print(f"Prepared model: {result.model_path}")
+    for site in result.metal_sites:
+        print(
+            f"Anomalous scatterer: {site['element']} {site['site']} {site['atom_name']} "
+            "(AutoRefine refines its f' and f'')"
+        )
+    if result.anomalous_scatterer_phil is not None:
+        print(f"Anomalous-scatterer PHIL for phenix.refine by hand: {result.anomalous_scatterer_phil}")
     print(f"ReadySet log: {result.readyset_log}")
     for restraint in result.restraint_paths:
         print(f"Restraint: {restraint}")

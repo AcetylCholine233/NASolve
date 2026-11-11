@@ -40,6 +40,22 @@ entries are reconstructed from repository history.
   `AutoSolMetal/run_NNN` as a dataset-level run.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
+- PostMR writes metal ions as anomalous scatterers. After ReadySet it finds
+  HETATM metals with atomic number >= 21 outside nucleotides (Ag, Hg, Zn,
+  ...; not Na, Mg, K, Ca) using NARestraints `restraints.anomalous`
+  (anomalous-scatterers branch), records them in
+  `postmr.anomalous.metal_sites` (same fields as `candidates`, plus
+  `kind = "metal"`), and writes `Restraints/anomalous_scatterers.phil` with
+  NARestraints' `anomalous_phil_block` (one group per element, f'/f'' from 0
+  and refined, `group_anomalous` in the strategy) for hand-run
+  `phenix.refine`. AutoRefine now treats `metal_sites` like nucleotide
+  heavy-atom candidates: it selects F(+)/F(-) data and refines one
+  anomalous group per site. The PHIL is deliberately not in the AutoRefine
+  restraint stack, to avoid duplicate groups. `autosol_required` still
+  reflects nucleotide heavy atoms only. With an older NARestraints, PostMR
+  stops with a clear message when such a metal is present. Checked on the
+  real 7CU_Ag model with its merged Ag (one group, `chain Z and resid 1 and
+  name AG`); phenix.refine itself not yet run.
 - dU (`DU`, the DNA `U` token, for example `--pair C:U`) is now a curated
   PostMR residue. `data/ligands/DU.cif` is the official wwPDB CCD definition
   copied unchanged from Phenix 2.2.1-6174

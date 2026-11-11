@@ -65,6 +65,8 @@ class PostMRResult:
     restraint_paths: tuple[Path, ...]
     input_model: Path | None = None
     input_model_source: str = "phaser"  # or "metal-merged"
+    metal_sites: tuple[dict[str, object], ...] = ()
+    anomalous_scatterer_phil: Path | None = None
 
 
 _COOT_BASES = frozenset({"DA", "DC", "DG", "DT", "A", "C", "G", "U"})
@@ -641,6 +643,86 @@ def scan_anomalous_candidates(
                 "coordinates": [round(value, 3) for value in _atom_coordinates(line)],
             })
     return candidates
+
+
+# Light metals (Li, Be, Na, Mg, Al, K, Ca; Z < 21) have negligible anomalous
+# signal at usual wavelengths and are not refined as anomalous scatterers.
+_LIGHT_METALS = frozenset({"LI", "BE", "NA", "MG", "AL", "K", "CA"})
+
+
+def _nucleotide_residue_keys(path: Path) -> set[tuple[str, str]]:
+    atoms: dict[tuple[str, str], set[str]] = {}
+    for line in _coordinate_records(path):
+        identity = _record_identity(line)
+        atom = _atom_identity(line)
+        if identity is not None and atom is not None:
+            atoms.setdefault(identity[:2], set()).add(atom[2])
+    return {
+        key for key, names in atoms.items()
+        if "C1'" in names and names & {"C2'", "C3'", "O4'"}
+    }
+
+
+def scan_metal_anomalous_sites(
+    path: Path,
+) -> tuple[list[dict[str, object]], list[object], list[str]]:
+    """Find metal ions (Z >= 21, outside nucleotides) to refine as anomalous scatterers.
+
+    Detection uses NARestraints' ``restraints.anomalous`` module (the
+    anomalous-scatterers branch): HETATM records, waters excluded, element
+    from the element column or inferred. Returns report candidates, the
+    NARestraints site objects for the PHIL writer, and its warnings.
+    """
+    from .autosol_metal import METAL_SYMBOLS
+
+    heavy_metals = frozenset(METAL_SYMBOLS) - _LIGHT_METALS
+    try:
+        from restraints.anomalous import find_heavy_atoms
+    except ImportError as exc:
+        for line in _coordinate_records(path):
+            if line.startswith("HETATM") and _atom_element(line) in heavy_metals:
+                raise PostMRPreparationError(
+                    "The model contains a metal ion, but the installed NARestraints has no "
+                    "anomalous-scatterer support (restraints.anomalous). Install the "
+                    "feature/anomalous-scatterers branch of NARestraints."
+                ) from exc
+        return [], [], []
+    sites, warnings = find_heavy_atoms(path)
+    nucleotides = _nucleotide_residue_keys(path)
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    candidates: list[dict[str, object]] = []
+    selected: list[object] = []
+    for site in sites:
+        chain = site.chain or "_"
+        if site.element not in heavy_metals or (chain, site.resid) in nucleotides:
+            continue
+        selected.append(site)
+        candidates.append({
+            "site": f"{chain}:{site.resid}",
+            "residue": site.residue_name,
+            "atom_name": site.atom_name,
+            "alternate": site.altloc or None,
+            "element": site.element,
+            "element_source": site.element_source,
+            "coordinates": [
+                round(value, 3) for value in _atom_coordinates(lines[site.line_number - 1])
+            ],
+            "kind": "metal",
+        })
+    return candidates, selected, list(warnings)
+
+
+def _write_metal_scatterer_phil(sites: list[object], output: Path) -> None:
+    from restraints.anomalous import anomalous_phil_block
+
+    output.write_text(
+        "# NASolve PostMR: metal ions as phenix.refine anomalous scatterers, written\n"
+        "# with NARestraints restraints.anomalous (f' and f'' start at 0 and are refined).\n"
+        "# For running phenix.refine by hand; 'nasolve autorefine' writes the same\n"
+        "# groups into its own parameters, so do not pass this file to it as well.\n"
+        "refinement {\n" + anomalous_phil_block(sites) + "\n}\n",
+        encoding="utf-8",
+    )
 
 
 def _unique_named_atom(
@@ -1738,6 +1820,11 @@ def prepare_postmr(
         except PhosphateError as exc:
             raise PostMRPreparationError(f"Cannot freeze authoritative dictionary inputs: {exc}") from exc
     anomalous_candidates = scan_anomalous_candidates(final_model)
+    metal_sites, metal_site_objects, metal_warnings = scan_metal_anomalous_sites(final_model)
+    metal_phil: Path | None = None
+    if metal_sites:
+        metal_phil = restraints_dir / "anomalous_scatterers.phil"
+        _write_metal_scatterer_phil(metal_site_objects, metal_phil)
 
     postmr_payload = {
         "status": "POSTMR_READY",
@@ -1805,8 +1892,18 @@ def prepare_postmr(
         },
         "anomalous": {
             "trigger_elements": sorted(DEFAULT_ANOMALOUS_ELEMENTS),
+            # Only nucleotide heavy atoms call for the AutoSol phasing branch.
             "autosol_required": bool(anomalous_candidates),
             "candidates": anomalous_candidates,
+            # Metal ions (Z >= 21) are refined as anomalous scatterers by
+            # AutoRefine; the PHIL is for running phenix.refine by hand.
+            "metal_sites": metal_sites,
+            "metal_detection": "NARestraints restraints.anomalous (HETATM, Z >= 21, metals)",
+            "metal_warnings": metal_warnings,
+            "metal_scatterer_phil": (
+                {**artifact_reference(metal_phil, run), "sha256": file_sha256(metal_phil)}
+                if metal_phil is not None else None
+            ),
         },
         "prepared_model": str(final_model),
         "prepared_sha256": file_sha256(final_model),
@@ -1829,6 +1926,10 @@ def prepare_postmr(
             "Status: POSTMR_READY",
             f"Input model: {source_model}",
             f"Input model source: {input_model_source}",
+            "Metal anomalous scatterers: " + (
+                ", ".join(f"{site['element']} {site['site']} {site['atom_name']}"
+                          for site in metal_sites) or "none"
+            ),
             *(
                 f"Mutation: {action.site} {action.before}->{action.after} ({action.method})"
                 for action in actions
@@ -1866,6 +1967,8 @@ def prepare_postmr(
         restraint_paths=tuple(restraint_paths),
         input_model=source_model,
         input_model_source=input_model_source,
+        metal_sites=tuple(metal_sites),
+        anomalous_scatterer_phil=metal_phil,
     )
 
 
@@ -1878,4 +1981,5 @@ __all__ = [
     "prepare_postmr",
     "residue_name",
     "scan_anomalous_candidates",
+    "scan_metal_anomalous_sites",
 ]

@@ -1069,6 +1069,19 @@ The `Q` token resolves to official CCD `S6G` and uses `DG` as its canonical
 construction parent. NARestraints v1.1.1 also stores its `C5` mapping as `C5 `;
 PostMR trims that exact trailing space in the same process-local adapter.
 
+After ReadySet, PostMR also looks for metal ions with NARestraints'
+anomalous-scatterer module (HETATM, waters excluded, atomic number 21 or more,
+outside nucleotides; Na, Mg, K and Ca are left out). Each one, for example an
+Ag merged from the metal search, is recorded under
+`report.json["postmr"]["anomalous"]["metal_sites"]` and written to
+`PostMR/Restraints/anomalous_scatterers.phil` (f' and f'' start at 0 and are
+refined, strategy includes `group_anomalous`) for running `phenix.refine` by
+hand. AutoRefine refines the same sites as anomalous scatterers against the
+F(+)/F(-) data and writes their groups itself, so that PHIL is not part of the
+AutoRefine restraint stack. Metals do not trigger the nucleotide AutoSol
+branch. This needs the NARestraints anomalous-scatterers branch; with an older
+NARestraints, PostMR stops if the model contains such a metal.
+
 After ReadySet, PostMR scans nucleotide-like residues for configurable
 anomalous elements. The initial trigger set is iodine, bromine, and selenium;
 it is element-driven rather than restricted to known residue codes. Element
