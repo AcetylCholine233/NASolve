@@ -247,27 +247,18 @@ def _phaser_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
     )
 
 
-def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
-    """Phaser model + AutoSol metal sites over the Phaser map (latest found attempt)."""
-    block = report.get("metal_autosol")
-    attempts = block.get("attempts") if isinstance(block, Mapping) else None
-    found = [
-        attempt for attempt in (attempts if isinstance(attempts, list) else [])
-        if isinstance(attempt, Mapping) and attempt.get("status") == "METAL_SITES_FOUND"
-    ]
-    if not found:
-        raise CootViewError(
-            "No metal search in this run found sites; run 'nasolve autosol RUN --metal ELEMENT'"
-        )
-    attempt = found[-1]
-    inputs = attempt.get("inputs")
-    outputs = attempt.get("outputs")
+def _metal_view(
+    anchor: Path, record: Mapping[str, object], label: str
+) -> ViewProfile:
+    """Phaser model + AutoSol metal sites over the Phaser map for one search."""
+    inputs = record.get("inputs")
+    outputs = record.get("outputs")
     if not isinstance(inputs, Mapping) or not isinstance(outputs, Mapping):
         raise CootViewError("The metal-search record is malformed")
-    model = _reported_file(inputs.get("phaser_model"), "Phaser model", run)
-    map_path = _reported_file(inputs.get("phaser_map"), "Phaser map", run)
+    model = _reported_file(inputs.get("phaser_model"), "Phaser model", anchor)
+    map_path = _reported_file(inputs.get("phaser_map"), "Phaser map", anchor)
     heavy_atoms = _reported_file(
-        outputs.get("heavy_atom_model"), "AutoSol heavy-atom model", run
+        outputs.get("heavy_atom_model"), "AutoSol heavy-atom model", anchor
     )
     return ViewProfile(
         "metal",
@@ -275,9 +266,50 @@ def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
         map_path,
         (heavy_atoms,),
         (),
-        f"Phaser solution with AutoSol metal sites ({attempt.get('attempt')})",
+        f"Phaser solution with AutoSol metal sites ({label})",
         "Phaser MR map",
     )
+
+
+def _metal_run_profile(metal_run: Path, report: Mapping[str, object]) -> ViewProfile:
+    """A ``DATASET/AutoSolMetal/run_NNN`` directory opened directly."""
+    if report.get("status") != "METAL_SITES_FOUND":
+        raise CootViewError(
+            f"This metal search did not find sites ({report.get('status')}); "
+            "there is nothing to show"
+        )
+    return _metal_view(metal_run, report, f"AutoSolMetal/{metal_run.name}")
+
+
+def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
+    """The latest metal search with sites that was made from this AutoMR run."""
+    block = report.get("metal_autosol")
+    searches = block.get("searches") if isinstance(block, Mapping) else None
+    found = [
+        search for search in (searches if isinstance(searches, list) else [])
+        if isinstance(search, Mapping) and search.get("status") == "METAL_SITES_FOUND"
+    ]
+    if found:
+        search = found[-1]
+        report_path = _reported_file(search.get("report"), "metal-search report", run)
+        expected = search.get("report", {}).get("sha256") if isinstance(
+            search.get("report"), Mapping) else None
+        _verify_report_checksum(report_path, expected, "metal-search report")
+        metal_report = _read_json(report_path, "metal-search report")
+        return _metal_run_profile(report_path.parent, metal_report)
+    # Schema 1: attempts were recorded (and stored) inside the AutoMR run.
+    attempts = block.get("attempts") if isinstance(block, Mapping) else None
+    legacy = [
+        attempt for attempt in (attempts if isinstance(attempts, list) else [])
+        if isinstance(attempt, Mapping) and attempt.get("status") == "METAL_SITES_FOUND"
+    ]
+    if not legacy:
+        raise CootViewError(
+            "No metal search from this run found sites; run "
+            "'nasolve autosol RUN --metal ELEMENT'"
+        )
+    attempt = legacy[-1]
+    return _metal_view(run, attempt, str(attempt.get("attempt")))
 
 
 def _prepared_model(run: Path, report: Mapping[str, object]) -> Path:
@@ -573,6 +605,11 @@ def resolve_view_profile(
     if checkpoint is not None:
         checkpoint = _checkpoint_component(checkpoint)
     report = _read_json(_required_file(run / "report.json", "AutoMR report"), "run report")
+    if report.get("workflow") == "metal_autosol":
+        # DATASET/AutoSolMetal/run_NNN opened directly.
+        if checkpoint is not None or stage not in {None, "metal"}:
+            raise CootViewError("A metal-search directory can only be shown as the metal view")
+        return _metal_run_profile(run, report)
     resolvers = {
         "automr": _phaser_profile,
         "metal": _metal_profile,

@@ -169,7 +169,7 @@ class MtzWavelengthTests(unittest.TestCase):
                 run, make_autosol(root, []), autosol_mtz_dump(root, wavelength=1.00743),
                 ("AG",), environment=ENV, processor_count=8,
             )
-            attempt = json.loads(report_path.read_text())["metal_autosol"]["attempts"][-1]
+            attempt = json.loads(result.report_path.read_text())
             self.assertEqual(attempt["wavelength"], 1.00743)
             self.assertEqual(attempt["wavelength_source"]["method"], "MTZ header (phenix.mtz.dump)")
             self.assertIn("autosol.lambda=1.00743", " ".join(attempt["command"]))

@@ -129,10 +129,22 @@ RUN=/absolute/path/to/dataset/AutoMR/run_001
 This runs `phenix.autosol` with the original Phaser model as the partial model
 (`autosol.phasing.partpdb_rms`, default 1.0 A; change it with `--rmsd`), lets
 AutoSol choose the number of sites, and does no model building. Each search
-gets a new `RUN/AutoSolMetal/attempt_NNN` folder. If AutoSol finds a site of a
-requested metal, NASolve lists the nearest residues and opens Coot with the
+gets a new numbered folder in the dataset directory, next to `AutoMR` and the
+data:
+
+```text
+dataset/
+├── AutoMR/run_001/
+├── AutoSolMetal/run_001/     # metal search made from AutoMR/run_001
+└── staraniso_alldata-unique.mtz
+```
+
+Its `report.json` names the AutoMR run it came from. If AutoSol finds a site of
+a requested metal, NASolve lists the nearest residues and opens Coot with the
 Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
-later with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to skip).
+later with `./nasolve show dataset/AutoSolMetal/run_001`, or the latest search
+that found sites with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to
+skip).
 Finding no site is a normal result and usually means the ion is not
 incorporated. Sites are never added to the model automatically, and the run's
 stage and status do not change, so continue with PostMR either way:

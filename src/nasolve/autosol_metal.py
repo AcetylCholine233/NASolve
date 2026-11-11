@@ -16,11 +16,15 @@ Contract
   ``autosol.phasing.mad_ha_add_list``. The partial-model RMSD
   (``autosol.phasing.partpdb_rms``) defaults to 1.0 A. The number of sites is
   left to AutoSol; model building is switched off.
-* Each search writes a new ``AutoSolMetal/attempt_NNN`` directory; earlier
-  attempts are never overwritten.
-* The run's ``stage``/``status`` are unchanged. Results are added under
-  ``report.json["metal_autosol"]`` with portable artifact references and
-  SHA-256 checksums, and each attempt also has its own ``report.json``.
+* Each search writes a new numbered ``DATASET/AutoSolMetal/run_NNN``
+  directory, next to ``AutoMR`` and the input data; earlier searches are never
+  overwritten. Its ``report.json`` (``workflow = "metal_autosol"``) holds the
+  full record with artifact references anchored to that directory or the
+  dataset, SHA-256 checksums, and the source AutoMR run.
+* The AutoMR run's ``stage``/``status`` are unchanged; its
+  ``report.json["metal_autosol"]["searches"]`` lists the metal searches made
+  from it (schema 2). Schema-1 ``attempts`` recorded inside the AutoMR run by
+  earlier versions are kept and still viewable.
 * Outcomes: ``METAL_SITES_FOUND`` (at least one site of a requested metal),
   ``METAL_NOT_FOUND`` (AutoSol finished without such a site - this is a normal
   result and usually means the ion is not incorporated), and
@@ -59,12 +63,13 @@ from .autosol import (
     resolve_wavelength,
 )
 from .model_assessment import file_sha256
-from .run_context import artifact_reference, resolve_artifact_path
+from .run_context import artifact_reference, dataset_directory, resolve_artifact_path
 
 
 DEFAULT_PARTIAL_MODEL_RMSD = 1.0
 METAL_DIRECTORY = "AutoSolMetal"
-SCHEMA_VERSION = 1
+WORKFLOW = "metal_autosol"
+SCHEMA_VERSION = 2
 
 FOUND = "METAL_SITES_FOUND"
 NOT_FOUND = "METAL_NOT_FOUND"
@@ -89,8 +94,8 @@ _NEAREST_RESIDUES = 3
 class MetalSearchResult:
     status: str
     message: str
-    run_directory: Path
-    attempt_directory: Path
+    run_directory: Path  # the source AutoMR run
+    output_directory: Path  # DATASET/AutoSolMetal/run_NNN
     report_path: Path
     log_path: Path
     metals: tuple[str, ...]
@@ -179,17 +184,18 @@ def _phaser_map(run: Path, report: Mapping[str, object]) -> Path:
     raise AutoSolPreparationError("The Phaser map (solution MTZ) is missing")
 
 
-def _next_attempt(run: Path) -> Path:
-    root = run / METAL_DIRECTORY
+def _next_metal_run(run: Path) -> Path:
+    """A new ``DATASET/AutoSolMetal/run_NNN`` beside ``AutoMR``."""
+    root = dataset_directory(run) / METAL_DIRECTORY
     root.mkdir(exist_ok=True)
     numbers = []
     for child in root.iterdir():
         name = child.name
-        if name.startswith("attempt_") and name[8:].isdigit():
-            numbers.append(int(name[8:]))
-    attempt = root / f"attempt_{(max(numbers) + 1 if numbers else 1):03d}"
-    attempt.mkdir()  # never reuse an attempt directory
-    return attempt
+        if name.startswith("run_") and name[4:].isdigit():
+            numbers.append(int(name[4:]))
+    output = root / f"run_{(max(numbers) + 1 if numbers else 1):03d}"
+    output.mkdir()  # never reuse a metal-search directory
+    return output
 
 
 def _model_atoms(path: Path) -> list[dict[str, object]]:
@@ -260,8 +266,8 @@ def _heavy_atom_models(directory: Path) -> list[Path]:
     return sorted(path for path in directory.rglob("overall_best_ha_pdb.pdb") if path.is_file())
 
 
-def _reference(path: Path, run: Path) -> dict[str, str]:
-    reference = artifact_reference(path, run)
+def _reference(path: Path, anchor_run: Path) -> dict[str, str]:
+    reference = artifact_reference(path, anchor_run)
     reference["sha256"] = file_sha256(path)
     return reference
 
@@ -269,23 +275,33 @@ def _reference(path: Path, run: Path) -> dict[str, str]:
 def _record(
     run: Path,
     report: dict[str, object],
-    attempt: Path,
+    output: Path,
     payload: dict[str, object],
 ) -> Path:
-    attempt_report = attempt / "report.json"
-    _write_json(attempt_report, payload)
+    """Write the search's own report, then list it in the AutoMR run report."""
+    output_report = output / "report.json"
+    _write_json(output_report, payload)
     block = report.get("metal_autosol")
     if not isinstance(block, dict):
-        block = {"schema_version": SCHEMA_VERSION, "attempts": []}
-    attempts = block.get("attempts")
-    if not isinstance(attempts, list):
-        attempts = []
-    attempts.append(payload)
-    block["attempts"] = attempts
-    block["latest"] = payload["attempt"]
+        block = {}
+    searches = block.get("searches")
+    if not isinstance(searches, list):
+        searches = []
+    searches.append({
+        "metal_run": output.name,
+        "directory": artifact_reference(output, run),
+        "report": _reference(output_report, run),
+        "status": payload["status"],
+        "message": payload["message"],
+        "metals": payload["metals"],
+        "created_utc": payload["created_utc"],
+    })
+    block["schema_version"] = SCHEMA_VERSION
+    block["searches"] = searches
+    block["latest"] = output.name
     report["metal_autosol"] = block
     _write_json(run / "report.json", report)
-    return attempt_report
+    return output_report
 
 
 def execute_metal_search(
@@ -304,7 +320,7 @@ def execute_metal_search(
     if not math.isfinite(partial_model_rmsd) or partial_model_rmsd <= 0:
         raise AutoSolPreparationError("The partial-model RMSD must be a positive number of Angstrom")
 
-    # Everything that can be checked is checked before an attempt directory
+    # Everything that can be checked is checked before a metal-search directory
     # exists, so a refused search leaves no trace in the run.
     run, report = _read_report(run_directory)
     tfz = _check_phaser_accepted(report, allow_mr_review)
@@ -321,9 +337,9 @@ def execute_metal_search(
     sequence_source, generated_sequence = _sequence_source(report, run)
     nproc = max(1, processor_count if processor_count is not None else (os.cpu_count() or 1))
 
-    attempt = _next_attempt(run)
-    log_path = attempt / "autosol.console.log"
-    sequence_path = attempt / "sequence_input.txt"
+    output = _next_metal_run(run)
+    log_path = output / "autosol.console.log"
+    sequence_path = output / "sequence_input.txt"
     if sequence_source is not None:
         shutil.copyfile(sequence_source, sequence_path)
         sequence_origin = "run-frozen sequence file"
@@ -352,8 +368,13 @@ def execute_metal_search(
     ])
 
     created = datetime.now(timezone.utc).isoformat()
+    # References are anchored to the metal-search directory (its own files) or
+    # the dataset (AutoMR inputs), so the record survives moving the dataset.
     base: dict[str, object] = {
-        "attempt": attempt.name,
+        "schema_version": SCHEMA_VERSION,
+        "workflow": WORKFLOW,
+        "metal_run": output.name,
+        "source_run": artifact_reference(run, output),
         "created_utc": created,
         "metals": list(elements),
         "partial_model_rmsd": partial_model_rmsd,
@@ -363,13 +384,12 @@ def execute_metal_search(
         "input_labels": list(labels),
         "sequence_source": sequence_origin,
         "inputs": {
-            "reflections": _reference(reflections, run),
-            "phaser_model": _reference(phaser_model, run),
-            "phaser_map": _reference(phaser_map, run),
-            "sequence": _reference(sequence_path, run),
+            "reflections": _reference(reflections, output),
+            "phaser_model": _reference(phaser_model, output),
+            "phaser_map": _reference(phaser_map, output),
+            "sequence": _reference(sequence_path, output),
         },
         "command": command,
-        "directory": artifact_reference(attempt, run),
         "model_changed": False,
     }
 
@@ -377,13 +397,15 @@ def execute_metal_search(
                sites: list[dict[str, object]], extra: dict[str, object]) -> MetalSearchResult:
         payload = {**base, "status": status, "message": message, **extra}
         payload["outputs"] = {
-            "console_log": _reference(log_path, run) if log_path.is_file() else None,
-            "heavy_atom_model": _reference(heavy_atom_model, run) if heavy_atom_model else None,
+            "console_log": _reference(log_path, output) if log_path.is_file() else None,
+            "heavy_atom_model": (
+                _reference(heavy_atom_model, output) if heavy_atom_model else None
+            ),
         }
         payload["sites"] = sites
-        report_path = _record(run, report, attempt, payload)
+        report_path = _record(run, report, output, payload)
         return MetalSearchResult(
-            status=status, message=message, run_directory=run, attempt_directory=attempt,
+            status=status, message=message, run_directory=run, output_directory=output,
             report_path=report_path, log_path=log_path, metals=elements,
             partial_model_rmsd=partial_model_rmsd, phaser_model=phaser_model,
             phaser_map=phaser_map, heavy_atom_model=heavy_atom_model, sites=tuple(sites),
@@ -391,7 +413,7 @@ def execute_metal_search(
 
     try:
         completed = subprocess.run(
-            command, cwd=attempt,
+            command, cwd=output,
             env=dict(environment) if environment is not None else None,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
         )
@@ -408,7 +430,7 @@ def execute_metal_search(
         )
 
     effective: dict[str, object] = {}
-    eff_files = sorted(attempt.rglob("autosol.eff"))
+    eff_files = sorted(output.rglob("autosol.eff"))
     if len(eff_files) == 1:
         try:
             effective = _effective_settings(eff_files[0], nproc)
@@ -427,16 +449,16 @@ def execute_metal_search(
                     f"partpdb_rms is {numeric[0]:g}, not the requested {partial_model_rmsd:g}"
                 )
             effective["partpdb_rms"] = numeric[0] if numeric else "not reported"
-            effective["path"] = _reference(eff_files[0], run)
+            effective["path"] = _reference(eff_files[0], output)
         except AutoSolPreparationError as exc:
             return finish(FAILED, f"AutoSol settings were not applied as requested: {exc}",
                           None, [], {"return_code": 0})
     extra: dict[str, object] = {"return_code": 0, "effective_parameters": effective}
 
-    models = _heavy_atom_models(attempt)
+    models = _heavy_atom_models(output)
     if len(models) > 1:
         return finish(FAILED, "AutoSol wrote more than one overall_best_ha_pdb.pdb; "
-                      "inspect the attempt directory", None, [], extra)
+                      "inspect the metal-search directory", None, [], extra)
     if not models:
         return finish(NOT_FOUND, "AutoSol placed no heavy-atom site. This is a normal result "
                       "and usually means the metal is not incorporated.", None, [], extra)
@@ -494,6 +516,7 @@ __all__ = [
     "FOUND",
     "METAL_DIRECTORY",
     "METAL_SYMBOLS",
+    "WORKFLOW",
     "MetalSearchResult",
     "NOT_FOUND",
     "execute_metal_search",

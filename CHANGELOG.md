@@ -25,12 +25,19 @@ entries are reconstructed from repository history.
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals
   via `autosol.phasing.mad_ha_add_list`, and no model building. Each search
-  writes `AutoSolMetal/attempt_NNN`; outcomes `METAL_SITES_FOUND`,
-  `METAL_NOT_FOUND` (normal) or `METAL_AUTOSOL_FAILED`. Found sites are listed
-  with their nearest residues and opened in Coot with the Phaser model and map
-  (`--no-coot` to skip; `nasolve show RUN --stage metal` to reopen). Schema:
-  additive `report.json["metal_autosol"]` (schema_version 1); the run's
-  stage/status are unchanged and sites are never added to the model.
+  writes a new `DATASET/AutoSolMetal/run_NNN`, beside `AutoMR` and the input
+  data (earlier development builds wrote `AutoMR/run_NNN/AutoSolMetal/
+  attempt_NNN`; those schema-1 records stay viewable). Outcomes
+  `METAL_SITES_FOUND`, `METAL_NOT_FOUND` (normal) or `METAL_AUTOSOL_FAILED`.
+  Found sites are listed with their nearest residues and opened in Coot with
+  the Phaser model and map (`--no-coot` to skip; reopen with `nasolve show
+  DATASET/AutoSolMetal/run_NNN` or `nasolve show RUN --stage metal`). Schema:
+  the search's own `report.json` (`workflow = "metal_autosol"`,
+  schema_version 2, `source_run`, references anchored to the search directory
+  or the dataset) and an additive `report.json["metal_autosol"]["searches"]`
+  index in the AutoMR run; the run's stage/status are unchanged and sites are
+  never added to the model. `run_context.dataset_directory` now also treats
+  `AutoSolMetal/run_NNN` as a dataset-level run.
   `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
   AutoSol only; live Phenix 2.2.1-6174 validation pending.
 - AutoMR now always tells Phaser which data to use: `-F` (merged

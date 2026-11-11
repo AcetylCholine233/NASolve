@@ -848,8 +848,8 @@ def _autosol_metal(args: argparse.Namespace) -> int:
     print(f"{result.status}: {result.message}")
     print(f"Metals searched: {', '.join(result.metals)}")
     print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
-    print(f"Run directory: {result.run_directory}")
-    print(f"AutoSol folder: {result.attempt_directory}")
+    print(f"AutoMR run: {result.run_directory}")
+    print(f"Metal-search folder: {result.output_directory}")
     print(f"AutoSol log: {result.log_path}")
     for site in result.sites:
         near = ", ".join(
@@ -869,17 +869,18 @@ def _autosol_metal(args: argparse.Namespace) -> int:
         print(f"Heavy-atom model: {result.heavy_atom_model}")
     print(f"Phaser model: {result.phaser_model}")
     print(f"Phaser map: {result.phaser_map}")
+    later = f"Open later with: nasolve show {result.output_directory}"
     if args.no_coot:
-        print(f"Open later with: nasolve show {result.run_directory} --stage metal")
+        print(later)
         return 0
     try:
         coot = discover_coot(config, explicit=args.coot)
         remember_coot(config, coot)
         save_config(config)
-        view = launch_coot_view(result.run_directory, coot.executable, stage="metal")
+        view = launch_coot_view(result.output_directory, coot.executable, stage="metal")
     except (ConfigError, CootDiscoveryError, CootViewError) as exc:
         print(f"Coot view error: {exc}", file=sys.stderr)
-        print(f"Open later with: nasolve show {result.run_directory} --stage metal")
+        print(later)
         return 0
     print(f"Opened Coot (PID {view.pid}) with the Phaser model, AutoSol sites and Phaser map")
     print(f"Coot log: {view.log_path}")

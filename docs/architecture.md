@@ -401,22 +401,29 @@ The first named metal is `autosol.atom_type`; additional metals go to
 successful exit, `autosol.eff` must confirm those settings and the requested
 `partpdb_rms`; a mismatch fails closed.
 
-Each search allocates a new `AutoSolMetal/attempt_NNN`. Outcomes are
+Each search allocates a new `DATASET/AutoSolMetal/run_NNN`, beside `AutoMR`
+and the input data. Outcomes are
 `METAL_SITES_FOUND` (at least one site of a requested element in a unique
 `overall_best_ha_pdb.pdb`), `METAL_NOT_FOUND` (no such site; a normal result),
 and `METAL_AUTOSOL_FAILED` (non-zero exit, ambiguous outputs, or unapplied
-settings). For each found site the attempt records the closest atom of the
+settings). For each found site the search records the closest atom of the
 three nearest Phaser-model residues, using H3/R3/P1 symmetry when configured
 and same-asymmetric-unit distances otherwise.
 
-The attempt is appended to `report.json["metal_autosol"]` (`schema_version` 1,
-`attempts`, `latest`) with run-anchored references and SHA-256 checksums for
-the reflections, Phaser model and map, sequence, log, settings file and HA
-model, plus a copy in the attempt's own `report.json`. The run's `stage`,
+The full record is the search directory's own `report.json`
+(`workflow = "metal_autosol"`, `schema_version` 2, `source_run`) with SHA-256
+checksums and references anchored to the search directory (its log, settings
+file, sequence and HA model) or the dataset (reflections, Phaser model and
+map), so it validates after the dataset moves. The AutoMR run's
+`report.json["metal_autosol"]` lists the searches made from it (`searches`,
+`latest`, each with a checksummed reference to the search report). Schema-1
+`attempts` written inside the AutoMR run by development builds remain readable
+by the metal view. The run's `stage`,
 `status` and `message` are unchanged and `model_changed` is false: sites are
 for inspection only and never enter the model or AutoRefine automatically.
-The `metal` Coot view opens the Phaser model and the latest found HA model over
-the Phaser MTZ in `RUN/CootGUI/metal/`, refusing references that fail their
+The `metal` Coot view opens the Phaser model and the HA model over the Phaser
+MTZ in `CootGUI/metal/` of the directory that was opened (the search directory
+after `nasolve autosol --metal`), refusing references that fail their
 checksums. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
 tests use a simulated AutoSol that accepts only the full PHIL paths above.
 
@@ -619,8 +626,9 @@ pointer. Without a registry, the default prefers accepted AutoSol with a usable
 density map, then completed PostMR, then Phaser. Profiles differ:
 
 - AutoMR: Phaser model and Phaser MTZ;
-- Metal (`--stage metal` only): Phaser model, the latest found metal-search
-  `overall_best_ha_pdb.pdb`, and the Phaser MTZ;
+- Metal (`--stage metal` on an AutoMR run, or a `DATASET/AutoSolMetal/run_NNN`
+  directory opened directly): Phaser model, that search's (or the latest found
+  search's) `overall_best_ha_pdb.pdb`, and the Phaser MTZ;
 - PostMR: ReadySet model and dictionaries with accepted AutoSol density when
   available, otherwise an explicitly labelled Phaser map;
 - AutoSol: ReadySet model and dictionaries, separate AutoSol HA model, and
