@@ -14,7 +14,7 @@ from typing import Callable, Mapping
 from .checkpoints import READABLE_SCHEMA_VERSIONS
 from .model_assessment import file_sha256
 from .ligand_profiles import is_modification_only
-from .run_context import resolve_artifact_path
+from .run_context import artifact_reference, dataset_directory, resolve_artifact_path
 
 
 class CootViewError(RuntimeError):
@@ -26,9 +26,17 @@ _CHECKPOINT_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 @dataclass(frozen=True)
 class MetalMerge:
-    """Where the in-Coot "merge metal sites and save" command writes."""
-    output_directory: Path
+    """Where the in-Coot "merge metal sites and save" command writes.
+
+    The merged model goes to the source AutoMR run's ``Phaser`` folder and is
+    selected in that run's ``report.json["metal_merge"]``, so PostMR starts
+    from it.
+    """
+    output_directory: Path  # AutoMR/run_NNN/Phaser
     merged_stem: str  # "<starting model>-merged"; ".pdb" (or "-2.pdb", ...) is added
+    run_directory: Path  # AutoMR/run_NNN, whose report.json is updated
+    base_model: dict[str, str]  # run-anchored reference + sha256 of the Phaser model
+    metal_search: dict[str, str]  # run/dataset-anchored reference to the search folder
     warnings: tuple[str, ...] = ()
 
 
@@ -330,8 +338,31 @@ def _site_position_warnings(model: Path, record: Mapping[str, object]) -> tuple[
     return tuple(warnings)
 
 
+def _automr_run_for(
+    model: Path, record: Mapping[str, object], metal_directory: Path
+) -> Path | None:
+    """The AutoMR run whose Phaser model the metal search used."""
+    reference = record.get("source_run")
+    if (
+        isinstance(reference, Mapping)
+        and reference.get("anchor") == "dataset"
+        and isinstance(reference.get("relative_path"), str)
+        and ".." not in Path(reference["relative_path"]).parts
+    ):
+        candidate = (dataset_directory(metal_directory) / reference["relative_path"]).resolve()
+        if (candidate / "report.json").is_file():
+            return candidate
+    if model.parent.name == "Phaser" and (model.parent.parent / "report.json").is_file():
+        return model.parent.parent
+    return None
+
+
 def _metal_view(
-    anchor: Path, record: Mapping[str, object], label: str, output_directory: Path
+    anchor: Path,
+    record: Mapping[str, object],
+    label: str,
+    metal_directory: Path,
+    automr_run: Path | None = None,
 ) -> ViewProfile:
     """Phaser model + AutoSol metal sites over the Phaser map for one search."""
     inputs = record.get("inputs")
@@ -343,6 +374,17 @@ def _metal_view(
     heavy_atoms = _reported_file(
         outputs.get("heavy_atom_model"), "AutoSol heavy-atom model", anchor
     )
+    run = automr_run or _automr_run_for(model, record, metal_directory)
+    merge = None
+    if run is not None:
+        merge = MetalMerge(
+            output_directory=run / "Phaser",
+            merged_stem=f"{model.stem}-merged",
+            run_directory=run,
+            base_model={**artifact_reference(model, run), "sha256": file_sha256(model)},
+            metal_search=artifact_reference(metal_directory, run),
+            warnings=_site_position_warnings(model, record),
+        )
     return ViewProfile(
         "metal",
         model,
@@ -351,11 +393,7 @@ def _metal_view(
         (),
         f"Phaser solution with AutoSol metal sites ({label})",
         "Phaser MR map",
-        metal_merge=MetalMerge(
-            output_directory=output_directory,
-            merged_stem=f"{model.stem}-merged",
-            warnings=_site_position_warnings(model, record),
-        ),
+        metal_merge=merge,
     )
 
 
@@ -400,7 +438,8 @@ def _metal_profile(run: Path, report: Mapping[str, object]) -> ViewProfile:
     name = str(attempt.get("attempt"))
     attempt_directory = run / "AutoSolMetal" / name
     return _metal_view(
-        run, attempt, name, attempt_directory if attempt_directory.is_dir() else run
+        run, attempt, name, attempt_directory if attempt_directory.is_dir() else run,
+        automr_run=run,
     )
 
 
@@ -812,6 +851,9 @@ def _metal_merge_script(model: Path, sites: Path, merge: MetalMerge) -> str:
         "sites": str(sites),
         "output_directory": str(merge.output_directory),
         "stem": merge.merged_stem,
+        "run_directory": str(merge.run_directory),
+        "base_model": merge.base_model,
+        "metal_search": merge.metal_search,
         "warnings": list(merge.warnings),
     }
     return (
@@ -862,6 +904,46 @@ def _nasolve_cap_occupancies(imol):
     return n_atoms, notes
 
 
+def _nasolve_register_merged_model(output, n_sites, notes):
+    """Select the merged model in the AutoMR run report so PostMR uses it."""
+    import datetime
+    import hashlib
+    run = os.path.realpath(NASOLVE_MERGE["run_directory"])
+    registry = os.path.join(run, "report.json")
+    with open(registry, encoding="utf-8") as handle:
+        report = json.load(handle)
+    digest = hashlib.sha256()
+    with open(output, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    relative = os.path.relpath(os.path.realpath(output), run).replace(os.sep, "/")
+    entry = {
+        "name": os.path.basename(output),
+        "model": {"anchor": "run", "relative_path": relative, "sha256": digest.hexdigest()},
+        "base_model": NASOLVE_MERGE["base_model"],
+        "metal_search": NASOLVE_MERGE["metal_search"],
+        "sites_merged": n_sites,
+        "occupancy_changes": notes,
+        "warnings": NASOLVE_MERGE["warnings"],
+        "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    block = report.get("metal_merge")
+    if not isinstance(block, dict):
+        block = {}
+    models = block.get("models")
+    if not isinstance(models, list):
+        models = []
+    models.append(entry)
+    block.update(schema_version=1, models=models, selected=entry["name"])
+    report["metal_merge"] = block
+    temporary = registry + ".nasolve-tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\\n")
+    os.replace(temporary, registry)
+    return os.path.isdir(os.path.join(run, "PostMR"))
+
+
 def nasolve_merge_metal_sites(*_ignored):
     """Merge the open metal sites into a copy of the starting model and save it."""
     imol_model = _nasolve_find_molecule(NASOLVE_MERGE["model"])
@@ -888,13 +970,25 @@ def nasolve_merge_metal_sites(*_ignored):
     lines = ["NASolve saved the merged model:", output,
              "%d metal-site atom(s) merged into a copy of the starting model." % n_sites]
     lines += notes
+    registered = False
+    try:
+        postmr_done = _nasolve_register_merged_model(output, n_sites, notes)
+        registered = True
+        if postmr_done:
+            lines.append("PostMR has already been run for this AutoMR run, so it will not "
+                         "use this model.")
+        else:
+            lines.append("'nasolve postmr %s' will start from this model."
+                         % NASOLVE_MERGE["run_directory"])
+    except Exception as exc:
+        lines.append("Could not record it in the run report (%s); PostMR will not use it." % exc)
     if NASOLVE_MERGE["warnings"]:
         lines.append("Check before refining:")
         lines += NASOLVE_MERGE["warnings"]
     coot.info_dialog("\\n".join(lines))
     print("NASOLVE_MERGED_MODEL " + json.dumps({
         "status": "saved", "path": output, "sites": n_sites, "occupancy_changes": notes,
-        "warnings": NASOLVE_MERGE["warnings"]}), flush=True)
+        "registered": registered, "warnings": NASOLVE_MERGE["warnings"]}), flush=True)
     return output
 
 
@@ -1015,6 +1109,7 @@ def launch_coot_view(
                 "metal_merge": (
                     {
                         "output_directory": str(profile.metal_merge.output_directory),
+                        "automr_run": str(profile.metal_merge.run_directory),
                         "merged_name": profile.metal_merge.merged_stem + ".pdb",
                         "warnings": list(profile.metal_merge.warnings),
                         "log_marker": "NASOLVE_MERGED_MODEL",

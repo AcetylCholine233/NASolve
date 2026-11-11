@@ -46,15 +46,29 @@ entries are reconstructed from repository history.
   `nasolve_merge_metal_sites()`. It merges the open (possibly edited)
   `overall_best_ha_pdb.pdb` molecule into a copy of the starting Phaser model
   and writes `<model>-merged.pdb` (for example `mr_solution-merged.pdb`) in the
-  metal-search folder, adding `-2`, `-3`, ... rather than overwriting.
-  Occupancies above 1 are set to 1.00 and listed; sites whose recorded
-  symmetry-aware nearest residue is clearly closer than the site as placed are
-  flagged as belonging next to a symmetry copy. The open molecules are not
-  changed. `launch.json` records `metal_merge`, and the Coot log records
-  `NASOLVE_MERGED_MODEL`. The merged model is not entered into any run record
-  or used automatically. Coot calls follow the Coot 1.3.3 Python API bundled
-  with Phenix 2.2.1-6174; tested against a simulated Coot (not yet in a live
-  Coot session).
+  source AutoMR run's `Phaser/` folder, adding `-2`, `-3`, ... rather than
+  overwriting. Occupancies above 1 are set to 1.00 and listed; sites whose
+  recorded symmetry-aware nearest residue is clearly closer than the site as
+  placed are flagged as belonging next to a symmetry copy. The open molecules
+  are not changed. The merge is recorded in the AutoMR run's
+  `report.json["metal_merge"]` (schema_version 1: `models` with run-anchored,
+  checksummed model, base Phaser model and metal-search references, sites
+  merged, occupancy changes and warnings; `selected` = newest), written
+  atomically from Coot. `launch.json` records `metal_merge`, and the Coot log
+  records `NASOLVE_MERGED_MODEL`. Coot calls follow the Coot 1.3.3 Python API
+  bundled with Phenix 2.2.1-6174; tested against a simulated Coot (not yet in
+  a live Coot session).
+- PostMR starts from the selected merged metal model when one is recorded
+  (`nasolve postmr RUN --original-model` keeps the plain Phaser model). A
+  selected model that is missing or changed since merging stops PostMR before
+  `PostMR/` is created. The PostMR report adds `input_model_source`
+  (`phaser` or `metal-merged`) and the `metal_merge` entry used; `input_model`
+  and `input_sha256` name the merged file. With the ion in the model,
+  NARestraints (anomalous-scatterers branch) finds the metal-mediated pair and
+  skips its base-pair and stacking restraints; checked on the 7CU_Ag Phaser
+  model plus its AutoSol Ag site (B:4 / A:12 via Ag). Runs that already have
+  PostMR are unchanged. The metal searches still use the original Phaser
+  model, so a merged ion never validates itself.
 - `nasolve show PATH` looks a relative `PATH` up from the current folder and
   then from the active workspace dataset, so `nasolve show
   AutoSolMetal/run_001` works outside the dataset folder. When neither has a

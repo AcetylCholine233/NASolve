@@ -427,8 +427,12 @@ after `nasolve autosol --metal`), refusing references that fail their
 checksums. Its startup script also adds a NASolve toolbar action (and
 `nasolve_merge_metal_sites()`) that merges the open HA molecule into a copy of
 the Phaser model, caps occupancies at 1.00, and writes a new
-`<model>-merged[-N].pdb` in the metal-search directory without overwriting.
-That file is a user-curated output and is not referenced by any report. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
+`<model>-merged[-N].pdb` in the source AutoMR run's `Phaser/` directory without
+overwriting, then appends it to that run's `report.json["metal_merge"]` (run-
+anchored, SHA-256) and selects it. PostMR starts from the selected merged model
+unless `--original-model` is given, refuses one that is missing or changed, and
+records `input_model_source`; AutoSol metal searches keep using the original
+Phaser model. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
 tests use a simulated AutoSol that accepts only the full PHIL paths above.
 
 ## AutoRefine contract

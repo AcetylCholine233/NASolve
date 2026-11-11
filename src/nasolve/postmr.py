@@ -63,6 +63,8 @@ class PostMRResult:
     model_path: Path
     readyset_log: Path
     restraint_paths: tuple[Path, ...]
+    input_model: Path | None = None
+    input_model_source: str = "phaser"  # or "metal-merged"
 
 
 _COOT_BASES = frozenset({"DA", "DC", "DG", "DT", "A", "C", "G", "U"})
@@ -127,6 +129,45 @@ def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
     if fallback.is_file():
         return fallback.resolve()
     raise PostMRPreparationError("The Phaser solution PDB is missing")
+
+
+def _merged_metal_model(
+    run: Path, report: Mapping[str, object]
+) -> tuple[Path, dict[str, object]] | None:
+    """The Phaser model with metal sites merged in Coot, if one is selected.
+
+    ``report.json["metal_merge"]`` is written by the metal view's Coot command
+    ("Merge metal sites and save"), which saves ``Phaser/<model>-merged.pdb``
+    and selects it. A selected model that is missing or changed since merging
+    stops PostMR rather than silently falling back to the plain model.
+    """
+    block = report.get("metal_merge")
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise PostMRPreparationError("The metal_merge record in report.json is malformed")
+    selected = block.get("selected")
+    if selected is None:
+        return None
+    models = block.get("models")
+    entry = next(
+        (
+            item for item in (models if isinstance(models, list) else [])
+            if isinstance(item, Mapping) and item.get("name") == selected
+        ),
+        None,
+    )
+    if entry is None or not isinstance(entry.get("model"), Mapping):
+        raise PostMRPreparationError(
+            f"The selected merged metal model {selected!r} is not recorded properly"
+        )
+    path = resolve_artifact_path(entry["model"], run)
+    if path is None:
+        raise PostMRPreparationError(
+            f"The merged metal model {selected} is missing or was changed after merging. "
+            "Merge again in Coot, or use --original-model to start from the Phaser model."
+        )
+    return path, dict(entry)
 
 
 def _site_parts(site: str) -> tuple[str, str]:
@@ -1294,8 +1335,13 @@ def prepare_postmr(
     data_root: Path | None = None,
     narestraints_builder: Callable[[Path, Path, Path], object] | None = None,
     modified_pair_builder: Callable[[Path, Path, Path, Path], object] | None = None,
+    use_merged_model: bool = True,
 ) -> PostMRResult:
-    """Prepare a completed Phaser solution without modifying the MR outputs."""
+    """Prepare a completed Phaser solution without modifying the MR outputs.
+
+    When metal sites were merged into the Phaser model in Coot, PostMR starts
+    from that merged model unless ``use_merged_model`` is False.
+    """
     run, report = _read_report(run_directory)
     mr_status = report.get("status")
     if mr_status == "MR_REVIEW" and not allow_mr_review:
@@ -1324,7 +1370,13 @@ def prepare_postmr(
             "A site cannot simultaneously request standard 5'-phosphate construction "
             "and experimental backbone passthrough"
         )
-    source_model = _solution_model(run, report)
+    merged = _merged_metal_model(run, report) if use_merged_model else None
+    if merged is not None:
+        source_model, merge_record = merged
+        input_model_source = "metal-merged"
+    else:
+        source_model, merge_record = _solution_model(run, report), None
+        input_model_source = "phaser"
     try:
         family = load_frozen_sequence_family(report, run)
     except SequenceReferenceError as exc:
@@ -1673,6 +1725,8 @@ def prepare_postmr(
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "input_model": str(source_model),
         "input_sha256": file_sha256(source_model),
+        "input_model_source": input_model_source,
+        **({"metal_merge": merge_record} if merge_record is not None else {}),
         "mutation_actions": [asdict(action) for action in actions],
         "coot": {
             "ran": bool(coot_actions),
@@ -1754,6 +1808,7 @@ def prepare_postmr(
             "NASolve PostMR preparation",
             "Status: POSTMR_READY",
             f"Input model: {source_model}",
+            f"Input model source: {input_model_source}",
             *(
                 f"Mutation: {action.site} {action.before}->{action.after} ({action.method})"
                 for action in actions
@@ -1789,6 +1844,8 @@ def prepare_postmr(
         model_path=final_model,
         readyset_log=readyset_log,
         restraint_paths=tuple(restraint_paths),
+        input_model=source_model,
+        input_model_source=input_model_source,
     )
 
 

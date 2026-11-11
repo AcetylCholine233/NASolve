@@ -150,12 +150,18 @@ To keep the sites, use the **NASolve** button that NASolve adds to Coot's
 toolbar in this view and choose **Merge metal sites and save** (or type
 `nasolve_merge_metal_sites()` in Calculate > Scripting > Python). It merges the
 sites as they currently are in Coot (delete or move unwanted ones first) into
-a copy of the Phaser model and saves `mr_solution-merged.pdb` in the metal
-search folder (`-2`, `-3`, ... if that name exists; nothing is overwritten).
-AutoSol's relative occupancies above 1 are set to 1.00, and a site that AutoSol
-placed next to a symmetry copy instead of the model is flagged before you
-refine. Finding no site is a normal result and usually means the ion is not
-incorporated. Sites are never added to the model automatically, and the run's
+a copy of the Phaser model and saves `mr_solution-merged.pdb` next to it in
+`AutoMR/run_NNN/Phaser/` (`-2`, `-3`, ... if that name exists; nothing is
+overwritten). AutoSol's relative occupancies above 1 are set to 1.00, and a
+site that AutoSol placed next to a symmetry copy instead of the model is
+flagged before you refine. The newest merge is selected in the run's
+`report.json["metal_merge"]`, and PostMR then starts from it: the metal ion is
+carried through mutation and ReadySet, and NARestraints recognises the
+metal-mediated pair and writes no base-pair or stacking restraints for its two
+bases. Use `./nasolve postmr "$RUN" --original-model` to start from the plain
+Phaser model instead. Merge before running PostMR; a run that already has
+PostMR keeps it. Finding no site is a normal result and usually means the ion
+is not incorporated. Nothing is merged unless you choose to, and the run's
 stage and status do not change, so continue with PostMR either way:
 
 ```bash

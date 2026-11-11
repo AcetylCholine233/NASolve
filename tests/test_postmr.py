@@ -16,6 +16,7 @@ from nasolve.postmr import (
     _default_modified_pair_restraints_builder,
     _default_narestraints_builder,
     _filter_scaffold_overlaps,
+    _merged_metal_model,
     _modified_nucleotide_sites,
     _patch_narestraints_records,
     _read_report,
@@ -28,6 +29,8 @@ from nasolve.postmr import (
     residue_name,
     scan_anomalous_candidates,
 )
+
+from nasolve.model_assessment import file_sha256
 
 from .helpers import make_postmr_report, make_ready_set, pdb_record
 
@@ -92,6 +95,74 @@ class PostMRTests(unittest.TestCase):
             self.assertEqual(
                 _solution_model(checkout_run, report), checkout_model.resolve()
             )
+
+    def test_postmr_starts_from_the_merged_metal_model_when_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            report_path = make_postmr_report(run, source)
+            merged = run / "Phaser" / "mr_solution-merged.pdb"
+            merged.write_text(postmr_model_text().replace("END\n", "") + pdb_record(
+                "HETATM", 4, "AG", "AG", "Z", 1, element="AG") + "END\n")
+            report = json.loads(report_path.read_text())
+            report["metal_merge"] = {"schema_version": 1, "selected": merged.name, "models": [{
+                "name": merged.name,
+                "model": {"anchor": "run", "relative_path": "Phaser/" + merged.name,
+                          "sha256": file_sha256(merged)},
+            }]}
+            report_path.write_text(json.dumps(report))
+            seen = []
+
+            def fake_builder(pdb: Path, pairs: Path, output: Path) -> None:
+                seen.append(pdb.read_text())
+                output.write_text("geometry_restraints.edits {}\n")
+
+            data_root = make_data_root(root)
+            # A changed merged model stops before anything is created.
+            original_text = merged.read_text()
+            merged.write_text(original_text + "REMARK edited\n")
+            with self.assertRaisesRegex(PostMRPreparationError, "--original-model"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               narestraints_builder=fake_builder)
+            self.assertFalse((run / "PostMR").exists())
+            merged.write_text(original_text)
+
+            result = prepare_postmr(
+                run, make_ready_set(root), data_root=data_root,
+                narestraints_builder=fake_builder,
+            )
+            self.assertEqual(result.input_model_source, "metal-merged")
+            self.assertEqual(result.input_model, merged.resolve())
+            self.assertIn(" AG ", seen[0])
+            self.assertIn(" AG ", result.model_path.read_text())
+            postmr = json.loads((result.postmr_directory / "report.json").read_text())
+            self.assertEqual(postmr["input_model_source"], "metal-merged")
+            self.assertEqual(postmr["input_sha256"], file_sha256(merged))
+            self.assertEqual(postmr["metal_merge"]["name"], merged.name)
+
+    def test_original_model_option_ignores_a_merged_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            report_path = make_postmr_report(run, source)
+            report = json.loads(report_path.read_text())
+            report["metal_merge"] = {"schema_version": 1, "selected": "gone.pdb", "models": [{
+                "name": "gone.pdb", "model": {"anchor": "run", "relative_path": "Phaser/gone.pdb"},
+            }]}
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(PostMRPreparationError, "missing or was changed"):
+                _merged_metal_model(run, report)
+            result = prepare_postmr(
+                run, make_ready_set(root), data_root=make_data_root(root),
+                narestraints_builder=lambda pdb, pairs, output: output.write_text("x\n"),
+                use_merged_model=False,
+            )
+            self.assertEqual(result.input_model_source, "phaser")
+            self.assertEqual(result.input_model.name, "mr_solution.pdb")
 
     def test_non_object_report_is_rejected_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:

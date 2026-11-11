@@ -146,8 +146,12 @@ class MetalMergeTests(unittest.TestCase):
             root = Path(directory)
             run, result = _site_record(root)
             metal = result.output_directory
+            phaser = run / "Phaser"
             view = self._launch(root, metal)
-            self.assertEqual(view.metal_merge.output_directory, metal)
+            # Regression: the merged model went to the metal-search folder,
+            # where PostMR never looked.
+            self.assertEqual(view.metal_merge.output_directory, phaser)
+            self.assertEqual(view.metal_merge.run_directory, run)
             self.assertEqual(view.metal_merge.merged_stem, "mr_solution-merged")
             script = view.command[view.command.index("--script") + 1]
             record = json.loads((view.working_directory / "launch.json").read_text())
@@ -159,7 +163,7 @@ class MetalMergeTests(unittest.TestCase):
                 exec(compile(Path(script).read_text(), script, "exec"), namespace)
                 merge = fake.menu_actions[("NASolve", "Merge metal sites and save")]
                 merge(None, None)
-                first = metal / "mr_solution-merged.pdb"
+                first = phaser / "mr_solution-merged.pdb"
                 self.assertTrue(first.is_file())
                 merged = first.read_text()
                 # Starting model atoms plus the metal site, occupancy capped at 1.
@@ -168,12 +172,43 @@ class MetalMergeTests(unittest.TestCase):
                 self.assertEqual(silver[54:60], "  1.00")
                 self.assertIn("occupancy 1.50 set to 1.00", fake.dialogs[-1])
                 self.assertIn(str(first), fake.dialogs[-1])
+                self.assertIn("will start from this model", fake.dialogs[-1])
                 # The open originals are untouched.
                 self.assertEqual(fake.molecules[1]["atoms"][0][5], 1.5)
 
+                # The AutoMR run report selects the merged model for PostMR.
+                block = json.loads((run / "report.json").read_text())["metal_merge"]
+                self.assertEqual(block["selected"], "mr_solution-merged.pdb")
+                entry = block["models"][0]
+                self.assertEqual(entry["model"]["relative_path"], "Phaser/mr_solution-merged.pdb")
+                self.assertEqual(entry["model"]["sha256"], file_sha256(first))
+                self.assertEqual(entry["base_model"]["relative_path"], "Phaser/mr_solution.pdb")
+                self.assertEqual(entry["metal_search"],
+                                 {"anchor": "dataset", "relative_path": "AutoSolMetal/run_001"})
+                self.assertEqual(entry["sites_merged"], 1)
+
                 second = namespace["nasolve_merge_metal_sites"]()
-                self.assertEqual(Path(second), metal / "mr_solution-merged-2.pdb")
+                self.assertEqual(Path(second), phaser / "mr_solution-merged-2.pdb")
                 self.assertEqual(first.read_text(), merged)
+                block = json.loads((run / "report.json").read_text())["metal_merge"]
+                self.assertEqual(block["selected"], "mr_solution-merged-2.pdb")
+                self.assertEqual(len(block["models"]), 2)
+                self.assertEqual(json.loads((run / "report.json").read_text())["status"],
+                                 "MR_SUCCESS")
+
+    def test_merge_after_postmr_warns_that_postmr_will_not_use_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run, result = _site_record(root)
+            (run / "PostMR").mkdir()
+            view = self._launch(root, result.output_directory)
+            script = view.command[view.command.index("--script") + 1]
+            fake = FakeCoot([view.model_path, view.extra_model_paths[0]])
+            with patch.dict(sys.modules, fake.modules()):
+                namespace = {"__name__": "__main__"}
+                exec(compile(Path(script).read_text(), script, "exec"), namespace)
+                namespace["nasolve_merge_metal_sites"]()
+            self.assertIn("PostMR has already been run", fake.dialogs[-1])
 
     def test_sites_deleted_in_coot_and_closed_molecules(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,9 +238,10 @@ class MetalMergeTests(unittest.TestCase):
             profile = resolve_view_profile(result.output_directory)
             self.assertEqual(len(profile.metal_merge.warnings), 1)
             self.assertIn("symmetry copy", profile.metal_merge.warnings[0])
+            self.assertEqual(profile.metal_merge.output_directory, run / "Phaser")
             self.assertEqual(
                 resolve_view_profile(run, stage="metal").metal_merge.output_directory,
-                result.output_directory,
+                run / "Phaser",
             )
 
     def test_other_views_have_no_merge_command(self):

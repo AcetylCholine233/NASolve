@@ -177,6 +177,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     postmr.add_argument("--coot", help="one-run Coot executable override")
     postmr.add_argument(
+        "--original-model", action="store_true",
+        help=(
+            "start from the original Phaser model even if metal sites were merged "
+            "into it in Coot (Phaser/*-merged.pdb)"
+        ),
+    )
+    postmr.add_argument(
         "--allow-mr-review", action="store_true",
         help="explicitly continue from a TFZ 7.0-7.99 MR_REVIEW result",
     )
@@ -633,6 +640,7 @@ def _print_metal_merge_hint(merge) -> None:
         "Calculate > Scripting > Python)."
     )
     print(f"Merged model will be saved as: {merge.output_directory / (merge.merged_stem + '.pdb')}")
+    print(f"'nasolve postmr {merge.run_directory}' then starts from the merged model.")
     for warning in merge.warnings:
         print(f"Warning: {warning}")
 
@@ -753,6 +761,7 @@ def _postmr(args: argparse.Namespace) -> int:
             allow_mr_review=args.allow_mr_review,
             modified_pairs_only=args.modified_pairs_only,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
+            use_merged_model=not args.original_model,
         )
     except (
         ConfigError,
@@ -764,6 +773,12 @@ def _postmr(args: argparse.Namespace) -> int:
         return 2
     print(f"{result.status}: {result.message}")
     print(f"Run directory: {result.run_directory}")
+    if result.input_model is not None:
+        source = (
+            "Phaser model with merged metal sites"
+            if result.input_model_source == "metal-merged" else "Phaser model"
+        )
+        print(f"Starting model: {result.input_model} ({source})")
     print(f"Prepared model: {result.model_path}")
     print(f"ReadySet log: {result.readyset_log}")
     for restraint in result.restraint_paths:
