@@ -228,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
              "(autosol.phasing.partpdb_rms; default 1.0)",
     )
     autosol.add_argument(
+        "--sequence", type=Path, metavar="FILE",
+        help="sequence file for the metal search (default: the frame's seq_base.txt "
+             "frozen by AutoMR, else the chains of the Phaser model)",
+    )
+    autosol.add_argument(
         "--allow-mr-review", action="store_true",
         help="allow the metal search on a Phaser result that needs review (TFZ 7-8)",
     )
@@ -991,6 +996,7 @@ def _autosol_metal(args: argparse.Namespace) -> int:
                 DEFAULT_PARTIAL_MODEL_RMSD if args.rmsd is None else args.rmsd
             ),
             allow_mr_review=args.allow_mr_review,
+            sequence_file=args.sequence,
             environment=phenix.environment,
         )
     except (AutoSolPreparationError, ConfigError, PhenixDiscoveryError) as exc:
@@ -999,6 +1005,14 @@ def _autosol_metal(args: argparse.Namespace) -> int:
     print(f"{result.status}: {result.message}")
     print(f"Metals searched: {', '.join(result.metals)}")
     print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
+    try:
+        record = json.loads(result.report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    if record.get("sequence_source"):
+        print(f"Sequence: {record['sequence_source']}")
+    for warning in record.get("sequence_warnings") or ():
+        print(f"Sequence warning: {warning}")
     print(f"AutoMR run: {result.run_directory}")
     print(f"Metal-search folder: {result.output_directory}")
     print(f"AutoSol log: {result.log_path}")
@@ -1042,10 +1056,10 @@ def _autosol_metal(args: argparse.Namespace) -> int:
 def _autosol(args: argparse.Namespace) -> int:
     if args.metal:
         return _autosol_metal(args)
-    if args.rmsd is not None or args.allow_mr_review or args.no_coot:
+    if args.rmsd is not None or args.allow_mr_review or args.no_coot or args.sequence:
         print(
-            "AutoSol error: --rmsd, --allow-mr-review and --no-coot apply only to the "
-            "metal search; add --metal ELEMENT",
+            "AutoSol error: --rmsd, --allow-mr-review, --sequence and --no-coot apply "
+            "only to the metal search; add --metal ELEMENT",
             file=sys.stderr,
         )
         return 2

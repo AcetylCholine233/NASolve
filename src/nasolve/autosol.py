@@ -199,8 +199,14 @@ def anomalous_labels(mtz_dump_output: str) -> tuple[str, str, str, str]:
 
 
 def _sequence_source(
-    report: Mapping[str, object], run: Path
+    report: Mapping[str, object], run: Path, *, required: bool = True
 ) -> tuple[Path | None, str | None]:
+    """The run's sequence for AutoSol: a frozen or frame file, or PostMR text.
+
+    With ``required=False``, finding none returns ``(None, None)`` instead of
+    raising; a frozen sequence that is missing or fails its checksum is always
+    an error.
+    """
     inputs = report.get("inputs")
     if isinstance(inputs, Mapping) and inputs.get("frame_sequence") is not None:
         sequence_value = inputs["frame_sequence"]
@@ -284,6 +290,8 @@ def _sequence_source(
         ):
             text = "\n\n".join(str(value) for value in sequences.values()) + "\n"
             return None, text
+    if not required:
+        return None, None
     raise AutoSolPreparationError(
         "AutoSol needs MR_frames/FRAME/seq_base.txt or complete run sequences"
     )

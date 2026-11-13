@@ -391,10 +391,15 @@ metal ions, run directly after Phaser. It requires an AutoMR run with an
 accepted Phaser result (best TFZ >= 8; 7 <= TFZ < 8 only with
 `--allow-mr-review`) and may also run after PostMR, because it always uses the
 original Phaser solution PDB and never a modified model. Inputs follow the
-nucleotide branch: checksum-verified STARANISO reflections, the `summary.html`
-wavelength, a complete anomalous quartet confirmed by `phenix.mtz.dump`, and
-the frozen frame or run sequence. All checks complete before any directory is
-created, so a refused search leaves nothing behind.
+nucleotide branch: checksum-verified STARANISO reflections, the MTZ-header
+wavelength, and a complete anomalous quartet confirmed by `phenix.mtz.dump`.
+The sequence is, in order, `--sequence FILE`, the frozen frame or run sequence
+(a missing or altered frozen sequence is still an error), or the nucleotide
+chains of the Phaser model (residues with C1'; curated modified residues count
+as their parent, DU as T, others are left out with a warning). The 3GBI
+catalogue has no `seq_base.txt`, so 3GBI runs use the Phaser model. The report
+records `sequence_source` and `sequence_warnings`. All checks complete before
+any directory is created, so a refused search leaves nothing behind.
 
 The first named metal is `autosol.atom_type`; additional metals go to
 `autosol.phasing.mad_ha_add_list`. `autosol.phasing.partpdb_rms` defaults to

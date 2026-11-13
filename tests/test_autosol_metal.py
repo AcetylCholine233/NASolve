@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from nasolve.autosol import AutoSolPreparationError
 from nasolve.autosol_metal import (
+    model_sequences,
     FAILED,
     FOUND,
     NOT_FOUND,
@@ -456,6 +457,82 @@ class MetalViewTests(unittest.TestCase):
                 resolve_view_profile(run, stage="metal")
 
 
+class SequenceSourceTests(unittest.TestCase):
+    """AutoSol's sequence for the metal search: --sequence, the run, or the
+    Phaser model. Regression: a run without MR_frames/FRAME/seq_base.txt (the
+    3GBI frame has none) stopped with "AutoSol needs ... seq_base.txt"."""
+
+    def test_sequence_from_the_phaser_model_when_the_run_has_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            (root / "MR_frames" / "5W6W" / "seq_base.txt").unlink()
+            result = search(run, make_autosol(root, []), root)
+            record = json.loads(result.report_path.read_text())
+            # Only A:12 has a C1' atom in this fixture; B:4 and B:5 are base
+            # fragments, so they are not counted as nucleotides.
+            self.assertEqual(record["sequence_source"], "derived from the Phaser model (chain A: 1)")
+            self.assertEqual(record["sequence_warnings"], [])
+            sequence = result.output_directory / "sequence_input.txt"
+            self.assertEqual(sequence.read_text(), "C\n")
+            self.assertIn(f"autosol.seq_file={sequence}", record["command"])
+
+    def test_run_sequence_is_still_preferred_and_sequence_file_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            result = search(run, make_autosol(root, []), root)
+            record = json.loads(result.report_path.read_text())
+            self.assertEqual(record["sequence_source"], "run-frozen sequence file")
+            self.assertEqual((result.output_directory / "sequence_input.txt").read_text(),
+                             "GAGC\n\nCTGC\n")
+
+            given = root / "my_sequence.txt"
+            given.write_text(">strand 1\nGAGCAG\n")
+            result = search(run, make_autosol(root, []), root, sequence_file=given)
+            record = json.loads(result.report_path.read_text())
+            self.assertEqual(record["sequence_source"], "--sequence my_sequence.txt")
+            self.assertEqual((result.output_directory / "sequence_input.txt").read_text(),
+                             ">strand 1\nGAGCAG\n")
+
+            (root / "empty.txt").write_text(">only a header\n\n")
+            for path, message in ((root / "missing.txt", "No sequence file"),
+                                  (root / "empty.txt", "has no sequence")):
+                with self.subTest(path=path.name), self.assertRaisesRegex(
+                    AutoSolPreparationError, message
+                ):
+                    search(run, make_autosol(root, []), root, sequence_file=path)
+
+    def test_no_sequence_anywhere_names_the_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            (root / "MR_frames" / "5W6W" / "seq_base.txt").unlink()
+            (run / "Phaser" / "mr_solution.pdb").write_text(
+                pdb_record("HETATM", 1, "AG", "AG", "B", 101, element="AG") + "END\n"
+            )
+            with self.assertRaisesRegex(AutoSolPreparationError, "give one with --sequence FILE"):
+                search(run, make_autosol(root, []), root)
+            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+
+    def test_model_sequences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.pdb"
+            records = []
+            for serial, (name, chain, number) in enumerate((
+                ("DG", "A", 1), ("DU", "A", 2), ("5IU", "A", 3), ("XYZ", "A", 4),
+                ("DC", "B", 1), ("G", "R", 1), ("U", "R", 2),
+            ), start=1):
+                records.append(pdb_record("ATOM", serial, "C1'", name, chain, number, element="C"))
+            records.append(pdb_record("HETATM", 20, "AG", "AG", "B", 101, element="AG"))
+            records.append(pdb_record("HETATM", 21, "O", "HOH", "W", 1, element="O"))
+            path.write_text("".join(records) + "END\n")
+            chains, warnings = model_sequences(path)
+            self.assertEqual(chains, {"A": "GTT", "B": "C", "R": "GU"})
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("A:4 XYZ left out", warnings[0])
+
+
 class MetalCommandTests(unittest.TestCase):
     def _phenix(self, root: Path, autosol: Path) -> PhenixInstallation:
         return PhenixInstallation(
@@ -505,6 +582,32 @@ class MetalCommandTests(unittest.TestCase):
             self.assertIn(f"Metal-search folder: {metal}", out)
             self.assertTrue((metal / "CootGUI" / "metal" / "launch.json").is_file())
             self.assertFalse((run / "CootGUI").exists())
+
+    def test_sequence_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            (root / "MR_frames" / "5W6W" / "seq_base.txt").unlink()
+            code, out, err, _ = self._main(
+                ["autosol", str(run), "--metal", "AG", "--no-coot"],
+                self._phenix(root, make_autosol(root, [])),
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Sequence: derived from the Phaser model (chain A: 1)", out)
+            given = root / "seq.txt"
+            given.write_text("GAGC\n")
+            code, out, err, _ = self._main(
+                ["autosol", str(run), "--metal", "AG", "--no-coot", "--sequence", str(given)],
+                self._phenix(root, make_autosol(root, [])),
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Sequence: --sequence seq.txt", out)
+            code, _, err, _ = self._main(
+                ["autosol", str(run), "--sequence", str(given)],
+                self._phenix(root, make_autosol(root, [])),
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("--sequence and --no-coot apply only to the metal search", err)
 
     def test_not_found_and_no_coot_do_not_open_coot(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -128,7 +128,11 @@ RUN=/absolute/path/to/dataset/AutoMR/run_001
 
 This runs `phenix.autosol` with the original Phaser model as the partial model
 (`autosol.phasing.partpdb_rms`, default 1.0 A; change it with `--rmsd`), lets
-AutoSol choose the number of sites, and does no model building. Each search
+AutoSol choose the number of sites, and does no model building. AutoSol's
+sequence is the frame `seq_base.txt` that AutoMR froze into the run (only the W
+catalogue has one); otherwise the nucleotide chains of the Phaser model are
+used (for example with the 3GBI frame), or give a file with `--sequence FILE`.
+The report records which source was used. Each search
 gets a new numbered folder in the dataset directory, next to `AutoMR` and the
 data:
 

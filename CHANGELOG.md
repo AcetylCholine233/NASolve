@@ -10,6 +10,18 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- The metal search (`nasolve autosol RUN --metal ELEMENT`) stopped with
+  "AutoSol needs MR_frames/FRAME/seq_base.txt or complete run sequences" for
+  any AutoMR run without a frozen frame sequence, such as every 3GBI-frame run
+  (only the W catalogue ships `seq_base.txt`), because PostMR sequences do not
+  exist yet at that stage. It now falls back to the nucleotide chains of the
+  Phaser model, which hold every strand in the asymmetric unit (residues with
+  C1'; curated modified residues as their parent; DU as T; others left out with
+  a warning), and `--sequence FILE` gives a sequence explicitly (metal search
+  only). A frozen sequence that is missing or fails its checksum is still an
+  error. Schema: metal-search `report.json` gains `sequence_warnings`;
+  `sequence_source` can now be `--sequence NAME` or `derived from the Phaser
+  model (...)`. The command prints the source. Phenix simulated in tests.
 - AutoMR's `phaser.eff` quoted paths with JSON escaping, so non-ASCII
   characters were written as `\uXXXX`. PHIL keeps such sequences literally,
   and Phaser stopped with "Couldn't find the file" for any dataset whose path

@@ -304,6 +304,70 @@ def _record(
     return output_report
 
 
+#: One-letter codes AutoSol reads for the standard nucleotides. DU counts as T
+#: so that a DNA chain stays DNA for AutoSol's chain-type guess.
+_NUCLEOTIDE_LETTERS = {
+    "DA": "A", "DC": "C", "DG": "G", "DT": "T", "DU": "T",
+    "A": "A", "C": "C", "G": "G", "U": "U",
+}
+
+
+def model_sequences(path: Path) -> tuple[dict[str, str], list[str]]:
+    """Nucleotide sequence of each chain of a model, in file order.
+
+    A nucleotide is a residue with a C1' atom (first model only). Standard
+    names map to one letter; a curated modified residue counts as its parent
+    (for example 5IU as DU, read as T). Any other nucleotide is left out and
+    named in the returned warnings. Ions, waters and other residues are
+    ignored.
+    """
+    from .curated_ligands import CURATED_LIGANDS
+
+    residues: dict[str, dict[tuple[str, str], tuple[str, bool]]] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("ENDMDL"):
+            break
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        chain = line[21:22].strip() or "_"
+        key = (line[22:26].strip(), line[26:27].strip())
+        name, has_c1 = residues.setdefault(chain, {}).get(key, (line[17:20].strip(), False))
+        residues[chain][key] = (name, has_c1 or line[12:16].strip() in {"C1'", "C1*"})
+    chains: dict[str, str] = {}
+    warnings: list[str] = []
+    for chain, members in residues.items():
+        letters = []
+        for (number, insertion), (name, nucleotide) in members.items():
+            if not nucleotide:
+                continue
+            code = name.upper()
+            curated = CURATED_LIGANDS.get(code)
+            if code not in _NUCLEOTIDE_LETTERS and curated is not None:
+                code = str(getattr(curated, "parent_code", "") or "").upper()
+            letter = _NUCLEOTIDE_LETTERS.get(code)
+            if letter is None:
+                warnings.append(
+                    f"{chain}:{number}{insertion} {name} left out of the AutoSol sequence "
+                    "(no one-letter code)"
+                )
+                continue
+            letters.append(letter)
+        if letters:
+            chains[chain] = "".join(letters)
+    return chains, warnings
+
+
+def _checked_sequence_file(path: Path) -> Path:
+    sequence = path.expanduser().resolve()
+    if not sequence.is_file():
+        raise AutoSolPreparationError(f"No sequence file: {sequence}")
+    text = sequence.read_text(encoding="utf-8", errors="replace")
+    body = "".join(line for line in text.splitlines() if not line.startswith(">"))
+    if not re.sub(r"\s", "", body):
+        raise AutoSolPreparationError(f"Sequence file {sequence.name} has no sequence")
+    return sequence
+
+
 def execute_metal_search(
     run_directory: Path,
     autosol_executable: Path,
@@ -312,10 +376,18 @@ def execute_metal_search(
     *,
     partial_model_rmsd: float = DEFAULT_PARTIAL_MODEL_RMSD,
     allow_mr_review: bool = False,
+    sequence_file: Path | None = None,
     environment: Mapping[str, str] | None = None,
     processor_count: int | None = None,
 ) -> MetalSearchResult:
-    """Search for metal sites with MR-SAD AutoSol guided by the Phaser model."""
+    """Search for metal sites with MR-SAD AutoSol guided by the Phaser model.
+
+    AutoSol's sequence comes, in order, from ``sequence_file`` (``--sequence``),
+    the run (the frame ``seq_base.txt`` AutoMR froze, or PostMR sequences),
+    or else the nucleotide chains of the Phaser model itself, which hold every
+    strand in the asymmetric unit (needed for frames without ``seq_base.txt``,
+    such as 3GBI).
+    """
     elements = parse_metals(metals)
     if not math.isfinite(partial_model_rmsd) or partial_model_rmsd <= 0:
         raise AutoSolPreparationError("The partial-model RMSD must be a positive number of Angstrom")
@@ -334,7 +406,29 @@ def execute_metal_search(
     input_dump = _run_mtz_dump(reflections, mtz_dump_executable, environment)
     wavelength, wavelength_source = resolve_wavelength(input_dump, reflections, summary)
     labels = anomalous_labels(input_dump)
-    sequence_source, generated_sequence = _sequence_source(report, run)
+    sequence_warnings: list[str] = []
+    if sequence_file is not None:
+        sequence_source = _checked_sequence_file(sequence_file)
+        generated_sequence = None
+        sequence_origin = f"--sequence {sequence_source.name}"
+    else:
+        sequence_source, generated_sequence = _sequence_source(report, run, required=False)
+        if sequence_source is not None:
+            sequence_origin = "run-frozen sequence file"
+        elif generated_sequence is not None:
+            sequence_origin = "post_mr_plan.sequences"
+        else:
+            chains, sequence_warnings = model_sequences(phaser_model)
+            if not chains:
+                raise AutoSolPreparationError(
+                    "No sequence for AutoSol: the run has none (no MR_frames/FRAME/"
+                    "seq_base.txt) and the Phaser model has no nucleotide chains; "
+                    "give one with --sequence FILE"
+                )
+            generated_sequence = "\n\n".join(chains.values()) + "\n"
+            sequence_origin = "derived from the Phaser model (" + ", ".join(
+                f"chain {chain}: {len(text)}" for chain, text in chains.items()
+            ) + ")"
     nproc = max(1, processor_count if processor_count is not None else (os.cpu_count() or 1))
 
     output = _next_metal_run(run)
@@ -342,10 +436,8 @@ def execute_metal_search(
     sequence_path = output / "sequence_input.txt"
     if sequence_source is not None:
         shutil.copyfile(sequence_source, sequence_path)
-        sequence_origin = "run-frozen sequence file"
     else:
         sequence_path.write_text(str(generated_sequence), encoding="utf-8")
-        sequence_origin = "post_mr_plan.sequences"
 
     # Full PHIL paths: short names such as atom_type also exist in the
     # wavelength/deriv scopes and are ambiguous to newer Phenix parsers.
@@ -383,6 +475,7 @@ def execute_metal_search(
         "wavelength_source": wavelength_source,
         "input_labels": list(labels),
         "sequence_source": sequence_origin,
+        "sequence_warnings": sequence_warnings,
         "inputs": {
             "reflections": _reference(reflections, output),
             "phaser_model": _reference(phaser_model, output),
