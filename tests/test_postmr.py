@@ -16,6 +16,7 @@ from nasolve.postmr import (
     _default_modified_pair_restraints_builder,
     _default_narestraints_builder,
     _filter_scaffold_overlaps,
+    _merged_metal_model,
     _modified_nucleotide_sites,
     _patch_narestraints_records,
     _read_report,
@@ -27,7 +28,10 @@ from nasolve.postmr import (
     prepare_postmr,
     residue_name,
     scan_anomalous_candidates,
+    scan_metal_anomalous_sites,
 )
+
+from nasolve.model_assessment import file_sha256
 
 from .helpers import make_postmr_report, make_ready_set, pdb_record
 
@@ -92,6 +96,118 @@ class PostMRTests(unittest.TestCase):
             self.assertEqual(
                 _solution_model(checkout_run, report), checkout_model.resolve()
             )
+
+    def test_postmr_starts_from_the_merged_metal_model_when_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            report_path = make_postmr_report(run, source)
+            merged = run / "Phaser" / "mr_solution-merged.pdb"
+            merged.write_text(postmr_model_text().replace("END\n", "") + pdb_record(
+                "HETATM", 4, "AG", "AG", "Z", 1, element="AG") + "END\n")
+            report = json.loads(report_path.read_text())
+            report["metal_merge"] = {"schema_version": 1, "selected": merged.name, "models": [{
+                "name": merged.name,
+                "model": {"anchor": "run", "relative_path": "Phaser/" + merged.name,
+                          "sha256": file_sha256(merged)},
+            }]}
+            report_path.write_text(json.dumps(report))
+            seen = []
+
+            def fake_builder(pdb: Path, pairs: Path, output: Path) -> None:
+                seen.append(pdb.read_text())
+                output.write_text("geometry_restraints.edits {}\n")
+
+            data_root = make_data_root(root)
+            # A changed merged model stops before anything is created.
+            original_text = merged.read_text()
+            merged.write_text(original_text + "REMARK edited\n")
+            with self.assertRaisesRegex(PostMRPreparationError, "--original-model"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               narestraints_builder=fake_builder)
+            self.assertFalse((run / "PostMR").exists())
+            merged.write_text(original_text)
+
+            result = prepare_postmr(
+                run, make_ready_set(root), data_root=data_root,
+                narestraints_builder=fake_builder,
+            )
+            self.assertEqual(result.input_model_source, "metal-merged")
+            self.assertEqual(result.input_model, merged.resolve())
+            self.assertIn(" AG ", seen[0])
+            self.assertIn(" AG ", result.model_path.read_text())
+            postmr = json.loads((result.postmr_directory / "report.json").read_text())
+            self.assertEqual(postmr["input_model_source"], "metal-merged")
+            self.assertEqual(postmr["input_sha256"], file_sha256(merged))
+            self.assertEqual(postmr["metal_merge"]["name"], merged.name)
+
+            # The merged Ag becomes an anomalous scatterer; Mg (Z < 21) does not,
+            # and metals never trigger the nucleotide AutoSol branch.
+            anomalous = postmr["anomalous"]
+            self.assertEqual(
+                [(m["site"], m["atom_name"], m["element"], m["kind"])
+                 for m in anomalous["metal_sites"]],
+                [("Z:1", "AG", "AG", "metal")],
+            )
+            self.assertFalse(anomalous["autosol_required"])
+            self.assertEqual(anomalous["candidates"], [])
+            phil = result.anomalous_scatterer_phil
+            self.assertEqual(phil, result.postmr_directory / "Restraints" / "anomalous_scatterers.phil")
+            text = phil.read_text()
+            self.assertIn('selection = "chain Z and resid 1 and name AG"', text)
+            self.assertIn("*group_anomalous", text)
+            self.assertIn("refine = *f_prime *f_double_prime", text)
+            self.assertEqual(anomalous["metal_scatterer_phil"]["sha256"], file_sha256(phil))
+            self.assertNotIn(phil, result.restraint_paths)  # AutoRefine writes its own groups
+            self.assertIn("Metal anomalous scatterers: AG Z:1 AG",
+                          (result.postmr_directory / "postmr.log").read_text())
+
+    def test_metal_scan_needs_the_anomalous_narestraints_only_when_a_metal_is_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plain = root / "plain.pdb"
+            plain.write_text(postmr_model_text())  # DE, DG and a Mg ion
+            silver = root / "silver.pdb"
+            silver.write_text(postmr_model_text().replace("END\n", "") + pdb_record(
+                "HETATM", 4, "AG", "AG", "Z", 1, element="AG") + "END\n")
+            iodine = root / "iodine.pdb"
+            iodine.write_text("".join([
+                pdb_record("HETATM", 1, "C1'", "5IU", "A", 8, element="C"),
+                pdb_record("HETATM", 2, "C2'", "5IU", "A", 8, element="C"),
+                pdb_record("HETATM", 3, "I5", "5IU", "A", 8, element="I"),
+                "END\n",
+            ]))
+            self.assertEqual(scan_metal_anomalous_sites(plain)[0], [])
+            self.assertEqual(scan_metal_anomalous_sites(iodine)[0], [])  # nucleotide, not metal
+            self.assertEqual(len(scan_metal_anomalous_sites(silver)[0]), 1)
+            with patch.dict(sys.modules, {"restraints.anomalous": None}):
+                self.assertEqual(scan_metal_anomalous_sites(plain)[0], [])
+                with self.assertRaisesRegex(PostMRPreparationError, "anomalous-scatterer support"):
+                    scan_metal_anomalous_sites(silver)
+
+    def test_original_model_option_ignores_a_merged_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            report_path = make_postmr_report(run, source)
+            report = json.loads(report_path.read_text())
+            report["metal_merge"] = {"schema_version": 1, "selected": "gone.pdb", "models": [{
+                "name": "gone.pdb", "model": {"anchor": "run", "relative_path": "Phaser/gone.pdb"},
+            }]}
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(PostMRPreparationError, "missing or was changed"):
+                _merged_metal_model(run, report)
+            result = prepare_postmr(
+                run, make_ready_set(root), data_root=make_data_root(root),
+                narestraints_builder=lambda pdb, pairs, output: output.write_text("x\n"),
+                use_merged_model=False,
+            )
+            self.assertEqual(result.input_model_source, "phaser")
+            self.assertEqual(result.input_model.name, "mr_solution.pdb")
 
     def test_non_object_report_is_rejected_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -643,6 +759,79 @@ class PostMRTests(unittest.TestCase):
             self.assertIn("add_ligand_delete_residue_copy_molecule", script)
             self.assertIn("ligand_imol, 'A', 1", script)
             self.assertIn("delete_hydrogen_atoms", script)
+
+    def test_du_target_uses_the_packaged_ccd_dictionary_with_dt_parent(self):
+        # Regression: C:U (dU at B:4) stopped with "No local CCD dictionary for DU".
+        packaged = Path(__file__).parents[1] / "src" / "nasolve" / "data" / "ligands" / "DU.cif"
+        validate_curated_dictionary("DU", packaged)
+        self.assertIn("_chem_comp.type                                  \"DNA LINKING\"",
+                      packaged.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.pdb"
+            model.write_text(postmr_model_text("DT", "DT"))
+            run = root / "run"
+            report = json.loads(make_postmr_report(
+                run, model, first="DC", second="DU", requested="C:U").read_text())
+            actions = build_mutation_plan(report, model)
+            self.assertEqual(
+                [(a.site, a.after, a.method, a.parent_code) for a in actions],
+                [("A:12", "DC", "coot-mutate-base", None),
+                 ("B:4", "DU", "coot-parent-overlap", "DT")],
+            )
+            script = _coot_script(model, root / "raw.pdb", actions, {"DU": packaged},
+                                  {"B:4": root / "B4-DT.pdb"})
+            # B:4 is already the parent DT, so Coot only builds and overlays DU.
+            self.assertNotIn("mutate_base(imol, 'B', 4, '', 'DT')", script)
+            self.assertIn("get_monomer_from_dictionary('DU', 0)", script)
+
+    def test_du_keeps_every_dt_coordinate_and_drops_the_methyl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent, raw, output = root / "parent.pdb", root / "raw.pdb", root / "out.pdb"
+            ring = ("N1", "C2", "O2", "N3", "C4", "O4", "C5", "C6")
+            parent.write_text("".join(
+                pdb_record("ATOM", i, atom, "DT", "B", 4,
+                           element="P" if atom == "P" else atom[0], x=float(i), y=1.0, z=2.0)
+                for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring + ("C7",), 1)
+            ) + "END\n")
+            raw.write_text("".join(
+                pdb_record("HETATM", i, atom, "DU", "B", 4,
+                           element="P" if atom == "P" else atom[0], x=float(i) + 50.0)
+                for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring, 1)
+            ) + "END\n")
+            action = MutationAction("B:4", "DT", "DU", "coot-parent-overlap",
+                                    parent_code="DT", deposition_code="DU")
+            restoration = _restore_shared_parent_coordinates(raw, output, (action,),
+                                                            {"B:4": parent})
+            atoms = {line[12:16].strip(): float(line[30:38])
+                     for line in output.read_text().splitlines() if line.startswith("HETATM")}
+            self.assertNotIn("C7", atoms)
+            self.assertEqual(restoration["B:4"]["count"], len(atoms))
+            for i, atom in enumerate(PROTECTED_PARENT_ATOMS + ring, 1):
+                self.assertEqual(atoms[atom], float(i))
+
+    def test_missing_dictionary_or_coot_never_leaves_a_postmr_folder(self):
+        # Regression: the dictionary was looked up after PostMR/ was created,
+        # so the failure left a folder that blocked every later attempt.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.pdb"
+            model.write_text(postmr_model_text("DT", "DT"))
+            run = root / "run"
+            make_postmr_report(run, model, first="DT", second="DU", requested="T:U")
+            data_root = make_data_root(root)  # has no DU.cif
+            with self.assertRaisesRegex(PostMRPreparationError, "No local CCD dictionary for DU"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               coot_executable=root / "coot",
+                               narestraints_builder=lambda *a: None)
+            self.assertFalse((run / "PostMR").exists())
+            shutil.copyfile(Path(__file__).parents[1] / "src" / "nasolve" / "data"
+                            / "ligands" / "DU.cif", data_root / "ligands" / "DU.cif")
+            with self.assertRaisesRegex(PostMRPreparationError, "Coot is required"):
+                prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                               narestraints_builder=lambda *a: None)
+            self.assertFalse((run / "PostMR").exists())
 
     def test_shared_parent_coordinates_are_restored(self):
         with tempfile.TemporaryDirectory() as directory:

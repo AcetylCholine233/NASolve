@@ -63,6 +63,10 @@ class PostMRResult:
     model_path: Path
     readyset_log: Path
     restraint_paths: tuple[Path, ...]
+    input_model: Path | None = None
+    input_model_source: str = "phaser"  # or "metal-merged"
+    metal_sites: tuple[dict[str, object], ...] = ()
+    anomalous_scatterer_phil: Path | None = None
 
 
 _COOT_BASES = frozenset({"DA", "DC", "DG", "DT", "A", "C", "G", "U"})
@@ -127,6 +131,45 @@ def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
     if fallback.is_file():
         return fallback.resolve()
     raise PostMRPreparationError("The Phaser solution PDB is missing")
+
+
+def _merged_metal_model(
+    run: Path, report: Mapping[str, object]
+) -> tuple[Path, dict[str, object]] | None:
+    """The Phaser model with metal sites merged in Coot, if one is selected.
+
+    ``report.json["metal_merge"]`` is written by the metal view's Coot command
+    ("Merge metal sites and save"), which saves ``Phaser/<model>-merged.pdb``
+    and selects it. A selected model that is missing or changed since merging
+    stops PostMR rather than silently falling back to the plain model.
+    """
+    block = report.get("metal_merge")
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise PostMRPreparationError("The metal_merge record in report.json is malformed")
+    selected = block.get("selected")
+    if selected is None:
+        return None
+    models = block.get("models")
+    entry = next(
+        (
+            item for item in (models if isinstance(models, list) else [])
+            if isinstance(item, Mapping) and item.get("name") == selected
+        ),
+        None,
+    )
+    if entry is None or not isinstance(entry.get("model"), Mapping):
+        raise PostMRPreparationError(
+            f"The selected merged metal model {selected!r} is not recorded properly"
+        )
+    path = resolve_artifact_path(entry["model"], run)
+    if path is None:
+        raise PostMRPreparationError(
+            f"The merged metal model {selected} is missing or was changed after merging. "
+            "Merge again in Coot, or use --original-model to start from the Phaser model."
+        )
+    return path, dict(entry)
 
 
 def _site_parts(site: str) -> tuple[str, str]:
@@ -600,6 +643,86 @@ def scan_anomalous_candidates(
                 "coordinates": [round(value, 3) for value in _atom_coordinates(line)],
             })
     return candidates
+
+
+# Light metals (Li, Be, Na, Mg, Al, K, Ca; Z < 21) have negligible anomalous
+# signal at usual wavelengths and are not refined as anomalous scatterers.
+_LIGHT_METALS = frozenset({"LI", "BE", "NA", "MG", "AL", "K", "CA"})
+
+
+def _nucleotide_residue_keys(path: Path) -> set[tuple[str, str]]:
+    atoms: dict[tuple[str, str], set[str]] = {}
+    for line in _coordinate_records(path):
+        identity = _record_identity(line)
+        atom = _atom_identity(line)
+        if identity is not None and atom is not None:
+            atoms.setdefault(identity[:2], set()).add(atom[2])
+    return {
+        key for key, names in atoms.items()
+        if "C1'" in names and names & {"C2'", "C3'", "O4'"}
+    }
+
+
+def scan_metal_anomalous_sites(
+    path: Path,
+) -> tuple[list[dict[str, object]], list[object], list[str]]:
+    """Find metal ions (Z >= 21, outside nucleotides) to refine as anomalous scatterers.
+
+    Detection uses NARestraints' ``restraints.anomalous`` module (the
+    anomalous-scatterers branch): HETATM records, waters excluded, element
+    from the element column or inferred. Returns report candidates, the
+    NARestraints site objects for the PHIL writer, and its warnings.
+    """
+    from .autosol_metal import METAL_SYMBOLS
+
+    heavy_metals = frozenset(METAL_SYMBOLS) - _LIGHT_METALS
+    try:
+        from restraints.anomalous import find_heavy_atoms
+    except ImportError as exc:
+        for line in _coordinate_records(path):
+            if line.startswith("HETATM") and _atom_element(line) in heavy_metals:
+                raise PostMRPreparationError(
+                    "The model contains a metal ion, but the installed NARestraints has no "
+                    "anomalous-scatterer support (restraints.anomalous). Install the "
+                    "feature/anomalous-scatterers branch of NARestraints."
+                ) from exc
+        return [], [], []
+    sites, warnings = find_heavy_atoms(path)
+    nucleotides = _nucleotide_residue_keys(path)
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    candidates: list[dict[str, object]] = []
+    selected: list[object] = []
+    for site in sites:
+        chain = site.chain or "_"
+        if site.element not in heavy_metals or (chain, site.resid) in nucleotides:
+            continue
+        selected.append(site)
+        candidates.append({
+            "site": f"{chain}:{site.resid}",
+            "residue": site.residue_name,
+            "atom_name": site.atom_name,
+            "alternate": site.altloc or None,
+            "element": site.element,
+            "element_source": site.element_source,
+            "coordinates": [
+                round(value, 3) for value in _atom_coordinates(lines[site.line_number - 1])
+            ],
+            "kind": "metal",
+        })
+    return candidates, selected, list(warnings)
+
+
+def _write_metal_scatterer_phil(sites: list[object], output: Path) -> None:
+    from restraints.anomalous import anomalous_phil_block
+
+    output.write_text(
+        "# NASolve PostMR: metal ions as phenix.refine anomalous scatterers, written\n"
+        "# with NARestraints restraints.anomalous (f' and f'' start at 0 and are refined).\n"
+        "# For running phenix.refine by hand; 'nasolve autorefine' writes the same\n"
+        "# groups into its own parameters, so do not pass this file to it as well.\n"
+        "refinement {\n" + anomalous_phil_block(sites) + "\n}\n",
+        encoding="utf-8",
+    )
 
 
 def _unique_named_atom(
@@ -1201,6 +1324,15 @@ def _atom_counts(path: Path) -> tuple[int, int, int]:
     return atoms, heteroatoms, hydrogens
 
 
+#: ReadySet actions used by PostMR and AutoFDP: restraint dictionaries for
+#: unknown residues only; no hydrogens and no geometry changes.
+READYSET_ACTIONS = (
+    "ready_set.actions.hydrogens=False",
+    "ready_set.actions.ligands=True",
+    "ready_set.actions.optimise_ligand_geometry=False",
+)
+
+
 def _run_readyset(
     model: Path,
     ready_set_executable: Path,
@@ -1212,13 +1344,7 @@ def _run_readyset(
     allow_op3_sites: tuple[str, ...] = (),
     passthrough_sites: tuple[str, ...] = (),
 ) -> tuple[Path, Path, Path | None, list[str], dict[str, object]]:
-    command = [
-        str(ready_set_executable),
-        str(model),
-        "ready_set.actions.hydrogens=False",
-        "ready_set.actions.ligands=True",
-        "ready_set.actions.optimise_ligand_geometry=False",
-    ]
+    command = [str(ready_set_executable), str(model), *READYSET_ACTIONS]
     if ligand_cif is not None:
         command.append(f"ready_set.input.cif_file_name={ligand_cif}")
     log = readyset_directory / "ready_set.log"
@@ -1282,6 +1408,142 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+@dataclass(frozen=True)
+class ModelMutationPlan:
+    """The residues to change in a model, checked before anything is written."""
+
+    actions: tuple[MutationAction, ...]
+    ligand_sources: Mapping[str, Path]  # curated dictionary of each overlap target
+
+    @property
+    def coot_actions(self) -> tuple[MutationAction, ...]:
+        return tuple(
+            action for action in self.actions
+            if action.method in {"coot-mutate-base", "coot-parent-overlap"}
+        )
+
+
+def plan_model_mutations(
+    report: Mapping[str, object],
+    source_model: Path,
+    run: Path,
+    *,
+    data_root: Path | None = None,
+) -> ModelMutationPlan:
+    """Plan the AutoMR-requested residues for ``source_model`` and check their
+    dictionaries (the first half of PostMR's mutation step; writes nothing).
+
+    The targets come from the frozen post-MR plan: a standard pair, explicit
+    mutations, sequences or a sequence family.
+    """
+    try:
+        family = load_frozen_sequence_family(report, run)
+    except SequenceReferenceError as exc:
+        raise PostMRPreparationError(str(exc)) from exc
+    actions = (
+        build_mutation_plan(report, source_model, run_directory=run)
+        if family is not None else build_mutation_plan(report, source_model)
+    )
+    ligand_sources: dict[str, Path] = {}
+    for code in sorted({
+        action.after for action in actions if action.method == "coot-parent-overlap"
+    }):
+        try:
+            ligand_definition(code)
+            dictionary = ligand_dictionary(code, data_root).resolve()
+            validate_ligand_dictionary(code, dictionary)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+        ligand_sources[code] = dictionary
+    return ModelMutationPlan(actions, ligand_sources)
+
+
+def apply_model_mutations(
+    original: Path,
+    plan: ModelMutationPlan,
+    model_dir: Path,
+    coot_dir: Path,
+    coot_executable: Path | None,
+    environment: Mapping[str, str] | None,
+    *,
+    output_name: str = "after_coot.pdb",
+) -> tuple[Path, Path | None, dict[str, object]]:
+    """Build the planned residues into ``original`` (the second half of
+    PostMR's mutation step).
+
+    Headless Coot mutates standard bases and overlaps curated residues on
+    their parent; the parent's shared atoms and the canonical backbones are
+    then restored to the input coordinates. Intermediate models go to
+    ``model_dir`` and Coot's script and log to ``coot_dir``. Returns the
+    built model (``model_dir/output_name``), the Coot log and the coordinate
+    restoration record. Without Coot actions the model is copied unchanged.
+    """
+    coot_actions = plan.coot_actions
+    after_coot = model_dir / output_name
+    coot_log: Path | None = None
+    coordinate_restoration: dict[str, object] = {}
+    if not coot_actions:
+        shutil.copyfile(original, after_coot)
+        return after_coot, coot_log, coordinate_restoration
+    if coot_executable is None:
+        sites = ", ".join(action.site for action in coot_actions)
+        raise PostMRPreparationError(
+            f"Coot is required for supported mutation site(s) {sites}"
+        )
+    overlap_actions = tuple(
+        action for action in coot_actions if action.method == "coot-parent-overlap"
+    )
+    canonical_actions = tuple(
+        action for action in coot_actions if action.method == "coot-mutate-base"
+    )
+    raw_after_coot = model_dir / "after_coot_raw.pdb"
+    parent_models = {
+        action.site: coot_dir
+        / f"parent_{action.site.replace(':', '_')}_{action.parent_code}.pdb"
+        for action in overlap_actions
+    }
+    coot_dictionaries = {
+        action.after: plan.ligand_sources[action.after] for action in overlap_actions
+    }
+    _, coot_log = _run_coot(
+        original,
+        raw_after_coot,
+        coot_actions,
+        coot_executable,
+        coot_dir,
+        environment,
+        coot_dictionaries,
+        parent_models,
+    )
+    geometry_after_coot = model_dir / "after_coot_geometry.pdb"
+    if overlap_actions:
+        coordinate_restoration = _restore_shared_parent_coordinates(
+            raw_after_coot,
+            geometry_after_coot,
+            overlap_actions,
+            parent_models,
+            plan.ligand_sources,
+        )
+    else:
+        shutil.copyfile(raw_after_coot, geometry_after_coot)
+    if canonical_actions:
+        canonical_restoration = _restore_canonical_mutation_backbones(
+            original,
+            geometry_after_coot,
+            after_coot,
+            canonical_actions,
+        )
+        coordinate_restoration.update(canonical_restoration)
+    else:
+        shutil.copyfile(geometry_after_coot, after_coot)
+    for action in plan.actions:
+        if residue_name(after_coot, action.site) != action.after:
+            raise PostMRPreparationError(
+                f"Coot did not build {action.after} at {action.site}"
+            )
+    return after_coot, coot_log, coordinate_restoration
+
+
 def prepare_postmr(
     run_directory: Path,
     ready_set_executable: Path,
@@ -1294,8 +1556,13 @@ def prepare_postmr(
     data_root: Path | None = None,
     narestraints_builder: Callable[[Path, Path, Path], object] | None = None,
     modified_pair_builder: Callable[[Path, Path, Path, Path], object] | None = None,
+    use_merged_model: bool = True,
 ) -> PostMRResult:
-    """Prepare a completed Phaser solution without modifying the MR outputs."""
+    """Prepare a completed Phaser solution without modifying the MR outputs.
+
+    When metal sites were merged into the Phaser model in Coot, PostMR starts
+    from that merged model unless ``use_merged_model`` is False.
+    """
     run, report = _read_report(run_directory)
     mr_status = report.get("status")
     if mr_status == "MR_REVIEW" and not allow_mr_review:
@@ -1324,16 +1591,52 @@ def prepare_postmr(
             "A site cannot simultaneously request standard 5'-phosphate construction "
             "and experimental backbone passthrough"
         )
-    source_model = _solution_model(run, report)
+    merged = _merged_metal_model(run, report) if use_merged_model else None
+    if merged is not None:
+        source_model, merge_record = merged
+        input_model_source = "metal-merged"
+    else:
+        source_model, merge_record = _solution_model(run, report), None
+        input_model_source = "phaser"
     try:
         family = load_frozen_sequence_family(report, run)
     except SequenceReferenceError as exc:
         raise PostMRPreparationError(str(exc)) from exc
-    # Validate opt-in frozen targets and mutation routes before creating PostMR.
-    family_actions = (
-        build_mutation_plan(report, source_model, run_directory=run)
-        if family is not None else None
+    # Plan the mutations and check every dictionary and required program
+    # before PostMR/ exists, so a missing input never leaves a half-made
+    # PostMR folder that blocks the next attempt.
+    mutation_plan = plan_model_mutations(report, source_model, run, data_root=data_root)
+    actions = mutation_plan.actions
+    ligand_sources: dict[str, Path] = dict(mutation_plan.ligand_sources)
+    ligand_specs = {code: ligand_definition(code) for code in sorted(ligand_sources)}
+    # Curated residues already in the model keep their dictionaries too.
+    replaced_sites = {action.site for action in actions if action.method != "none"}
+    for line in _coordinate_records(source_model):
+        identity = _record_identity(line)
+        if (
+            identity is None
+            or identity[2] not in CURATED_LIGANDS
+            or f"{identity[0]}:{identity[1]}" in replaced_sites
+        ):
+            continue
+        try:
+            validate_ligand_dictionary(
+                identity[2], ligand_dictionary(identity[2], data_root).resolve()
+            )
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+
+    coot_actions = tuple(
+        action
+        for action in actions
+        if action.method in {"coot-mutate-base", "coot-parent-overlap"}
     )
+    if coot_actions and coot_executable is None:
+        sites = ", ".join(action.site for action in coot_actions)
+        raise PostMRPreparationError(
+            f"Coot is required for supported mutation site(s) {sites}"
+        )
+
     postmr = run / "PostMR"
     try:
         postmr.mkdir()
@@ -1350,85 +1653,9 @@ def prepare_postmr(
 
     original = model_dir / "mr_solution.pdb"
     shutil.copyfile(source_model, original)
-    actions = (
-        family_actions if family_actions is not None
-        else build_mutation_plan(report, original)
+    after_coot, coot_log, coordinate_restoration = apply_model_mutations(
+        original, mutation_plan, model_dir, coot_dir, coot_executable, environment,
     )
-    target_ligand_codes = sorted({
-        action.after for action in actions if action.method == "coot-parent-overlap"
-    })
-    ligand_specs = {code: ligand_definition(code) for code in target_ligand_codes}
-    ligand_sources: dict[str, Path] = {}
-    for code in target_ligand_codes:
-        try:
-            dictionary = ligand_dictionary(code, data_root).resolve()
-            validate_ligand_dictionary(code, dictionary)
-        except (KeyError, FileNotFoundError, ValueError) as exc:
-            raise PostMRPreparationError(str(exc)) from exc
-        ligand_sources[code] = dictionary
-
-    coot_actions = tuple(
-        action
-        for action in actions
-        if action.method in {"coot-mutate-base", "coot-parent-overlap"}
-    )
-    overlap_actions = tuple(
-        action for action in coot_actions if action.method == "coot-parent-overlap"
-    )
-    canonical_actions = tuple(
-        action for action in coot_actions if action.method == "coot-mutate-base"
-    )
-    coot_log: Path | None = None
-    coordinate_restoration: dict[str, object] = {}
-    after_coot = model_dir / "after_coot.pdb"
-    if coot_actions:
-        if coot_executable is None:
-            sites = ", ".join(action.site for action in coot_actions)
-            raise PostMRPreparationError(
-                f"Coot is required for supported mutation site(s) {sites}"
-            )
-        raw_after_coot = model_dir / "after_coot_raw.pdb"
-        parent_models = {
-            action.site: coot_dir
-            / f"parent_{action.site.replace(':', '_')}_{action.parent_code}.pdb"
-            for action in overlap_actions
-        }
-        coot_dictionaries = {
-            action.after: ligand_sources[action.after] for action in overlap_actions
-        }
-        _, coot_log = _run_coot(
-            original,
-            raw_after_coot,
-            coot_actions,
-            coot_executable,
-            coot_dir,
-            environment,
-            coot_dictionaries,
-            parent_models,
-        )
-        geometry_after_coot = model_dir / "after_coot_geometry.pdb"
-        if overlap_actions:
-            coordinate_restoration = _restore_shared_parent_coordinates(
-                raw_after_coot,
-                geometry_after_coot,
-                overlap_actions,
-                parent_models,
-                ligand_sources,
-            )
-        else:
-            shutil.copyfile(raw_after_coot, geometry_after_coot)
-        if canonical_actions:
-            canonical_restoration = _restore_canonical_mutation_backbones(
-                original,
-                geometry_after_coot,
-                after_coot,
-                canonical_actions,
-            )
-            coordinate_restoration.update(canonical_restoration)
-        else:
-            shutil.copyfile(geometry_after_coot, after_coot)
-    else:
-        shutil.copyfile(original, after_coot)
 
     terminal_ready = model_dir / "terminal_phosphate_model.pdb"
     try:
@@ -1666,6 +1893,11 @@ def prepare_postmr(
         except PhosphateError as exc:
             raise PostMRPreparationError(f"Cannot freeze authoritative dictionary inputs: {exc}") from exc
     anomalous_candidates = scan_anomalous_candidates(final_model)
+    metal_sites, metal_site_objects, metal_warnings = scan_metal_anomalous_sites(final_model)
+    metal_phil: Path | None = None
+    if metal_sites:
+        metal_phil = restraints_dir / "anomalous_scatterers.phil"
+        _write_metal_scatterer_phil(metal_site_objects, metal_phil)
 
     postmr_payload = {
         "status": "POSTMR_READY",
@@ -1673,6 +1905,8 @@ def prepare_postmr(
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "input_model": str(source_model),
         "input_sha256": file_sha256(source_model),
+        "input_model_source": input_model_source,
+        **({"metal_merge": merge_record} if merge_record is not None else {}),
         "mutation_actions": [asdict(action) for action in actions],
         "coot": {
             "ran": bool(coot_actions),
@@ -1731,8 +1965,18 @@ def prepare_postmr(
         },
         "anomalous": {
             "trigger_elements": sorted(DEFAULT_ANOMALOUS_ELEMENTS),
+            # Only nucleotide heavy atoms call for the AutoSol phasing branch.
             "autosol_required": bool(anomalous_candidates),
             "candidates": anomalous_candidates,
+            # Metal ions (Z >= 21) are refined as anomalous scatterers by
+            # AutoRefine; the PHIL is for running phenix.refine by hand.
+            "metal_sites": metal_sites,
+            "metal_detection": "NARestraints restraints.anomalous (HETATM, Z >= 21, metals)",
+            "metal_warnings": metal_warnings,
+            "metal_scatterer_phil": (
+                {**artifact_reference(metal_phil, run), "sha256": file_sha256(metal_phil)}
+                if metal_phil is not None else None
+            ),
         },
         "prepared_model": str(final_model),
         "prepared_sha256": file_sha256(final_model),
@@ -1754,6 +1998,11 @@ def prepare_postmr(
             "NASolve PostMR preparation",
             "Status: POSTMR_READY",
             f"Input model: {source_model}",
+            f"Input model source: {input_model_source}",
+            "Metal anomalous scatterers: " + (
+                ", ".join(f"{site['element']} {site['site']} {site['atom_name']}"
+                          for site in metal_sites) or "none"
+            ),
             *(
                 f"Mutation: {action.site} {action.before}->{action.after} ({action.method})"
                 for action in actions
@@ -1789,6 +2038,10 @@ def prepare_postmr(
         model_path=final_model,
         readyset_log=readyset_log,
         restraint_paths=tuple(restraint_paths),
+        input_model=source_model,
+        input_model_source=input_model_source,
+        metal_sites=tuple(metal_sites),
+        anomalous_scatterer_phil=metal_phil,
     )
 
 
@@ -1797,8 +2050,13 @@ __all__ = [
     "MutationAction",
     "PostMRPreparationError",
     "PostMRResult",
+    "ModelMutationPlan",
+    "READYSET_ACTIONS",
+    "apply_model_mutations",
     "build_mutation_plan",
+    "plan_model_mutations",
     "prepare_postmr",
     "residue_name",
     "scan_anomalous_candidates",
+    "scan_metal_anomalous_sites",
 ]

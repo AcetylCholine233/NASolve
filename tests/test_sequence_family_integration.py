@@ -97,7 +97,10 @@ class SequenceFamilyIntegrationTests(unittest.TestCase):
                 self.dataset, frames_dir=catalogue.parent,
                 mtz_dump_executable=make_mtz_dump(self.root), valid_ligand_codes=VALID, **kwargs,
             )
-        return prepare_automr(self.dataset, valid_ligand_codes=VALID, **kwargs)
+        return prepare_automr(
+            self.dataset, valid_ligand_codes=VALID,
+            mtz_dump_executable=make_mtz_dump(self.root / "tools"), **kwargs,
+        )
 
     def completed_mr(self, result):
         run = result.run_directory

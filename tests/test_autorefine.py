@@ -1,5 +1,6 @@
 import json
 import shutil
+import shlex
 import stat
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from nasolve.autorefine import (
     _cached_file_referencer,
     _run_report,
     anomalous_selections,
+    with_postmr_metal_sites,
     build_reflection_plan,
     execute_autorefine,
     parse_refinement_statistics,
@@ -24,7 +26,7 @@ from nasolve.autorefine import (
 from nasolve.checkpoints import initialize_registry, list_checkpoints
 from nasolve.model_assessment import file_sha256
 
-from .helpers import pdb_record
+from .helpers import mtz_dump_columns_text, pdb_record
 
 
 PHENIX_120 = "1.20.1-4487"
@@ -99,18 +101,27 @@ def make_refine_run(root: Path, *, autosol: bool = True) -> Path:
     return run
 
 
-def make_mtz_dump(root: Path, *, anomalous: bool = True) -> Path:
+def make_mtz_dump(
+    root: Path, *, anomalous: bool = True, wavelength: float | None = None,
+) -> Path:
+    """Fake phenix.mtz.dump; with ``wavelength`` it also prints the dataset
+    blocks (iotbx summary format) that carry the MTZ header wavelength."""
     executable = root / "phenix.mtz.dump"
     anomalous_lines = (
         "printf '%s\\n' 'F(+) 1 G' 'SIGF(+) 1 L' 'F(-) 1 G' 'SIGF(-) 1 L'\n"
         if anomalous else ""
     )
+    header_lines = ""
+    if wavelength is not None:
+        header = mtz_dump_columns_text(wavelength=wavelength)
+        header_lines = "".join(f"     printf '%s\\n' {shlex.quote(line)}\n" for line in header.splitlines())
     executable.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  *overall_best*) printf '%s\\n' 'HLAM 1 A' 'HLBM 1 A' 'HLCM 1 A' 'HLDM 1 A';;\n"
         "  *) printf '%s\\n' 'IMEAN 1 J' 'SIGIMEAN 1 Q' 'FreeR_flag 1 I';\n"
         f"     {anomalous_lines}"
+        f"{header_lines}"
         "     printf '%s\\n' 'Resolution range: 20.0 5.27';\n"
         "     ;;\n"
         "esac\n"
@@ -892,6 +903,57 @@ class AutoRefineTests(unittest.TestCase):
                 anomalous_selections(report),
                 ("chain B and resid 4 and name I",),
             )
+
+    def test_postmr_metal_sites_are_refined_as_anomalous_scatterers(self):
+        # Regression: only nucleotide I/Br/Se candidates reached phenix.refine.
+        report = {"postmr": {"anomalous": {
+            "candidates": [{"site": "A:8", "atom_name": "I5", "element": "I"}],
+            "metal_sites": [{"site": "Z:1", "atom_name": "AG", "element": "AG", "kind": "metal"}],
+        }}}
+        self.assertEqual(
+            anomalous_selections(report),
+            ("chain A and resid 8 and name I5", "chain Z and resid 1 and name AG"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            metal_only = json.loads((run / "report.json").read_text())
+            metal_only["postmr"]["anomalous"] = {
+                "candidates": [], "autosol_required": False,
+                "metal_sites": [{"site": "Z:1", "atom_name": "AG", "element": "AG"}],
+            }
+            self.assertEqual(anomalous_selections(metal_only), ("chain Z and resid 1 and name AG",))
+            observations = Path(metal_only["inputs"]["reflections"])
+            plan = build_reflection_plan(metal_only, observations, make_mtz_dump(root))
+            self.assertTrue(plan.anomalous)
+            self.assertEqual(plan.observation_labels, ("F(+)", "SIGF(+)", "F(-)", "SIGF(-)"))
+
+    def test_postmr_from_before_metal_detection_gets_metal_sites_from_its_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            report = json.loads((run / "report.json").read_text())
+            report["postmr"]["anomalous"].pop("metal_sites", None)
+            prepared = run / "prepared_with_silver.pdb"
+            prepared.write_text(
+                "HETATM    1 AG    AG B 101       1.000   2.000   3.000  1.00 20.00          AG\nEND\n"
+            )
+            report["postmr"]["prepared_model"] = str(prepared)
+            report["postmr"]["prepared_sha256"] = file_sha256(prepared)
+            derived = with_postmr_metal_sites(report, run)
+            self.assertEqual(
+                [(s["site"], s["atom_name"]) for s in derived["postmr"]["anomalous"]["metal_sites"]],
+                [("B:101", "AG")],
+            )
+            self.assertIn("chain B and resid 101 and name AG", anomalous_selections(derived))
+            self.assertNotIn("metal_sites", report["postmr"]["anomalous"])  # not rewritten
+            # A newer PostMR record (key present, even empty) is used as is.
+            report["postmr"]["anomalous"]["metal_sites"] = []
+            self.assertIs(with_postmr_metal_sites(report, run), report)
+            prepared.write_text("changed\n")
+            del report["postmr"]["anomalous"]["metal_sites"]
+            with self.assertRaisesRegex(AutoRefineError, "changed after PostMR"):
+                with_postmr_metal_sites(report, run)
 
     def test_success_is_quiet_checkpointed_and_reused_by_next_round(self):
         with tempfile.TemporaryDirectory() as directory:

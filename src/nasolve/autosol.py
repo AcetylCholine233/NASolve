@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Mapping, Sequence
 
 from .model_assessment import file_sha256
+from .reflection_data import ReflectionDataError, mtz_wavelength
 from .run_context import artifact_reference, resolve_artifact_path
 
 
@@ -72,8 +73,12 @@ def _read_run_report(run_directory: Path) -> tuple[Path, dict[str, object]]:
     return run, report
 
 
-def read_wavelength(summary_path: Path) -> tuple[float, str]:
-    """Read one consistent X-ray wavelength, preferring the high-precision assignment."""
+def read_wavelength(summary_path: Path, required: bool = True) -> tuple[float, str] | None:
+    """Read one consistent X-ray wavelength, preferring the high-precision assignment.
+
+    With ``required=False`` a summary that states no wavelength returns None;
+    conflicting or implausible values still stop.
+    """
     try:
         raw = summary_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -96,6 +101,8 @@ def read_wavelength(summary_path: Path) -> tuple[float, str]:
         )
     ]
     values = assigned or displayed
+    if not values and not required:
+        return None
     if not values:
         raise AutoSolPreparationError(
             f"No wavelength was found in {summary_path.name}"
@@ -112,6 +119,46 @@ def read_wavelength(summary_path: Path) -> tuple[float, str]:
         )
     source = "high-precision summary assignment" if assigned else "summary display"
     return reference, source
+
+
+# MTZ headers store the wavelength as a 4-byte float; summary text may round.
+_WAVELENGTH_TOLERANCE = 1e-4
+
+
+def resolve_wavelength(
+    mtz_dump_output: str,
+    reflections: Path,
+    summary_path: Path | None,
+) -> tuple[float, dict[str, object]]:
+    """Return the MTZ header wavelength; an optional summary.html must agree."""
+    try:
+        wavelength, dataset = mtz_wavelength(mtz_dump_output)
+    except ReflectionDataError as exc:
+        raise AutoSolPreparationError(str(exc)) from exc
+    source: dict[str, object] = {
+        "method": "MTZ header (phenix.mtz.dump)",
+        "path": str(reflections),
+        "mtz_dataset": dataset,
+        "summary_cross_check": None,
+    }
+    if summary_path is not None:
+        found = read_wavelength(summary_path, required=False)
+        if found is None:
+            source["summary_cross_check"] = {
+                "path": str(summary_path), "wavelength": None,
+                "method": "summary states no wavelength; not cross-checked",
+            }
+            return wavelength, source
+        summary_value, how = found
+        if abs(summary_value - wavelength) > _WAVELENGTH_TOLERANCE:
+            raise AutoSolPreparationError(
+                f"The MTZ header wavelength ({wavelength:g} A) and "
+                f"{summary_path.name} ({summary_value:g} A) disagree"
+            )
+        source["summary_cross_check"] = {
+            "path": str(summary_path), "wavelength": summary_value, "method": how,
+        }
+    return wavelength, source
 
 
 def _run_mtz_dump(
@@ -152,8 +199,14 @@ def anomalous_labels(mtz_dump_output: str) -> tuple[str, str, str, str]:
 
 
 def _sequence_source(
-    report: Mapping[str, object], run: Path
+    report: Mapping[str, object], run: Path, *, required: bool = True
 ) -> tuple[Path | None, str | None]:
+    """The run's sequence for AutoSol: a frozen or frame file, or PostMR text.
+
+    With ``required=False``, finding none returns ``(None, None)`` instead of
+    raising; a frozen sequence that is missing or fails its checksum is always
+    an error.
+    """
     inputs = report.get("inputs")
     if isinstance(inputs, Mapping) and inputs.get("frame_sequence") is not None:
         sequence_value = inputs["frame_sequence"]
@@ -237,6 +290,8 @@ def _sequence_source(
         ):
             text = "\n\n".join(str(value) for value in sequences.values()) + "\n"
             return None, text
+    if not required:
+        return None, None
     raise AutoSolPreparationError(
         "AutoSol needs MR_frames/FRAME/seq_base.txt or complete run sequences"
     )
@@ -267,6 +322,16 @@ def _required_path(
     if path is None:
         raise AutoSolPreparationError(f"Required run input is missing: {value}")
     return path
+
+
+def _optional_path(
+    report: Mapping[str, object], section: str, key: str, run: Path
+) -> Path | None:
+    """A recorded optional input (None when the dataset did not have it)."""
+    selected = report.get(section)
+    if isinstance(selected, Mapping) and selected.get(key) is None:
+        return None
+    return _required_path(report, section, key, run)
 
 
 def _verify_frozen_checksum(path: Path, expected: object, description: str) -> None:
@@ -721,7 +786,7 @@ def execute_autosol(
     log_path = autosol_directory / "autosol.console.log"
     try:
         reflections = _required_path(report, "inputs", "reflections", run)
-        summary = _required_path(report, "inputs", "summary", run)
+        summary = _optional_path(report, "inputs", "summary", run)
         inputs = report.get("inputs")
         assert isinstance(inputs, Mapping)
         _verify_frozen_checksum(
@@ -737,8 +802,8 @@ def execute_autosol(
             "PostMR prepared model",
         )
         phaser_model = _original_phaser_model(run, report)
-        wavelength, wavelength_source = read_wavelength(summary)
         input_dump = _run_mtz_dump(reflections, mtz_dump_executable, environment)
+        wavelength, wavelength_source = resolve_wavelength(input_dump, reflections, summary)
         labels = anomalous_labels(input_dump)
         sequence_source, generated_sequence = _sequence_source(report, run)
         nproc = max(1, processor_count if processor_count is not None else (os.cpu_count() or 1))
@@ -851,10 +916,7 @@ def execute_autosol(
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "element": element,
         "wavelength": wavelength,
-        "wavelength_source": {
-            "path": str(summary),
-            "method": wavelength_source,
-        },
+        "wavelength_source": wavelength_source,
         "input_reflections": str(reflections),
         "input_labels": list(labels),
         "input_model": str(phaser_model),
@@ -920,4 +982,5 @@ __all__ = [
     "execute_autosol",
     "nearest_symmetry_distance",
     "read_wavelength",
+    "resolve_wavelength",
 ]

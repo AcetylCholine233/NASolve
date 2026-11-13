@@ -39,6 +39,7 @@ from .sequence_family import prepare_sequence_family, freeze_sequence_family
 from .search_model_comparison import freeze_search_model_comparison
 from .frame_postmr import frame_postmr_spec
 from .symmetry import StandardSymmetryAssessment, SymmetryError, assess_standard_symmetry
+from .reflection_data import ReflectionDataError, describe, resolve_phaser_data
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ def _log_text(
     status: str,
     config_path: Path,
     generated: bool,
+    phaser_data: Mapping[str, object] | None = None,
 ) -> str:
     pair_line = "none"
     if resolved.pair:
@@ -257,6 +259,11 @@ def _log_text(
     space_group = symmetry.evidence.mtz_symbol if symmetry else "not gated (nonstandard mode)"
     copies = str(symmetry.mr_copies) if symmetry else "not set by standard-frame rule"
     symmetry_warning = symmetry.red_flag if symmetry and symmetry.red_flag else "none"
+    data_line = (
+        f"Phaser data: {phaser_data['requested']} - "
+        f"{describe(str(phaser_data['requested']))} ({phaser_data['labin']})"
+        if phaser_data else "Phaser data: not recorded"
+    )
     return "\n".join([
         "NASolve AutoMR preflight",
         f"Status: {status}",
@@ -271,8 +278,13 @@ def _log_text(
              f"{site}={mode}" for site, mode in resolved.backbone_sites.items()
          )),
         f"Authoritative space group: {space_group}",
+        "Space-group sources compared: "
+        + (", ".join(symmetry.evidence.compared_sources) if symmetry else "none (nonstandard mode)"),
+        f"Data_1*.cif: {resolved.dataset.metadata.name if resolved.dataset.metadata else 'absent'}",
+        f"summary.html: {'present' if resolved.dataset.summary else 'absent'}",
         f"Planned MR copies: {copies}",
         f"Symmetry red flag: {symmetry_warning}",
+        data_line,
         f"Pair: {pair_line}",
         f"Model pair: {model_pair_line}",
         f"Exact pair model: {resolved.exact_pair_model}",
@@ -313,6 +325,7 @@ def prepare_automr(
     *,
     resolved_input: ResolvedAutoMRInput | None = None,
     on_run_allocated: Callable[[Path], None] | None = None,
+    phaser_data: str | None = None,
 ) -> AutoMRPreflightResult:
     """Validate and freeze one AutoMR request without executing Phaser.
 
@@ -336,9 +349,13 @@ def prepare_automr(
             model_override=model_override,
             environ=environ,
             valid_ligand_codes=valid_ligand_codes,
+            phaser_data_override=phaser_data,
         )
     else:
-        overrides = (config_path, frame_override, pair_override, frames_dir, model_override)
+        overrides = (
+            config_path, frame_override, pair_override, frames_dir, model_override,
+            phaser_data,
+        )
         if any(value is not None for value in overrides) or allow_p1_standard or mirror:
             raise AutoMRInputError("A frozen AutoMR selection cannot be combined with input overrides")
         if resolved_input.dataset.root.resolve() != root:
@@ -385,6 +402,17 @@ def prepare_automr(
         except SequenceReferenceError as exc:
             raise AutoMRInputError(f"Sequence-family target preparation failed: {exc}") from exc
     effective_text = format_intent(resolved)
+    # After the model checks, before a run is allocated: the MTZ must have the
+    # requested merged F or I columns.
+    try:
+        phaser_data_record = resolve_phaser_data(
+            resolved.phaser_data,
+            resolved.dataset.reflections,
+            mtz_dump_executable,
+            environment=phenix_environment,
+        )
+    except ReflectionDataError as exc:
+        raise AutoMRInputError(str(exc)) from exc
 
     generated = existing_config is None and resolved_input is None
     if generated:
@@ -486,8 +514,15 @@ def prepare_automr(
         "inputs": {
             "reflections": str(resolved.dataset.reflections),
             "reflections_sha256": file_sha256(resolved.dataset.reflections),
-            "metadata": str(resolved.dataset.metadata),
-            "summary": str(resolved.dataset.summary),
+            # Optional autoPROC files; None when the dataset does not have them.
+            "metadata": (
+                str(resolved.dataset.metadata)
+                if resolved.dataset.metadata is not None else None
+            ),
+            "summary": (
+                str(resolved.dataset.summary)
+                if resolved.dataset.summary is not None else None
+            ),
             "model": str(resolved.model),
             "model_sha256": source_assessment.sha256,
             "model_selector": resolved.model_selector,
@@ -518,6 +553,7 @@ def prepare_automr(
         },
         "mode": resolved.mode,
         "frame": asdict(resolved.frame) if resolved.frame else None,
+        "phaser_data": phaser_data_record,
         "symmetry": symmetry.to_dict() if symmetry else {
             "gate": "not applied in nonstandard mode"
         },
@@ -544,7 +580,10 @@ def prepare_automr(
     report_path = run_dir / "report.json"
     _write_json(report_path, report)
     (run_dir / "automr.log").write_text(
-        _log_text(resolved, assessment, symmetry, status, selected_config, generated),
+        _log_text(
+            resolved, assessment, symmetry, status, selected_config, generated,
+            phaser_data_record,
+        ),
         encoding="utf-8",
     )
     return AutoMRPreflightResult(

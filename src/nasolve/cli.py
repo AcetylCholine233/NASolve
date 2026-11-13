@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import math
 import os
 import shlex
 import sys
@@ -13,6 +14,12 @@ from typing import Mapping
 
 from .autorefine import AutoRefineError, execute_autorefine
 from .autosol import AutoSolPreparationError, execute_autosol
+from .autosol_metal import (
+    DEFAULT_PARTIAL_MODEL_RMSD,
+    FOUND as METAL_FOUND,
+    execute_metal_search,
+    parse_metals,
+)
 from .automr import AutoMRInputError, ModelAssessmentError, prepare_automr
 from .checkpoints import (
     CheckpointError,
@@ -28,7 +35,7 @@ from .coot_runtime import (
     remember_coot,
 )
 from .coot_view import (
-    CootViewError, launch_coot_view, resolve_run, resolve_view_profile,
+    CootViewError, launch_coot_files, launch_coot_view, resolve_run, resolve_view_profile,
 )
 from .backbone import BackboneError, requested_backbone_policy, write_backbone_review
 from .phenix_runtime import (
@@ -120,6 +127,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     automr.add_argument(
+        "--show", action="store_true",
+        help="with --execute: open the Phaser model and map in Coot afterwards",
+    )
+    automr.add_argument(
+        "--coot", help="with --show: one-run Coot executable override"
+    )
+    phaser_data = automr.add_mutually_exclusive_group()
+    phaser_data.add_argument(
+        "-I", dest="phaser_data", action="store_const", const="I",
+        help="Phaser uses the MTZ's merged intensities (I/SIGI)",
+    )
+    phaser_data.add_argument(
+        "-F", dest="phaser_data", action="store_const", const="F",
+        help=(
+            "Phaser uses the MTZ's merged amplitudes (F/SIGF); the default "
+            "unless nasolve.txt sets phaser_data"
+        ),
+    )
+    phaser_data.add_argument(
+        "--phaser-data", dest="phaser_data", metavar="{F,I}",
+        help="long form of -F/-I",
+    )
+    automr.add_argument(
         "--allow-p1-standard", action="store_true",
         help="strongly discouraged: allow a standard frame in P1 using three MR copies",
     )
@@ -148,6 +178,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     postmr.add_argument("--coot", help="one-run Coot executable override")
     postmr.add_argument(
+        "--original-model", action="store_true",
+        help=(
+            "start from the original Phaser model even if metal sites were merged "
+            "into it in Coot (Phaser/*-merged.pdb)"
+        ),
+    )
+    postmr.add_argument(
         "--allow-mr-review", action="store_true",
         help="explicitly continue from a TFZ 7.0-7.99 MR_REVIEW result",
     )
@@ -171,11 +208,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backbone_review.add_argument("--coot", help="one-run Coot executable override")
     autosol = subparsers.add_parser(
-        "autosol", help="run guarded MR-SAD phasing when PostMR finds a heavy atom"
+        "autosol",
+        help="MR-SAD AutoSol: search for named metal ions after Phaser (--metal), "
+             "or phase from a nucleotide heavy atom after PostMR",
     )
     autosol.add_argument(
         "run", nargs="?", type=Path,
-        help="completed POSTMR_READY run directory (default: active workspace run)",
+        help="AutoMR run directory (default: active workspace run); without --metal it "
+             "must be POSTMR_READY",
+    )
+    autosol.add_argument(
+        "--metal", action="append", metavar="ELEMENT",
+        help="search for this metal right after Phaser, e.g. --metal AG; repeat or use "
+             "AG,HG for several (the first is AutoSol's atom_type)",
+    )
+    autosol.add_argument(
+        "--rmsd", type=float, default=None, metavar="A",
+        help="estimated RMSD of the Phaser model for the metal search "
+             "(autosol.phasing.partpdb_rms; default 1.0)",
+    )
+    autosol.add_argument(
+        "--sequence", type=Path, metavar="FILE",
+        help="sequence file for the metal search (default: the frame's seq_base.txt "
+             "frozen by AutoMR, else the chains of the Phaser model)",
+    )
+    autosol.add_argument(
+        "--allow-mr-review", action="store_true",
+        help="allow the metal search on a Phaser result that needs review (TFZ 7-8)",
+    )
+    autosol.add_argument(
+        "--original-model", action="store_true",
+        help="metal search: use the Phaser model as it is, without first building the "
+             "residues the AutoMR run asks for (default: build them with Coot, as PostMR does)",
+    )
+    autosol.add_argument(
+        "--no-coot", action="store_true",
+        help="do not open Coot when the metal search finds sites",
+    )
+    autosol.add_argument(
+        "--coot", help="one-run Coot executable override (also used to build the "
+                       "AutoMR residues before the metal search)",
     )
     autorefine = subparsers.add_parser(
         "autorefine", help="run one quiet, checkpointed Phenix refinement round"
@@ -195,6 +267,119 @@ def build_parser() -> argparse.ArgumentParser:
     autorefine.add_argument(
         "--cycles", type=int, default=5,
         help="number of refinement macrocycles (default: 5)",
+    )
+    autofdp = subparsers.add_parser(
+        "autofdp",
+        help="measure metal occupancy by f'' refinement from a model and an MTZ "
+             "(steps 1-2 of the plan implemented)",
+        description=(
+            "Hold coordinates, B and occupancy, fix f' at theory for the collection "
+            "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
+            "within the tolerance of theory. Needs only a starting model (PDB) and "
+            "an MTZ with anomalous data and Free-R flags; labels, flags and "
+            "wavelength are read from the MTZ, the metal sites from the model. Only "
+            "steps 1 and 2 are implemented: copy the model and set each metal's B to "
+            "the mean B of its neighbouring nucleotides (step 1), then run ReadySet "
+            "(no hydrogens) for the restraint dictionaries and one "
+            "phenix.refine round with every strategy off except the anomalous "
+            "scatterers (f' fixed at theory, f'' refined from 0), open the result "
+            "and its maps in Coot, and print each refined f'' against theory "
+            "(step 2). Occupancy adjustment and the later steps are NOT IMPLEMENTED "
+            "YET. See docs/autofdp.md."
+        ),
+    )
+    autofdp.add_argument(
+        "model", type=Path, metavar="MODEL.pdb",
+        help="the starting model (PDB format), e.g. an AutoRefine refined_001.pdb",
+    )
+    autofdp.add_argument(
+        "mtz", type=Path, metavar="DATA.mtz",
+        help="the reflection file with anomalous data and Free-R flags "
+             "(the two files may be given in either order)",
+    )
+    autofdp.add_argument(
+        "--output", type=Path, metavar="DIR",
+        help="folder in which a new run_NNN is made (default: AutoFDP beside the MTZ)",
+    )
+    autofdp.add_argument(
+        "--site", action="append", default=[], metavar="SITE",
+        help="metal site whose B step 1 sets, e.g. B:101; repeatable (default: every "
+             "metal site). Every metal site is still refined in the f'' round",
+    )
+    autofdp.add_argument(
+        "--wavelength", type=float, metavar="A",
+        help="X-ray wavelength in A, when the MTZ header has none (default: MTZ header)",
+    )
+    autofdp.add_argument(
+        "--cif", action="append", default=[], type=Path, metavar="FILE",
+        help="restraint dictionary to give ReadySet and phenix.refine for a residue; "
+             "repeatable (ReadySet makes the others; curated NASolve residues are automatic)",
+    )
+    autofdp.add_argument(
+        "--element", action="append", default=[], metavar="SITE=ELEMENT",
+        help="(later step, not used yet) treat a site as another element, e.g. B:101=HG (renamed in a new checkpoint)",
+    )
+    autofdp.add_argument(
+        "--candidates", metavar="ELEMENT[,ELEMENT...]",
+        help="(later step, not used yet) elements compared in the identity check (default: AG,HG plus the model's)",
+    )
+    autofdp.add_argument(
+        "--theory", action="append", default=[], metavar="ELEMENT=FDP",
+        help="theoretical f'' to compare with, e.g. HG=10.17; repeatable "
+             "(default: cctbx Henke at the MTZ wavelength)",
+    )
+    autofdp.add_argument(
+        "--tolerance", type=float, default=1.0, metavar="E",
+        help="refined f'' within E electrons of theory counts as matching (default: 1.0)",
+    )
+    autofdp.add_argument(
+        "--max-iterations", type=int, default=8, metavar="N",
+        help="(later step, not used yet) f'' rounds before review (default: 8)",
+    )
+    autofdp.add_argument(
+        "--cycles", type=int, default=3, metavar="N",
+        help="phenix.refine macrocycles in the f'' round (default: 3)",
+    )
+    autofdp.add_argument(
+        "--b-start", default="surrounding", metavar="surrounding|model|VALUE",
+        help="site B at the start: mean of coordinating nucleotides (default), the model's, or a number",
+    )
+    autofdp.add_argument(
+        "--b-step", type=float, default=20.0, metavar="A2",
+        help="(later step, not used yet) B change when the difference map calls for B instead of occupancy (default: 20)",
+    )
+    autofdp.add_argument(
+        "--occupancy-floor", type=float, default=0.05, metavar="Q",
+        help="(later step, not used yet) below this occupancy the site goes to identity review (default: 0.05)",
+    )
+    autofdp.add_argument(
+        "--map-sigma", type=float, default=3.0, metavar="S",
+        help="(later step, not used yet) mFo-DFc peak or hole at the site that counts as significant (default: 3.0)",
+    )
+    autofdp.add_argument(
+        "--no-confirm-b", action="store_true",
+        help="(later step, not used yet) skip the round that refines only the sites' B at fixed occupancy and f''",
+    )
+    autofdp.add_argument(
+        "--final", action="store_true",
+        help="(later step, not used yet) after convergence, refine XYZ, B, occupancy and f'' together (f' stays fixed)",
+    )
+    autofdp.add_argument(
+        "--plan", action="store_true",
+        help="check the inputs and show what was read (labels, Free-R flags, "
+             "wavelength, theory, B changes) without refining or writing anything",
+    )
+    autofdp.add_argument(
+        "--no-coot", action="store_true",
+        help="do not open the f'' round's model and maps in Coot",
+    )
+    autofdp.add_argument(
+        "--coot", type=Path, metavar="PATH",
+        help="Coot executable or installation (default: the configured Coot)",
+    )
+    autofdp.add_argument(
+        "--phenix-root", type=Path, metavar="PATH",
+        help="Phenix installation (default: the configured Phenix)",
     )
     doctor = subparsers.add_parser(
         "refine-doctor",
@@ -251,14 +436,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.add_argument(
         "target", nargs="?",
-        help="run directory, 'last', or omit to use the active workspace run",
+        help=(
+            "AutoMR/run_NNN or AutoSolMetal/run_NNN folder (relative paths are "
+            "tried from here, then from the active dataset), 'last', or omit to "
+            "use the active workspace run"
+        ),
     )
     show.add_argument(
         "dataset", nargs="?", type=Path,
         help="dataset directory required by 'show last'",
     )
     show.add_argument(
-        "--stage", choices=("automr", "postmr", "autosol", "autorefine"),
+        "--stage", choices=("automr", "metal", "postmr", "autosol", "autorefine"),
         help="view a specific stage instead of the selected current checkpoint",
     )
     show.add_argument(
@@ -569,7 +758,49 @@ def _check(explicit: str | None) -> int:
     return 0 if na_version != "not installed" else 1
 
 
+def _print_metal_merge_hint(merge) -> None:
+    if merge is None:
+        return
+    print(
+        "To keep the sites: in Coot click the NASolve toolbar button -> "
+        "'Merge metal sites and save' (or run nasolve_merge_metal_sites() in "
+        "Calculate > Scripting > Python)."
+    )
+    print(f"Merged model will be saved as: {merge.output_directory / (merge.merged_stem + '.pdb')}")
+    print(f"'nasolve postmr {merge.run_directory}' then starts from the merged model.")
+    for warning in merge.warnings:
+        print(f"Warning: {warning}")
+
+
+def _open_phaser_view(args: argparse.Namespace, phaser) -> None:
+    """Open Phaser's model and map in Coot; a Coot problem never fails the run."""
+    later = f"Open in Coot with: nasolve show {phaser.run_directory} --stage automr"
+    if phaser.solution_pdb is None or phaser.solution_mtz is None:
+        return
+    if not args.show:
+        print(later)
+        return
+    try:
+        config = load_config()
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_view(phaser.run_directory, coot.executable, stage="automr")
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(later)
+        return
+    print(f"Opened Coot (PID {view.pid}) with the Phaser model and map")
+    print(f"Coot log: {view.log_path}")
+
+
 def _automr(args: argparse.Namespace) -> int:
+    if args.show and not args.execute:
+        print("AutoMR input error: --show applies only with --execute", file=sys.stderr)
+        return 2
+    if args.coot and not args.show:
+        print("AutoMR input error: --coot applies only with --show", file=sys.stderr)
+        return 2
     try:
         config = load_config()
         dataset = _workspace_dataset(args.dataset, config)
@@ -588,6 +819,7 @@ def _automr(args: argparse.Namespace) -> int:
             mirror=args.mirror,
             mtz_dump_executable=installation.executables.get("phenix.mtz.dump"),
             phenix_environment=installation.environment,
+            phaser_data=args.phaser_data,
         )
         _remember_workspace(config, result.run_directory)
         save_config(config)
@@ -619,6 +851,7 @@ def _automr(args: argparse.Namespace) -> int:
             print(f"MR model: {phaser.solution_pdb}")
         if phaser.solution_mtz:
             print(f"MR reflections: {phaser.solution_mtz}")
+        _open_phaser_view(args, phaser)
         return phaser.exit_code
     print(f"{result.status}: {result.message}")
     print("Phaser executed: no (preflight milestone)")
@@ -655,6 +888,7 @@ def _postmr(args: argparse.Namespace) -> int:
             allow_mr_review=args.allow_mr_review,
             modified_pairs_only=args.modified_pairs_only,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
+            use_merged_model=not args.original_model,
         )
     except (
         ConfigError,
@@ -666,7 +900,20 @@ def _postmr(args: argparse.Namespace) -> int:
         return 2
     print(f"{result.status}: {result.message}")
     print(f"Run directory: {result.run_directory}")
+    if result.input_model is not None:
+        source = (
+            "Phaser model with merged metal sites"
+            if result.input_model_source == "metal-merged" else "Phaser model"
+        )
+        print(f"Starting model: {result.input_model} ({source})")
     print(f"Prepared model: {result.model_path}")
+    for site in result.metal_sites:
+        print(
+            f"Anomalous scatterer: {site['element']} {site['site']} {site['atom_name']} "
+            "(AutoRefine refines its f' and f'')"
+        )
+    if result.anomalous_scatterer_phil is not None:
+        print(f"Anomalous-scatterer PHIL for phenix.refine by hand: {result.anomalous_scatterer_phil}")
     print(f"ReadySet log: {result.readyset_log}")
     for restraint in result.restraint_paths:
         print(f"Restraint: {restraint}")
@@ -732,7 +979,130 @@ def _backbone_review(args: argparse.Namespace) -> int:
         return 2
 
 
+def _autosol_metal(args: argparse.Namespace) -> int:
+    """Metal-ion search right after Phaser; opens Coot when sites are found."""
+    try:
+        metals = parse_metals(args.metal)
+        config = load_config()
+        run = _workspace_run(args.run, config)
+        phenix = discover_phenix(config, explicit=args.phenix_root)
+        if args.phenix_root is None:
+            remember_phenix(config, phenix)
+            save_config(config)
+        autosol_executable = phenix.executables.get("phenix.autosol")
+        mtz_dump_executable = phenix.executables.get("phenix.mtz.dump")
+        if autosol_executable is None:
+            raise AutoSolPreparationError(
+                "The discovered Phenix installation has no phenix.autosol executable"
+            )
+        if mtz_dump_executable is None:
+            raise AutoSolPreparationError("The metal search requires phenix.mtz.dump")
+        # Coot builds the AutoMR-requested residues before AutoSol. A missing
+        # Coot is reported by the search only when there is something to build.
+        coot_executable = None
+        if not args.original_model:
+            try:
+                coot = discover_coot(config, explicit=args.coot)
+                remember_coot(config, coot)
+                save_config(config)
+                coot_executable = coot.executable
+            except (ConfigError, CootDiscoveryError):
+                coot_executable = None
+        result = execute_metal_search(
+            run,
+            autosol_executable,
+            mtz_dump_executable,
+            metals,
+            partial_model_rmsd=(
+                DEFAULT_PARTIAL_MODEL_RMSD if args.rmsd is None else args.rmsd
+            ),
+            allow_mr_review=args.allow_mr_review,
+            sequence_file=args.sequence,
+            build_requested_residues=not args.original_model,
+            coot_executable=coot_executable,
+            environment=phenix.environment,
+        )
+    except (AutoSolPreparationError, ConfigError, PhenixDiscoveryError) as exc:
+        print(f"AutoSol metal search error: {exc}", file=sys.stderr)
+        return 2
+    print(f"{result.status}: {result.message}")
+    print(f"Metals searched: {', '.join(result.metals)}")
+    print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
+    try:
+        record = json.loads(result.report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    partial = record.get("partial_model") if isinstance(record.get("partial_model"), dict) else {}
+    if partial.get("source"):
+        print(f"Partial model: {partial['source']}")
+    for change in result.mutations:
+        print(f"  {change['site']} {change['before']} -> {change['after']}")
+    if result.partial_model is not None and result.partial_model != result.phaser_model:
+        print(f"  built model: {result.partial_model}")
+    try:
+        record = json.loads(result.report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    if record.get("sequence_source"):
+        print(f"Sequence: {record['sequence_source']}")
+    for warning in record.get("sequence_warnings") or ():
+        print(f"Sequence warning: {warning}")
+    print(f"AutoMR run: {result.run_directory}")
+    print(f"Metal-search folder: {result.output_directory}")
+    print(f"AutoSol log: {result.log_path}")
+    for site in result.sites:
+        near = ", ".join(
+            f"{item['chain']}:{item['residue_number']} {item['residue_name']} "
+            f"{item['atom_name']} {float(item['distance']):.2f} A"
+            for item in site["nearest_residues"]  # type: ignore[union-attr]
+        )
+        print(
+            f"  site {site['index']}: {site['element']} occupancy "
+            f"{float(site['occupancy']):.2f}; nearest {near or 'no model atoms'}"
+        )
+    print(f"Report: {result.report_path}")
+    if result.status != METAL_FOUND:
+        print("Continue with 'nasolve postmr' as usual; nothing was added to the model.")
+        return 0
+    if result.heavy_atom_model is not None:
+        print(f"Heavy-atom model: {result.heavy_atom_model}")
+    print(f"Phaser model: {result.phaser_model}")
+    print(f"Phaser map: {result.phaser_map}")
+    later = f"Open later with: nasolve show {result.output_directory}"
+    if args.no_coot:
+        print(later)
+        return 0
+    try:
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_view(result.output_directory, coot.executable, stage="metal")
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(later)
+        return 0
+    print(
+        f"Opened Coot (PID {view.pid}) with the "
+        + ("Phaser model" if result.partial_model in (None, result.phaser_model)
+           else "partial model (AutoMR residues built in)")
+        + ", AutoSol sites and Phaser map"
+    )
+    print(f"Coot log: {view.log_path}")
+    _print_metal_merge_hint(view.metal_merge)
+    return 0
+
+
 def _autosol(args: argparse.Namespace) -> int:
+    if args.metal:
+        return _autosol_metal(args)
+    if (args.rmsd is not None or args.allow_mr_review or args.no_coot or args.sequence
+            or args.original_model):
+        print(
+            "AutoSol error: --rmsd, --allow-mr-review, --sequence, --original-model and "
+            "--no-coot apply only to the metal search; add --metal ELEMENT",
+            file=sys.stderr,
+        )
+        return 2
     try:
         config = load_config()
         run = _workspace_run(args.run, config)
@@ -881,7 +1251,9 @@ def _autorefine(args: argparse.Namespace) -> int:
             expected_at_occ = _format_metric(
                 item.get("calculated_f_double_prime_at_occupancy"), 3
             )
-            print(f"  {label}: wavelength {wavelength} A")
+            source = item.get("wavelength_source")
+            origin = f" (from {source})" if isinstance(source, str) and wavelength != "—" else ""
+            print(f"  {label}: wavelength {wavelength} A{origin}")
             print(f"    f'' refined {refined_fdp}; calculated {calculated_fdp} e-")
             print(
                 f"    occupancy {occupancy}; calculated f'' x occupancy "
@@ -1202,7 +1574,13 @@ def _show(args: argparse.Namespace) -> int:
                 dataset = _workspace_dataset(
                     None, config, current_directory_fallback=False
                 )
-            run = resolve_run(args.target, dataset)
+            run = resolve_run(
+                args.target,
+                dataset,
+                active_dataset=(
+                    Path(config.workspace.dataset) if config.workspace.dataset else None
+                ),
+            )
         coot = discover_coot(config, explicit=args.coot)
         remember_coot(config, coot)
         save_config(config)
@@ -1226,7 +1604,231 @@ def _show(args: argparse.Namespace) -> int:
     print(f"Coot working directory: {result.working_directory}")
     print(f"Coot log: {result.log_path}")
     print(f"PID: {result.pid}")
+    _print_metal_merge_hint(result.metal_merge)
     return 0
+
+
+def _relative_to(path: Path | None, root: Path) -> str:
+    if path is None:
+        return "none"
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _autofdp_files(files: list[Path]) -> tuple[Path, Path]:
+    """The model and the MTZ, given in either order."""
+    from .autofdp import MODEL_SUFFIXES, AutoFDPError
+
+    models = [path for path in files if path.suffix.lower() in MODEL_SUFFIXES]
+    mtzs = [path for path in files if path.suffix.lower() == ".mtz"]
+    if len(models) != 1 or len(mtzs) != 1:
+        raise AutoFDPError(
+            "Give one model (.pdb) and one reflection file (.mtz), not "
+            + " and ".join(path.name for path in files)
+        )
+    return models[0], mtzs[0]
+
+
+def _print_autofdp_plan(plan) -> None:
+    reflections = plan.reflections
+    print("AutoFDP inputs")
+    print(f"  Model: {plan.model}")
+    print(f"  MTZ: {reflections.mtz}")
+    print(
+        f"  Observations: {','.join(reflections.observation_labels)}; Free-R "
+        f"{reflections.free_r_label} (test value {reflections.free_r_test_value})"
+    )
+    print(
+        f"  Wavelength: {reflections.wavelength:g} A "
+        f"({reflections.wavelength_source.get('method')})"
+    )
+    warning = reflections.wavelength_source.get("warning")
+    if warning:
+        print(f"  Warning: {warning}")
+    for path in plan.restraints:
+        print(f"  Restraints: {path}")
+    theory = "; ".join(
+        f"{element} f' {values['f_prime']:.2f}, f'' {values['f_double_prime']:.2f} "
+        f"({values['source']})"
+        for element, values in plan.theory.items()
+    )
+    print(f"  Theory: {theory}")
+    print("\nAutoFDP step 1: metal B factors from neighbouring nucleotides")
+    for site in plan.b_start.sites:
+        print(
+            f"  {site.site} {site.atom_name} ({site.element}), occupancy "
+            f"{site.occupancy:.2f}: B {site.b_before:.2f} -> {site.b_after:.2f}"
+        )
+        if site.neighbour_b is not None:
+            print(f"    {site.neighbour_b.method}:")
+            for item in site.neighbour_b.neighbours:
+                print(
+                    f"      {item.residue} {item.residue_name}  mean B {item.mean_b:.2f}"
+                    f"  ({item.atoms} atoms, closest {item.contact})"
+                )
+        elif site.b_source == "model":
+            print("    kept the model's B (--b-start model)")
+        else:
+            print("    set from --b-start")
+    for warning in plan.b_start.warnings:
+        print(f"Warning: {warning}")
+
+
+def _print_fdp_round(result) -> None:
+    """Print AutoFDP step 2: refined f'' of every site against theory."""
+    round_result = result.round
+    status_color = "32" if result.status == "AUTOFDP_FDP_ROUND_DONE" else "31"
+    readyset = result.readyset
+    print(f"\nReadySet (no hydrogens): {readyset.mode}; atoms, coordinates and B unchanged")
+    if readyset.curated_codes:
+        print("  curated dictionaries given: " + ", ".join(readyset.curated_codes))
+    print(
+        "  restraints for phenix.refine: "
+        + (", ".join(_relative_to(path, result.run_directory) for path in readyset.dictionaries)
+           or "none needed")
+    )
+    print(
+        f"\nAutoFDP step 2: f''-only round ({_relative_to(round_result.directory, result.run_directory)}, "
+        f"{round_result.cycles} cycles; only the anomalous scatterers refined, f' fixed at "
+        "theory, f'' from 0)"
+    )
+    print(
+        f"R-work {_format_metric(round_result.r_work)}, "
+        f"R-free {_format_metric(round_result.r_free)}"
+    )
+    tolerance = round_result.tolerance
+    print(
+        f"\n{'Site':<14}{'Occ':>6}{'B':>9}{'f-prime':>9}{'fdp':>9}"
+        f"{'theory':>9}{'deviation':>11}"
+    )
+    for site in round_result.sites:
+        refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
+        deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
+        occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+        b_factor = "-" if site.b_factor is None else f"{site.b_factor:.2f}"
+        verdict = (
+            "" if site.within_tolerance is None
+            else f"  within +/-{tolerance:g}" if site.within_tolerance
+            else f"  outside +/-{tolerance:g}"
+        )
+        label = f"{site.site} {site.atom_name}"
+        print(
+            f"{label:<14}{occupancy:>6}{b_factor:>9}{site.f_prime:>9.2f}{refined:>9}"
+            f"{site.f_double_prime_theory:>9.2f}{deviation:>11}{verdict}"
+        )
+    sources = sorted({f"{site.element} {site.theory_source}" for site in round_result.sites})
+    print("Theory: " + "; ".join(sources))
+    others = [site for site in round_result.sites if not site.calibrated]
+    if others:
+        print(
+            "Also refined (metal sites left out with --site; B not set): "
+            + ", ".join(f"{site.site} {site.atom_name}" for site in others)
+        )
+    for warning in round_result.warnings:
+        print(f"Warning: {warning}")
+    print(f"\n{_color(result.status, status_color)}: {result.message}")
+    print(f"Run folder: {result.run_directory}")
+
+
+def _open_fdp_view(args: argparse.Namespace, result) -> None:
+    """Open the f'' round's model and maps; a Coot problem never fails the run."""
+    round_result = result.round
+    if round_result.model_path is None or round_result.map_coefficients is None:
+        return
+    if args.no_coot:
+        print(f"Model: {round_result.model_path}")
+        print(f"Maps: {round_result.map_coefficients}")
+        return
+    try:
+        config = load_config()
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_files(
+            round_result.model_path,
+            round_result.map_coefficients,
+            coot.executable,
+            working_directory=result.run_directory / "CootGUI",
+            source=f"AutoFDP f''-only round ({result.run_directory.name})",
+            dictionaries=result.readyset.dictionaries,
+        )
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(f"Model: {round_result.model_path}")
+        print(f"Maps: {round_result.map_coefficients}")
+        return
+    print(f"Opened Coot (PID {view.pid}) with {view.model_path.name} and {view.map_path.name}")
+    print("Anomalous map: Coot also opens ANOM/PHANOM at 3 sigma when present")
+    print(f"Coot log: {view.log_path}")
+
+
+def _autofdp(args: argparse.Namespace) -> int:
+    """AutoFDP steps 1 and 2 from a model and an MTZ."""
+    from .autofdp import (
+        STATUS_ROUND_DONE,
+        AutoFDPError,
+        execute_autofdp,
+        parse_b_start,
+        parse_theory_overrides,
+        plan_autofdp,
+    )
+
+    if args.element:
+        print("AutoFDP error: --element is not implemented yet", file=sys.stderr)
+        return 2
+    try:
+        model, mtz = _autofdp_files([args.model, args.mtz])
+        b_start = parse_b_start(args.b_start)
+        theory = parse_theory_overrides(args.theory)
+        if args.cycles < 1:
+            raise AutoFDPError("--cycles must be at least 1")
+        if not math.isfinite(args.tolerance) or args.tolerance <= 0:
+            raise AutoFDPError("--tolerance must be a positive number of electrons")
+        if args.coot is not None and args.no_coot:
+            raise AutoFDPError("--coot and --no-coot cannot be combined")
+        config = load_config()
+        phenix = discover_phenix(config, explicit=args.phenix_root)
+        if args.phenix_root is None:
+            remember_phenix(config, phenix)
+            save_config(config)
+        refine = phenix.executables.get("phenix.refine")
+        mtz_dump = phenix.executables.get("phenix.mtz.dump")
+        ready_set = phenix.executables.get("phenix.ready_set")
+        if refine is None or mtz_dump is None or ready_set is None:
+            raise AutoFDPError(
+                "AutoFDP requires phenix.refine, phenix.mtz.dump and phenix.ready_set"
+            )
+        plan = plan_autofdp(
+            model, mtz, refine, mtz_dump,
+            sites=tuple(args.site), b_start=b_start, theory_overrides=theory,
+            wavelength=args.wavelength, restraints=tuple(args.cif),
+            output_root=args.output, environment=phenix.environment,
+        )
+        _print_autofdp_plan(plan)
+        if args.plan:
+            print(
+                "\nThen: ReadySet on the start model (no hydrogens) for the restraint "
+                f"dictionaries, and one f''-only phenix.refine round of {args.cycles} cycles "
+                "(every strategy off except the anomalous scatterers; f' fixed at theory, "
+                f"f'' from 0), in a new run folder of {plan.output_root}"
+            )
+            print("Plan only: no refinement was run and nothing was written.")
+            return 0
+        print(f"\nAutoFDP f'' round started ({args.cycles} cycles)")
+        result = execute_autofdp(
+            plan, refine, ready_set,
+            phenix_version=phenix.version, b_start=b_start, sites=tuple(args.site),
+            cycles=args.cycles, tolerance=args.tolerance, environment=phenix.environment,
+        )
+    except (AutoFDPError, ConfigError, PhenixDiscoveryError) as exc:
+        print(f"AutoFDP error: {exc}", file=sys.stderr)
+        return 1
+    _print_fdp_round(result)
+    _open_fdp_view(args, result)
+    print("Occupancy adjustment and the later AutoFDP steps are not implemented yet.")
+    return 0 if result.status == STATUS_ROUND_DONE else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1255,6 +1857,8 @@ def main(argv: list[str] | None = None) -> int:
         return _autorefine(args)
     if args.command in {"refine-doctor", "refine_doctor"}:
         return _refine_doctor(args)
+    if args.command == "autofdp":
+        return _autofdp(args)
     if args.command == "checkpoints":
         return _checkpoints(args)
     if args.command == "show":

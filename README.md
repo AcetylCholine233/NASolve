@@ -117,10 +117,65 @@ DATASET=/absolute/path/to/dataset
 ./nasolve automr "$DATASET" -W --pair F:D --execute
 ```
 
-NASolve prints the new numbered run directory. Use that exact path for PostMR:
+NASolve prints the new numbered run directory. If the crystal may contain a
+metal ion (for example a metal-mediated base pair), search for it with MR-SAD
+straight after Phaser, naming the metal(s) to look for:
 
 ```bash
 RUN=/absolute/path/to/dataset/AutoMR/run_001
+./nasolve autosol "$RUN" --metal AG            # several: --metal AG --metal HG
+```
+
+This runs `phenix.autosol` with the original Phaser model as the partial model
+(`autosol.phasing.partpdb_rms`, default 1.0 A; change it with `--rmsd`), lets
+AutoSol choose the number of sites, and does no model building. When the AutoMR
+run asks for residues (a pair such as `iC:iU`, explicit mutations or
+sequences), they are first built into a copy of the Phaser model exactly as
+PostMR builds them (headless Coot), and that copy is AutoSol's partial model.
+Heavy atoms that belong to the bases, such as the iodines of 5-iodo-dC and
+5-iodo-dU, are then part of the model instead of being found as metal sites.
+This needs Coot; `--original-model` searches with the Phaser model as it is.
+The AutoMR run's own files are not changed. AutoSol's
+sequence is the frame `seq_base.txt` that AutoMR froze into the run (only the W
+catalogue has one); otherwise the nucleotide chains of the Phaser model are
+used (for example with the 3GBI frame), or give a file with `--sequence FILE`.
+The report records which source was used. Each search
+gets a new numbered folder in the dataset directory, next to `AutoMR` and the
+data:
+
+```text
+dataset/
+├── AutoMR/run_001/
+├── AutoSolMetal/run_001/     # metal search made from AutoMR/run_001
+└── staraniso_alldata-unique.mtz
+```
+
+Its `report.json` names the AutoMR run it came from. If AutoSol finds a site of
+a requested metal, NASolve lists the nearest residues and opens Coot with the
+Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
+later with `./nasolve show dataset/AutoSolMetal/run_001` (a relative path is
+tried from the current folder, then from the active dataset), or the latest search
+that found sites with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to
+skip).
+To keep the sites, use the **NASolve** button that NASolve adds to Coot's
+toolbar in this view and choose **Merge metal sites and save** (or type
+`nasolve_merge_metal_sites()` in Calculate > Scripting > Python). It merges the
+sites as they currently are in Coot (delete or move unwanted ones first) into
+a copy of the Phaser model and saves `mr_solution-merged.pdb` next to it in
+`AutoMR/run_NNN/Phaser/` (`-2`, `-3`, ... if that name exists; nothing is
+overwritten). AutoSol's relative occupancies above 1 are set to 1.00, and a
+site that AutoSol placed next to a symmetry copy instead of the model is
+flagged before you refine. The newest merge is selected in the run's
+`report.json["metal_merge"]`, and PostMR then starts from it: the metal ion is
+carried through mutation and ReadySet, and NARestraints recognises the
+metal-mediated pair and writes no base-pair or stacking restraints for its two
+bases. Use `./nasolve postmr "$RUN" --original-model` to start from the plain
+Phaser model instead. Merge before running PostMR; a run that already has
+PostMR keeps it. Finding no site is a normal result and usually means the ion
+is not incorporated. Nothing is merged unless you choose to, and the run's
+stage and status do not change, so continue with PostMR either way:
+
+```bash
 ./nasolve postmr "$RUN"
 ```
 
@@ -170,8 +225,9 @@ It requires an available, valid Free-R audit, tries eligible sibling branches
 in declared order, and stops at the first numerical pass or a technical error.
 The ordinary mean-data path includes grouped-B, eligible individual-ADP,
 coordinate-only and B-only recipes. Anomalous data use explicit calculated
-scattering values and an optional f''-only trial; the recorded AutoSol
-wavelength is required. Existing anomalous benchmarks remain in the report.
+scattering values and an optional f''-only trial, calculated at the
+wavelength in the MTZ header (an AutoSol record is the fallback when the header
+has none). Existing anomalous benchmarks remain in the report.
 The default limit is five trials of three macrocycles each; `--max-trials` and
 `--cycles` each accept 1-10.
 
@@ -286,7 +342,8 @@ sections document inputs, decisions, safeguards, and outputs.
 
 For each dataset, AutoMR:
 
-1. locates the reflection MTZ, `Data_1*.cif`, and `summary.html` files;
+1. locates the reflection MTZ and, when present, the `Data_1*.cif` and
+   `summary.html` files;
 2. chooses a standard 5W6W/3GBI search model or validates a user-supplied PDB;
 3. optionally mirrors the selected model through NARestraints, then checks the
    exact model that Phaser will use, including modified nucleotides written as
@@ -464,11 +521,17 @@ The filenames do not have to match this example exactly:
 - NASolve prefers the single top-level MTZ whose punctuation-insensitive name
   contains both `staraniso` and `alldata`. If none has that name, the only
   top-level MTZ is accepted.
-- The metadata file must be the single top-level `Data_1*.cif`, matched without
-  regard to case or punctuation.
-- The autoPROC summary must be the single top-level `summary.html`.
+- The metadata file `Data_1*.cif` is optional; if present there must be only
+  one, matched without regard to case or punctuation.
+- The autoPROC summary `summary.html` is optional; if present there must be
+  only one.
 
-Ambiguous or missing inputs stop the run instead of choosing a file silently.
+The MTZ header is the source of the space group and the X-ray wavelength.
+`Data_1*.cif` and `summary.html` are cross-checks: when a dataset has them they
+must agree with the MTZ, and when it does not (for example an older autoPROC
+run that left only the MTZ files and `report.pdf`) NASolve works from the MTZ
+alone. Other files such as autoPROC report PDFs are ignored. Ambiguous or
+missing required inputs stop the run instead of choosing a file silently.
 
 For a nonstandard run, add a good MR model in PDB format:
 
@@ -499,6 +562,18 @@ Run Phaser after the same guarded preflight:
 
 ```bash
 ./nasolve automr my_dataset -W --pair E:G --execute
+```
+
+Add `--show` to open Phaser's model and map in Coot when the run finishes:
+
+```bash
+./nasolve automr my_dataset -W --pair E:G --execute --show
+```
+
+To open the Phaser result of any earlier run:
+
+```bash
+./nasolve show my_dataset/AutoMR/run_003 --stage automr
 ```
 
 Use the 3GBI frame with:
@@ -557,12 +632,15 @@ or set `NASOLVE_MR_FRAMES`.
 
 ### Standard-frame symmetry rule
 
-The W and 3GBI recipes are intended for H3/R3 data. NASolve compares the space
-group reported by:
+The W and 3GBI recipes are intended for H3/R3 data. NASolve takes the space
+group from the MTZ header (`phenix.mtz.dump`: the stored symbol and the
+symmetry matrices) and, when the files are present, compares it with:
 
-- `phenix.mtz.dump` for the MTZ header;
 - every explicit space-group entry in `Data_1*.cif`; and
 - the final `Spacegroup name` entry in `summary.html`.
+
+The run report lists the sources that were compared
+(`symmetry.evidence.compared_sources`).
 
 `H 3`, `H3`, `R 3`, `R3`, and `R 3 :H` are treated as equivalent and use one
 MR copy. The exact MTZ symbol is retained in the report so its notation can be
@@ -673,6 +751,33 @@ override the ordinary base specified by the chain sequence.
 Command-line frame and pair options override values from `nasolve.txt`; the
 effective configuration is always frozen in the new run directory. Use
 `--config PATH` to read a different input file.
+
+### Phaser data: amplitudes or intensities
+
+NASolve always tells Phaser which data to use: `F` (merged amplitudes, the
+default) or `I` (merged intensities, as the Phenix GUI uses). Choose it for a
+dataset in `[automr]`:
+
+```ini
+[automr]
+phaser_data = I
+```
+
+or for one run with `-I` (intensities) or `-F` (amplitudes):
+
+```bash
+./nasolve automr my_dataset -W --pair F:T -I --execute
+```
+
+`--phaser-data I` / `--phaser-data F` is the long form.
+
+The preflight reads the MTZ column types with `phenix.mtz.dump` and selects
+the matching merged columns with their sigma (`F,SIGF` or `IMEAN,SIGIMEAN` in
+STARANISO files); it stops if the file has none. The choice is written to the
+run's `nasolve.input.txt`, the labels to `report.json["phaser_data"]` and as
+`labin` in `Phaser/phaser.eff`. Phaser's own `LABIN` line is recorded after
+the run, and a run whose Phaser log reports the other kind of data fails.
+Campaigns always use `F` for now.
 
 ## Residue aliases
 
@@ -836,7 +941,7 @@ After a run reaches `MR_SUCCESS`, prepare it for refinement with:
 For the W/5W6W frame, PostMR uses the fixed standard sites `A:12` and `B:4`.
 It applies ordinary DNA/RNA base changes through headless Coot. For a supported
 modified nucleotide, Coot first mutates the site to its clean canonical parent
-(`DT` for `DE`/`DF`/`5IU`, `DA` for `1AP`, `DG` for `S6G`, or `DC` for
+(`DT` for `DE`/`DF`/`5IU`/`DU`, `DA` for `1AP`, `DG` for `S6G`, or `DC` for
 `C38`), builds the component from its dictionary, overlaps it, and
 replaces the parent. NASolve then restores the
 coordinates, occupancies, and B factors of every atom shared with the parent.
@@ -975,6 +1080,21 @@ NARestraints workbook.
 The `Q` token resolves to official CCD `S6G` and uses `DG` as its canonical
 construction parent. NARestraints v1.1.1 also stores its `C5` mapping as `C5 `;
 PostMR trims that exact trailing space in the same process-local adapter.
+
+After ReadySet, PostMR also looks for metal ions with NARestraints'
+anomalous-scatterer module (HETATM, waters excluded, atomic number 21 or more,
+outside nucleotides; Na, Mg, K and Ca are left out). Each one, for example an
+Ag merged from the metal search, is recorded under
+`report.json["postmr"]["anomalous"]["metal_sites"]` and written to
+`PostMR/Restraints/anomalous_scatterers.phil` (f' and f'' start at 0 and are
+refined, strategy includes `group_anomalous`) for running `phenix.refine` by
+hand. AutoRefine refines the same sites as anomalous scatterers against the
+F(+)/F(-) data and writes their groups itself, so that PHIL is not part of the
+AutoRefine restraint stack. Metals do not trigger the nucleotide AutoSol
+branch. This needs the NARestraints anomalous-scatterers branch; with an older
+NARestraints, PostMR stops if the model contains such a metal. For a PostMR run
+made before metal detection existed, AutoRefine finds the metals in the PostMR
+model itself, so the run does not need to be prepared again.
 
 After ReadySet, PostMR scans nucleotide-like residues for configurable
 anomalous elements. The initial trigger set is iodine, bromine, and selenium;

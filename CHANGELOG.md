@@ -8,7 +8,247 @@ entries are reconstructed from repository history.
 
 ## [Unreleased]
 
+### Fixed
+
+- The metal search (`nasolve autosol RUN --metal ELEMENT`) gave AutoSol the
+  plain Phaser model, so heavy atoms that belong to the requested bases were
+  found as metal sites: in iCiU_Ag the iodines of 5-iodo-dC and 5-iodo-dU
+  appeared as two extra "Ag" sites beside the real one. The residues the
+  AutoMR run asks for (standard pair, explicit mutations or sequences) are now
+  built into a copy of the Phaser model first, with PostMR's own mutation step
+  (headless Coot, coordinates restored), in
+  `AutoSolMetal/run_NNN/PartialModel/partial_model.pdb`, and that copy is
+  AutoSol's partial model. Coot is required only when something must be built;
+  `--original-model` keeps the old behaviour. PostMR's mutation step moved into
+  `postmr.plan_model_mutations` / `apply_model_mutations` without changing
+  PostMR. Schema: the metal-search report gains `inputs.partial_model` and
+  `partial_model` (source, mutations, Coot log, coordinate restoration); site
+  distances, the Coot view and the merge base use the partial model, and the
+  merged model keeps its Phaser-based name. Coot and AutoSol simulated in
+  tests; not yet run on real data.
+- The metal search (`nasolve autosol RUN --metal ELEMENT`) stopped with
+  "AutoSol needs MR_frames/FRAME/seq_base.txt or complete run sequences" for
+  any AutoMR run without a frozen frame sequence, such as every 3GBI-frame run
+  (only the W catalogue ships `seq_base.txt`), because PostMR sequences do not
+  exist yet at that stage. It now falls back to the nucleotide chains of the
+  Phaser model, which hold every strand in the asymmetric unit (residues with
+  C1'; curated modified residues as their parent; DU as T; others left out with
+  a warning), and `--sequence FILE` gives a sequence explicitly (metal search
+  only). A frozen sequence that is missing or fails its checksum is still an
+  error. Schema: metal-search `report.json` gains `sequence_warnings`;
+  `sequence_source` can now be `--sequence NAME` or `derived from the Phaser
+  model (...)`. The command prints the source. Phenix simulated in tests.
+- AutoMR's `phaser.eff` quoted paths with JSON escaping, so non-ASCII
+  characters were written as `\uXXXX`. PHIL keeps such sequences literally,
+  and Phaser stopped with "Couldn't find the file" for any dataset whose path
+  contained, for example, Chinese characters. Paths are now written as UTF-8
+  and only `\` and `"` are escaped, matching `libtbx.phil` quoting (as
+  AutoRefine already did). Checked against the Phenix 2.2.1-6174 PHIL parser
+  (parse only, not a Phaser run). Existing failed runs are unchanged; rerun
+  AutoMR to create a new run.
+- AutoRefine and Refine Doctor took the X-ray wavelength only from an AutoSol
+  record, so a structure refined without AutoSol (for example 7CU_Ag, whose Ag
+  site came from the metal search) reported no calculated f'' and Doctor
+  skipped every fixed and f''-only scattering recipe. The wavelength now comes
+  from the MTZ header of the refinement observations, read from the same
+  `phenix.mtz.dump` output that selects the labels (the dataset that holds
+  reflection data, as for AutoSol). A recorded AutoSol wavelength is used only
+  when the header has no usable one, and a disagreement of more than 1e-4 A is
+  recorded as a warning, with the MTZ value used. Schema: each AutoRefine
+  round's `inputs` gains `wavelength` and `wavelength_source` (`method`,
+  `mtz_dataset`, `mtz_error`, `autosol_wavelength`, `warnings`); anomalous
+  diagnostics and calculated scattering groups record `wavelength_source` as
+  the method used. Existing rounds are unchanged. Phenix programs simulated in
+  tests; the parser is the one that read 1.00743 A from the 7CU_Ag MTZ in its
+  metal search (Phenix 2.2.1-6174).
+
+### Added
+
+- `nasolve autofdp MODEL.pdb DATA.mtz` (steps 1-2 of the f'' occupancy
+  calibration specified in `docs/autofdp.md`, after the mmDNA supplements:
+  Adv. Mater. 2023, JACS 2023, Small 2025, Sci. Adv. 2026). It needs only a
+  starting model and an MTZ; it reads no run report, AutoRefine round or
+  checkpoint. From the MTZ (`phenix.mtz.dump`): the anomalous observations
+  (F(+)/SIGF(+)/F(-)/SIGF(-) or the intensity equivalent; required), the
+  Free-R label (never generated; test value 1 for `R-free-flags`, 0 for the
+  CCP4 labels) and the wavelength (MTZ header, or `--wavelength`). From the
+  model: the metal HETATM sites, found as in PostMR.
+  - Step 1 (B start): the model is copied unchanged to `source_model.pdb` and,
+    with each metal's B set to the atom-weighted mean B of its neighbouring
+    nucleotides (NARestraints metal-pair search: the bridged pair; otherwise
+    base contacts within 3.6 A; otherwise nucleotides within 6 A), to
+    `start_model.pdb`. Only the B columns change. `--site`, `--b-start
+    model|VALUE`.
+  - Step 2 (f'' round): first `phenix.ready_set` on `start_model.pdb` with
+    PostMR's actions (no hydrogens, dictionaries for unknown residues, no
+    geometry optimisation), given NASolve's curated dictionaries for curated
+    residues in the model and any `--cif` files; its model must keep every
+    atom, coordinate, occupancy and B and becomes `readyset_model.pdb`, and its
+    dictionaries (PostMR's precedence, `effective_restraints`) go to
+    phenix.refine. Then one phenix.refine round on `readyset_model.pdb` with
+    every strategy off except `group_anomalous` (no coordinate, real-space, B
+    or occupancy refinement; one group per metal site, f' fixed at its cctbx
+    Henke value for the wavelength, f'' refined from 0; `--cycles`, default
+    3), with parameters from AutoRefine's writers and a `--dry_run` check
+    first. AutoFDP prints each refined f'' against theory (deviation, within
+    `--tolerance`, default 1 e-), checks that coordinates, occupancy and B did
+    not move, and opens the round's model and maps in Coot (`--no-coot`,
+    `--coot`). `--theory ELEMENT=FDP` replaces an element's theoretical f''.
+    `--cif` adds dictionaries for ReadySet and phenix.refine. Schema:
+    `report.json` gains `readyset` and `steps.readyset`.
+  - Output: a new `run_NNN` in `AutoFDP/` beside the MTZ (`--output` for
+    another folder). Schema: `report.json` (`workflow: "autofdp"`, schema 2)
+    with portable, checksummed references to the inputs (dataset anchor) and
+    outputs (run anchor), what was read from the MTZ, the theory, the B start
+    and `rounds`; status `AUTOFDP_FDP_ROUND_DONE` or `AUTOFDP_FAILED`.
+    `AutoFDP` joins `AutoMR` and `AutoSolMetal` as a dataset-level run series
+    for path anchoring. `--plan` does the preflight (running only
+    `phenix.mtz.dump` and `phenix.python`) and writes nothing.
+  - Not implemented yet: occupancy adjustment, identity check, B confirmation
+    and the final round (documented stubs in `nasolve.autofdp`); `--element`
+    is refused. phenix.refine, phenix.mtz.dump, phenix.python and Coot are
+    simulated in tests; not yet run on real data.
+- `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
+  AutoSol directly after Phaser, with the original Phaser model as partial
+  model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals
+  via `autosol.phasing.mad_ha_add_list`, and no model building. Each search
+  writes a new `DATASET/AutoSolMetal/run_NNN`, beside `AutoMR` and the input
+  data (earlier development builds wrote `AutoMR/run_NNN/AutoSolMetal/
+  attempt_NNN`; those schema-1 records stay viewable). Outcomes
+  `METAL_SITES_FOUND`, `METAL_NOT_FOUND` (normal) or `METAL_AUTOSOL_FAILED`.
+  Found sites are listed with their nearest residues and opened in Coot with
+  the Phaser model and map (`--no-coot` to skip; reopen with `nasolve show
+  DATASET/AutoSolMetal/run_NNN` or `nasolve show RUN --stage metal`). Schema:
+  the search's own `report.json` (`workflow = "metal_autosol"`,
+  schema_version 2, `source_run`, references anchored to the search directory
+  or the dataset) and an additive `report.json["metal_autosol"]["searches"]`
+  index in the AutoMR run; the run's stage/status are unchanged and sites are
+  never added to the model. `run_context.dataset_directory` now also treats
+  `AutoSolMetal/run_NNN` as a dataset-level run.
+  `nasolve autosol` without `--metal` is unchanged. Tested with a simulated
+  AutoSol only; live Phenix 2.2.1-6174 validation pending.
+- PostMR writes metal ions as anomalous scatterers. After ReadySet it finds
+  HETATM metals with atomic number >= 21 outside nucleotides (Ag, Hg, Zn,
+  ...; not Na, Mg, K, Ca) using NARestraints `restraints.anomalous`
+  (anomalous-scatterers branch), records them in
+  `postmr.anomalous.metal_sites` (same fields as `candidates`, plus
+  `kind = "metal"`), and writes `Restraints/anomalous_scatterers.phil` with
+  NARestraints' `anomalous_phil_block` (one group per element, f'/f'' from 0
+  and refined, `group_anomalous` in the strategy) for hand-run
+  `phenix.refine`. AutoRefine now treats `metal_sites` like nucleotide
+  heavy-atom candidates: it selects F(+)/F(-) data and refines one
+  anomalous group per site. The PHIL is deliberately not in the AutoRefine
+  restraint stack, to avoid duplicate groups. `autosol_required` still
+  reflects nucleotide heavy atoms only. With an older NARestraints, PostMR
+  stops with a clear message when such a metal is present. For PostMR runs
+  made before this change (no `metal_sites` key), AutoRefine and the refine
+  doctor scan the checksum-verified PostMR prepared model the same way, in
+  memory, without rewriting the frozen PostMR record. Checked on the real
+  7CU_Ag PostMR (Ag at B:101 after Coot's merge: `chain B and resid 101 and
+  name AG`); phenix.refine itself not yet run.
+- dU (`DU`, the DNA `U` token, for example `--pair C:U`) is now a curated
+  PostMR residue. `data/ligands/DU.cif` is the official wwPDB CCD definition
+  copied unchanged from Phenix 2.2.1-6174
+  (`chem_data/chemical_components/d/data_DU.cif`, DNA LINKING, wwPDB
+  modified date 2011-06-04). PostMR builds DU on its parent DT: Coot overlays
+  DU on the DT already in the model and every DU atom takes the DT
+  coordinates, so the result is the original dT without its methyl C7.
+  ReadySet now receives DU.cif instead of generating a non-polymer DU
+  dictionary. Previously PostMR stopped with "No local CCD dictionary for DU".
+- PostMR now plans its mutations and checks every needed ligand dictionary
+  (targets and curated residues already in the model) and the Coot
+  executable before creating `PostMR/`. Previously a missing dictionary or
+  Coot left a half-made `PostMR/` folder that made every later attempt fail
+  with "refusing to overwrite".
+- The metal Coot view (after `nasolve autosol --metal` finds sites, or
+  `nasolve show DATASET/AutoSolMetal/run_NNN`) adds a **NASolve** toolbar
+  button, "Merge metal sites and save", and the Coot Python command
+  `nasolve_merge_metal_sites()`. It merges the open (possibly edited)
+  `overall_best_ha_pdb.pdb` molecule into a copy of the starting Phaser model
+  and writes `<model>-merged.pdb` (for example `mr_solution-merged.pdb`) in the
+  source AutoMR run's `Phaser/` folder, adding `-2`, `-3`, ... rather than
+  overwriting. Occupancies above 1 are set to 1.00 and listed; sites whose
+  recorded symmetry-aware nearest residue is clearly closer than the site as
+  placed are flagged as belonging next to a symmetry copy. The open molecules
+  are not changed. The merge is recorded in the AutoMR run's
+  `report.json["metal_merge"]` (schema_version 1: `models` with run-anchored,
+  checksummed model, base Phaser model and metal-search references, sites
+  merged, occupancy changes and warnings; `selected` = newest), written
+  atomically from Coot. `launch.json` records `metal_merge`, and the Coot log
+  records `NASOLVE_MERGED_MODEL`. Coot calls follow the Coot 1.3.3 Python API
+  bundled with Phenix 2.2.1-6174; tested against a simulated Coot (not yet in
+  a live Coot session).
+- PostMR starts from the selected merged metal model when one is recorded
+  (`nasolve postmr RUN --original-model` keeps the plain Phaser model). A
+  selected model that is missing or changed since merging stops PostMR before
+  `PostMR/` is created. The PostMR report adds `input_model_source`
+  (`phaser` or `metal-merged`) and the `metal_merge` entry used; `input_model`
+  and `input_sha256` name the merged file. With the ion in the model,
+  NARestraints (anomalous-scatterers branch) finds the metal-mediated pair and
+  skips its base-pair and stacking restraints; checked on the 7CU_Ag Phaser
+  model plus its AutoSol Ag site (B:4 / A:12 via Ag). Runs that already have
+  PostMR are unchanged. The metal searches still use the original Phaser
+  model, so a merged ion never validates itself.
+- `nasolve show PATH` looks a relative `PATH` up from the current folder and
+  then from the active workspace dataset, so `nasolve show
+  AutoSolMetal/run_001` works outside the dataset folder. When neither has a
+  `report.json`, the error names both places and says which folders are
+  expected, instead of the misleading "AutoMR report is missing".
+- AutoMR now always tells Phaser which data to use: `-F` (merged
+  amplitudes, the default) or `-I` (merged intensities, as the Phenix GUI
+  uses); `--phaser-data F|I` is the long form. Or set `phaser_data = F|I` in
+  `[automr]` of
+  `nasolve.txt`; the command line overrides the file. Previously `phaser.eff`
+  had no `labin` and `phenix.phaser` chose for itself (`F,SIGF` whenever the
+  MTZ had amplitudes). The preflight lists the MTZ column types with
+  `phenix.mtz.dump` and groups them as `iotbx.mtz` does: `I` takes the first
+  merged intensity array (`J` then `Q`; `IMEAN,SIGIMEAN` for STARANISO files);
+  `F` takes `F,SIGF` or `FOBS,SIGFOBS`, else the first merged non-`FC`
+  amplitude array (phenix.phaser's own preference). The preflight stops before
+  allocating a run if the requested columns are missing, and now needs
+  `phenix.mtz.dump` in nonstandard mode too. The choice is always written to
+  `nasolve.input.txt`. Schema: additive `report.json["phaser_data"]`
+  (schema_version 2: `requested` F|I, `labin`) and
+  `execution.phaser.reflection_data`, which also records Phaser's own `LABIN`
+  echo; a run whose log reports the other kind of data is `MR_FAILED`. Reports
+  frozen before this record, and schema-1 records from the first version of
+  this option (`auto`/`intensities`), still run as they did. Campaigns use `F`
+  and block a dataset that sets `phaser_data = I` rather than ignoring it.
+  Column selection was checked against the column header of a real
+  STARANISO MTZ and the Phenix 2.2.1-6174 `iotbx.mtz` and `phenix.phaser`
+  sources; Phaser itself was simulated in tests (no live run yet).
+- `nasolve automr ... --execute --show` opens Coot when Phaser has written a
+  model and map, whatever the TFZ result: Phaser's model and its map
+  (`Phaser/mr_solution.pdb` and `.mtz`, byte-identical copies of
+  `PHASER.1.pdb`/`.mtz`) in an isolated `CootGUI/automr` session, as
+  `nasolve show RUN --stage automr` does; `--coot` overrides the executable.
+  Without `--show` nothing opens (unchanged default) and AutoMR prints the
+  `nasolve show` command instead. A Coot problem prints an error but never
+  changes the AutoMR status or exit code. Tested with a simulated Coot launch
+  only.
+
 ### Changed
+
+- The MTZ header is now the source of the space group and the X-ray
+  wavelength, and `Data_1*.cif` and `summary.html` are optional. Datasets
+  without them (for example the 2021 iCiU_Ag autoPROC run, which has only the
+  MTZ files and `report.pdf`) are accepted. When either file is present it is
+  still a cross-check and must agree with the MTZ. Standard-frame symmetry
+  compares the `phenix.mtz.dump` symbol and symmetry matrices with any CIF and
+  summary entries; AutoSol and the metal search read the wavelength of the MTZ
+  dataset that holds reflection data (the `HKL_base` placeholder is ignored),
+  and a present `summary.html` must agree within 1e-4 A (one without a
+  wavelength is recorded as not cross-checked). The MTZ stores the wavelength
+  to 5 decimals, so `autosol.lambda` may differ from the summary's 6-decimal
+  value by up to 5e-6 A. Schema: `report.json["inputs"]["metadata"]` and
+  `["summary"]` may be null; `symmetry.evidence` gains `compared_sources`
+  (`cif_symbols` empty, `summary_symbol` null when absent); the AutoSol and
+  metal-search `wavelength_source` is now an object (`method`, `path` of the
+  MTZ, `mtz_dataset`, `summary_cross_check`). Campaign plans omit absent
+  optional inputs. Existing runs are unchanged. Supersedes the unmerged
+  `wip/cif-wavelength` branch (wavelength from the CIF). Checked against the
+  Phenix 2.2.1-6174 `iotbx.mtz` dump format and the iCiU_Ag and FT_Hg MTZ
+  headers; Phenix programs simulated in tests.
 
 - Added schema-1 semantic `terminal_geometry_protection` checkpoint provenance. Protected sites, sigma, Phenix-derived ideal source, mechanism, and the run-local protection restraint artifact now inherit with refinement/manual children; attempts to stack a second protection record fail closed.
 - Generalized the OP3-specific policy into an explicit standard-phosphodiester backbone contract. `five_prime_phosphate_sites` is the preferred user-facing name (legacy `allow_op3_sites` remains readable). PostMR now treats a requested 5'-terminal phosphate as the complete P/OP1/OP2/OP3 group, preserving a complete group, completing missing OP3 from existing P/OP1/OP2, or seeding a whole missing group from O5'-C5' with recorded idealized starting geometry. Partial ambiguous groups still fail closed.

@@ -30,6 +30,7 @@ class AutoMRPreflightTests(unittest.TestCase):
                 mirror=True,
                 mirror_transformer=fake_mirror,
                 valid_ligand_codes=VALID,
+                mtz_dump_executable=make_mtz_dump(Path(directory) / "tools"),
             )
             source_copy = result.run_directory / "Model" / "source_model.pdb"
             mirrored = result.run_directory / "Model" / "input_model.pdb"
@@ -60,6 +61,7 @@ class AutoMRPreflightTests(unittest.TestCase):
                     mirror=True,
                     mirror_transformer=renumbering_mirror,
                     valid_ligand_codes=VALID,
+                    mtz_dump_executable=make_mtz_dump(Path(directory) / "tools"),
                 )
 
     def test_mirror_rejects_lost_atoms(self):
@@ -77,12 +79,16 @@ class AutoMRPreflightTests(unittest.TestCase):
                     mirror=True,
                     mirror_transformer=lossy_mirror,
                     valid_ligand_codes=VALID,
+                    mtz_dump_executable=make_mtz_dump(Path(directory) / "tools"),
                 )
 
     def test_nonstandard_preflight_generates_input_and_run_records(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = make_dataset(Path(directory))
-            result = prepare_automr(dataset, valid_ligand_codes=VALID)
+            result = prepare_automr(
+                dataset, valid_ligand_codes=VALID,
+                mtz_dump_executable=make_mtz_dump(Path(directory) / "tools"),
+            )
             self.assertEqual(result.status, "READY")
             self.assertTrue(result.generated_config)
             self.assertEqual(result.run_directory.name, "run_001")
@@ -103,7 +109,10 @@ class AutoMRPreflightTests(unittest.TestCase):
             self.assertIsNone(facts["semantics"]["overall_compatibility"])
             self.assertFalse(facts["semantics"]["automatic_reuse_authorized"])
 
-            second = prepare_automr(dataset, valid_ligand_codes=VALID)
+            second = prepare_automr(
+                dataset, valid_ligand_codes=VALID,
+                mtz_dump_executable=make_mtz_dump(Path(directory) / "tools"),
+            )
             self.assertEqual(second.run_directory.name, "run_002")
             self.assertFalse(second.generated_config)
 

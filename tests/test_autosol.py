@@ -51,10 +51,23 @@ def hex_cart(x: float, y: float, z: float) -> tuple[float, float, float]:
     return (50.0 * x - 25.0 * y, 50.0 * math.sin(math.radians(120.0)) * y, 60.0 * z)
 
 
-def make_mtz_dump(root: Path) -> Path:
+def make_mtz_dump(root: Path, wavelength: float = 1.377618) -> Path:
     executable = root / "phenix.mtz.dump"
+    # Header layout of phenix.mtz.dump: HKL_base (placeholder wavelength)
+    # then the data dataset that carries the beamline wavelength.
+    header = (
+        "Crystal 1:\n  Dataset 1:\n    Name: HKL_base\n    Wavelength: 9.999\n"
+        "    label #valid %valid min max type\n"
+        "    H 10 100.00% 0 9 H: index h,k,l\n"
+        "Crystal 2:\n  Dataset 1:\n    Name: 1\n"
+        f"    Wavelength: {wavelength:.6g}\n"
+        "    label #valid %valid min max type\n"
+        "    IMEAN 10 100.00% 0 9 J: intensity\n"
+        "    SIGIMEAN 10 100.00% 0 9 Q: standard deviation\n"
+    )
     executable.write_text(
         "#!/bin/sh\n"
+        "cat <<'NASOLVE_HEADER'\n" + header + "NASOLVE_HEADER\n"
         "printf '%s\\n' 'I(+) 1 K' 'SIGI(+) 1 M' 'I(-) 1 K' 'SIGI(-) 1 M'\n"
         "case \"$1\" in\n"
         "  *overall_best_refine_data.mtz) "
@@ -585,7 +598,7 @@ class AutoSolTests(unittest.TestCase):
                 "autosol.seq_file": str(run / "AutoSol/sequence_input.txt"),
                 "autosol.labels": "I(+) SIGI(+) I(-) SIGI(-)",
                 "autosol.atom_type": "I",
-                "autosol.lambda": "1.377618",
+                "autosol.lambda": "1.37762",
                 "autosol.phasing.input_partpdb_file": str(run / "Phaser/mr_solution.pdb"),
                 "autosol.model_building.build": "False",
                 "autosol.model_building.phase_improve_and_build": "False",

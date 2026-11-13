@@ -260,7 +260,9 @@ Problematic Phenix components are explicit curated-library entries. User token
 `E` maps to the laboratory PDB-compatible `DE`, not official CCD `8RO`, whose
 topology describes a different sulfur-ring compound. `F` maps to `DF`, with
 official deposition identity `A1AAZ`; `D` maps to official `1AP`; and `Q` maps
-to official `S6G` with canonical parent `DG`. The registry
+to official `S6G` with canonical parent `DG`. DNA `U` maps to official `DU`
+(2'-deoxyuridine), whose packaged CIF is the unchanged wwPDB definition from
+Phenix 2.2.1-6174 and whose canonical parent is `DT`. The registry
 defines canonical parents and required/forbidden sulfur bonds, which are
 validated before Coot or ReadySet runs. ReadySet receives the curated CIF,
 executes with `actions.hydrogens=False`, and is run with `cwd` set to its own
@@ -347,8 +349,8 @@ checksummed copy under `Model/` and AutoSol copies that run-local snapshot into
 its input. Legacy runs recover the exact declared frame directory without
 requiring the old pair-model filename to remain present. For a nonstandard
 model, complete sequences recorded in the frozen run may be written to the same
-input instead. The wavelength is read from `summary.html`, preferring the
-high-precision assignment and rejecting inconsistent repeated values.
+input instead. The wavelength is read from the MTZ header (the dataset that
+holds reflection data); a present `summary.html` must agree within 1e-4 A.
 `phenix.mtz.dump` must confirm a complete anomalous intensity or amplitude
 quartet before execution.
 
@@ -381,6 +383,78 @@ Discovery prefers a unique `overall_best_denmod_map_coeffs.mtz`, then a unique
 `resolve_histograms*.mtz`, excluding TEMP/PDS products. Missing, ambiguous, or
 unreadable view maps do not change phase acceptance. This viewing product is
 distinct from the HL-bearing `refinement_data` input.
+
+## Metal-search AutoSol contract
+
+`nasolve autosol RUN --metal ELEMENT` is a separate, optional MR-SAD search for
+metal ions, run directly after Phaser. It requires an AutoMR run with an
+accepted Phaser result (best TFZ >= 8; 7 <= TFZ < 8 only with
+`--allow-mr-review`) and may also run after PostMR, because it always uses the
+original Phaser solution PDB and never a modified model. Inputs follow the
+nucleotide branch: checksum-verified STARANISO reflections, the MTZ-header
+wavelength, and a complete anomalous quartet confirmed by `phenix.mtz.dump`.
+The sequence is, in order, `--sequence FILE`, the frozen frame or run sequence
+(a missing or altered frozen sequence is still an error), or the nucleotide
+chains of the Phaser model (residues with C1'; curated modified residues count
+as their parent, DU as T, others are left out with a warning). The 3GBI
+catalogue has no `seq_base.txt`, so 3GBI runs use the Phaser model. The report
+records `sequence_source` and `sequence_warnings`. All checks complete before
+any directory is created, so a refused search leaves nothing behind.
+
+The partial model is the Phaser solution with the AutoMR-requested residues
+built in, unless `--original-model` is given. The search calls
+`postmr.plan_model_mutations` before any directory exists (targets from the
+frozen post-MR plan; curated dictionaries validated; Coot required only when
+something must be built) and `postmr.apply_model_mutations` in
+`AutoSolMetal/run_NNN/PartialModel/` (headless Coot, then parent and canonical
+backbone coordinates restored, as in PostMR), writing `partial_model.pdb`. A
+Coot failure is recorded as `METAL_AUTOSOL_FAILED` before AutoSol runs. The
+report records `inputs.partial_model` and `partial_model` (source, mutations,
+Coot log, coordinate restoration); site distances, the Coot view and the
+"Merge metal sites and save" base use the partial model, while the merged
+model keeps the Phaser name (`Phaser/mr_solution-merged.pdb`), so PostMR finds
+it and sees the residues already built.
+
+The first named metal is `autosol.atom_type`; additional metals go to
+`autosol.phasing.mad_ha_add_list`. `autosol.phasing.partpdb_rms` defaults to
+1.0 A (`--rmsd`). Sites are left unspecified and both
+`model_building.build` and `phase_improve_and_build` are false. After a
+successful exit, `autosol.eff` must confirm those settings and the requested
+`partpdb_rms`; a mismatch fails closed.
+
+Each search allocates a new `DATASET/AutoSolMetal/run_NNN`, beside `AutoMR`
+and the input data. Outcomes are
+`METAL_SITES_FOUND` (at least one site of a requested element in a unique
+`overall_best_ha_pdb.pdb`), `METAL_NOT_FOUND` (no such site; a normal result),
+and `METAL_AUTOSOL_FAILED` (non-zero exit, ambiguous outputs, or unapplied
+settings). For each found site the search records the closest atom of the
+three nearest Phaser-model residues, using H3/R3/P1 symmetry when configured
+and same-asymmetric-unit distances otherwise.
+
+The full record is the search directory's own `report.json`
+(`workflow = "metal_autosol"`, `schema_version` 2, `source_run`) with SHA-256
+checksums and references anchored to the search directory (its log, settings
+file, sequence and HA model) or the dataset (reflections, Phaser model and
+map), so it validates after the dataset moves. The AutoMR run's
+`report.json["metal_autosol"]` lists the searches made from it (`searches`,
+`latest`, each with a checksummed reference to the search report). Schema-1
+`attempts` written inside the AutoMR run by development builds remain readable
+by the metal view. The run's `stage`,
+`status` and `message` are unchanged and `model_changed` is false: sites are
+for inspection only and never enter the model or AutoRefine automatically.
+The `metal` Coot view opens the Phaser model and the HA model over the Phaser
+MTZ in `CootGUI/metal/` of the directory that was opened (the search directory
+after `nasolve autosol --metal`), refusing references that fail their
+checksums. Its startup script also adds a NASolve toolbar action (and
+`nasolve_merge_metal_sites()`) that merges the open HA molecule into a copy of
+the Phaser model, caps occupancies at 1.00, and writes a new
+`<model>-merged[-N].pdb` in the source AutoMR run's `Phaser/` directory without
+overwriting, then appends it to that run's `report.json["metal_merge"]` (run-
+anchored, SHA-256) and selects it. PostMR starts from the selected merged model
+unless `--original-model` is given, refuses one that is missing or changed, and
+records `input_model_source`; AutoSol metal searches keep using the original
+Phaser model. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
+tests use a simulated AutoSol that accepts only the full PHIL paths above.
 
 ## AutoRefine contract
 
@@ -532,8 +606,13 @@ at its first numerical pass, technical failure, or trial budget. Both
 
 Source anomalous benchmarks retain their wavelength, occupancy, B factor and
 checkpoint. For selected anomalous observations, default Doctor trials use
-explicit Henke f'/f'' values calculated with Phenix/CCTBX at the recorded
-AutoSol wavelength. The sequence tries ML and eligible MLHL with those values
+explicit Henke f'/f'' values calculated with Phenix/CCTBX at the wavelength
+in the MTZ header of the refinement observations (the dataset that holds
+reflection data, read from the same `phenix.mtz.dump` output that selects the
+labels). A recorded AutoSol wavelength is the fallback when the header has
+none; a disagreement above 1e-4 A is recorded and the MTZ value is used. The
+same wavelength gives the calculated f'' in every AutoRefine round's anomalous
+diagnostics. The sequence tries ML and eligible MLHL with those values
 fixed, then f''-only refinement, coordinate-only, and B-only fixed-scattering
 fallbacks. Missing wavelength or failed calculation skips these recipes for
 inspection; zero is not substituted. A successful f''-only execution can supply
@@ -581,6 +660,9 @@ pointer. Without a registry, the default prefers accepted AutoSol with a usable
 density map, then completed PostMR, then Phaser. Profiles differ:
 
 - AutoMR: Phaser model and Phaser MTZ;
+- Metal (`--stage metal` on an AutoMR run, or a `DATASET/AutoSolMetal/run_NNN`
+  directory opened directly): Phaser model, that search's (or the latest found
+  search's) `overall_best_ha_pdb.pdb`, and the Phaser MTZ;
 - PostMR: ReadySet model and dictionaries with accepted AutoSol density when
   available, otherwise an explicitly labelled Phaser map;
 - AutoSol: ReadySet model and dictionaries, separate AutoSol HA model, and

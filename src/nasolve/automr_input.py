@@ -12,6 +12,7 @@ from typing import Collection, Mapping
 from .phosphate import PhosphateError, validate_op3_sites, validate_phosphate_intent
 from .backbone import BackboneError, validate_backbone_sites
 from .presets import PresetError, ProjectPreset, load_preset
+from .reflection_data import DEFAULT_PHASER_DATA, ReflectionDataError, normalize_phaser_data
 from .residue_aliases import LigandCodeError, ResolvedLigand, resolve_ligand, resolve_pair
 
 
@@ -53,14 +54,17 @@ class AutoMRIntent:
     backbone_sites: dict[str, str] = field(default_factory=dict)
     allow_unreviewed_backbone: bool = False
     sequence_reference: str | None = None
+    phaser_data: str | None = None
 
 
 @dataclass(frozen=True)
 class DatasetFiles:
     root: Path
     reflections: Path
-    metadata: Path
-    summary: Path
+    # Optional autoPROC files: the MTZ header is the authority for space group
+    # and wavelength; these are cross-checks when present.
+    metadata: Path | None  # Data_1*.cif
+    summary: Path | None  # summary.html
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class ResolvedAutoMRInput:
     model_family: str | None = None
     model_provider: dict[str, object] | None = None
     frame_sequence_source: Path | None = None
+    phaser_data: str = DEFAULT_PHASER_DATA
 
 
 _ALLOWED_SECTIONS = {"automr", "sequences", "mutations", "backbones"}
@@ -108,6 +113,7 @@ _ALLOWED_AUTOMR_KEYS = {
     "allow_op3_sites",
     "five_prime_phosphate_sites",
     "allow_unreviewed_backbone",
+    "phaser_data",
 }
 
 
@@ -312,7 +318,17 @@ def read_intent(path: Path | None) -> AutoMRIntent:
         ),
         backbone_sites=backbone_sites,
         allow_unreviewed_backbone=allow_unreviewed_backbone,
+        phaser_data=_validated_phaser_data(automr.get("phaser_data"), "[automr] phaser_data"),
     )
+
+
+def _validated_phaser_data(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        return normalize_phaser_data(value)
+    except ReflectionDataError as exc:
+        raise AutoMRInputError(f"{label}: {exc}") from exc
 
 
 def discover_dataset(root: Path) -> DatasetFiles:
@@ -350,8 +366,6 @@ def discover_dataset(root: Path) -> DatasetFiles:
         and path.suffix.casefold() == ".cif"
         and _normalized_name(path).startswith("data1")
     )
-    if not metadata_candidates:
-        raise AutoMRInputError("Missing required Data_1*.cif metadata file")
     if len(metadata_candidates) > 1:
         raise AutoMRInputError(
             "Ambiguous Data_1*.cif metadata files: "
@@ -361,14 +375,16 @@ def discover_dataset(root: Path) -> DatasetFiles:
         path for path in dataset.iterdir()
         if path.is_file() and path.name.casefold() == "summary.html"
     )
-    if not summaries:
-        raise AutoMRInputError("Missing required file: summary.html")
     if len(summaries) > 1:
         raise AutoMRInputError(
             "Ambiguous summary files: " + ", ".join(path.name for path in summaries)
         )
-    summary = summaries[0]
-    return DatasetFiles(dataset, reflections, metadata_candidates[0], summary)
+    return DatasetFiles(
+        dataset,
+        reflections,
+        metadata_candidates[0] if metadata_candidates else None,
+        summaries[0] if summaries else None,
+    )
 
 
 def _normalized_name(path: Path) -> str:
@@ -608,6 +624,7 @@ def resolve_automr_input(
     valid_ligand_codes: Collection[str] | None = None,
     *,
     recipe: ProjectPreset | None = None,
+    phaser_data_override: str | None = None,
 ) -> ResolvedAutoMRInput:
     """Apply CLI precedence, validate intent, and select exactly one model."""
     try:
@@ -655,6 +672,12 @@ def resolve_automr_input(
     model_provider: dict[str, object] | None = None
     frame_sequence_source: Path | None = None
     effective_allow_p1 = bool(allow_p1_standard or intent.allow_p1_standard)
+    # The command line overrides nasolve.txt; neither means F (amplitudes).
+    phaser_data = (
+        _validated_phaser_data(phaser_data_override, "--phaser-data")
+        if phaser_data_override is not None
+        else _validated_phaser_data(intent.phaser_data, "[automr] phaser_data")
+    ) or DEFAULT_PHASER_DATA
     effective_mirror = bool(mirror_override or intent.mirror)
     if mode == "standard":
         if not selected_frame:
@@ -815,6 +838,7 @@ def resolve_automr_input(
         phosphate_intent=phosphate_intent,
         backbone_sites=backbone_sites,
         allow_unreviewed_backbone=intent.allow_unreviewed_backbone,
+        phaser_data=phaser_data,
     )
 
 
@@ -859,6 +883,8 @@ def format_intent(resolved: ResolvedAutoMRInput) -> str:
         lines.append("mirror = true")
     if resolved.allow_unreviewed_backbone:
         lines.append("allow_unreviewed_backbone = true")
+    # Always frozen: reopening a snapshot must not adopt a later default.
+    lines.append(f"phaser_data = {resolved.phaser_data}")
     # Always freeze even an empty list: reopening a snapshot must not adopt a
     # later recipe version's phosphate sites.
     lines.append("allow_op3_sites = " + ", ".join(resolved.allow_op3_sites))

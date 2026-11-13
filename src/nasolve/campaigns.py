@@ -260,12 +260,19 @@ def _plan_dataset(root: Path, dataset: Path, preset: ProjectPreset, staging: Pat
         files = discover_dataset(dataset)
         for role in ("reflections", "metadata", "summary"):
             path = getattr(files, role)
+            if path is None:  # Data_1*.cif and summary.html are optional
+                continue
             entry["inputs"][role] = _input_ref(root, dataset, path)
         intent = _merged_intent(dataset, preset)
         dataset_sequence_reference = intent.sequence_reference
         if sequence_thread is not None and intent.sequence_reference is None:
             intent.sequence_reference = sequence_thread["sequence_reference"]
         entry["effective_config"] = _intent_config(intent)
+        if intent.phaser_data not in {None, "F"}:
+            raise AutoMRInputError(
+                "phaser_data = I is not yet supported by campaigns (they use F); "
+                "run 'nasolve automr' for this dataset or remove phaser_data"
+            )
         if (not intent.mode or intent.mode.strip().casefold() != "standard"
                 or not intent.frame or normalize_frame(intent.frame).name != "W"):
             raise AutoMRInputError("Campaign schema 1 supports only standard W/5W6W datasets")
@@ -736,7 +743,7 @@ def _validate_plan(payload: Any) -> None:
         elif entry["status"] == "DISCOVERED":
             raise CampaignError("Malformed campaign state: discovered dataset requires effective configuration")
         if entry["status"] == "DISCOVERED":
-            if any(role not in inputs for role in ("reflections", "metadata", "summary", "model")):
+            if any(role not in inputs for role in ("reflections", "model")):
                 raise CampaignError("Malformed campaign state: discovered dataset is missing frozen inputs")
             _required_fields(config, {"mode", "frame", "pair", "mirror", "allow_p1_standard",
                                       "model", "model_name", "model_source", "model_pair",

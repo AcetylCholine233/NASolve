@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Mapping
 
 from .model_assessment import file_sha256
+from .reflection_data import (
+    AMPLITUDES,
+    INTENSITIES,
+    describe,
+    reported_data_kind,
+    reported_labin,
+)
 from .run_context import resolve_artifact_path
 
 
@@ -48,8 +55,18 @@ _LLG_RE = re.compile(rf"\bLLG\s*={{0,2}}\s*({_NUMBER})", re.I)
 
 
 def _phil_string(value: str | Path) -> str:
-    """Return a double-quoted PHIL string with conservative escaping."""
-    return json.dumps(str(value))
+    """Return a double-quoted PHIL string, escaped the way libtbx.phil reads it.
+
+    Inside quotes PHIL only decodes ``\\\\`` and ``\\"`` (libtbx
+    ``quote_python_str``); any other backslash sequence is kept literally. JSON
+    escaping therefore broke non-ASCII paths: ``\\u5b66`` reached Phaser as
+    six literal characters and the file could not be found. Characters are
+    written as they are; the parameter file is UTF-8.
+    """
+    text = str(value)
+    if any(character in text for character in "\r\n\x00"):
+        raise PhaserExecutionError(f"Path cannot be written to a PHIL file: {text!r}")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _load_report(report_path: Path) -> dict[str, object]:
@@ -68,6 +85,36 @@ def _integer_field(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise PhaserExecutionError(f"Frozen report has no valid {label}")
     return value
+
+
+# Values written by the first (schema 1) version of the record.
+_LEGACY_REQUESTED = {"auto": None, "intensities": INTENSITIES}
+
+
+def frozen_phaser_data(report: Mapping[str, object]) -> dict[str, object]:
+    """Return the preflight's data choice.
+
+    Reports frozen before the record existed (and schema-1 ``auto`` records)
+    have no labels: Phaser then keeps its own choice, as those runs did.
+    """
+    record = report.get("phaser_data")
+    if record is None:
+        return {"requested": None, "labin": None}
+    if not isinstance(record, Mapping):
+        raise PhaserExecutionError("Frozen phaser_data record is malformed")
+    requested = record.get("requested")
+    labin = record.get("labin")
+    if record.get("schema_version") == 1 and requested in _LEGACY_REQUESTED:
+        requested = _LEGACY_REQUESTED[requested]
+        if requested is None and labin is None:
+            return {**record, "requested": None}
+    if (
+        requested in {AMPLITUDES, INTENSITIES}
+        and isinstance(labin, str)
+        and re.fullmatch(r"[^\s,\"\\]+(?:,[^\s,\"\\]+)+", labin)
+    ):
+        return {**record, "requested": requested}
+    raise PhaserExecutionError("Frozen phaser_data record is malformed")
 
 
 def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> str:
@@ -105,6 +152,9 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
     copies = 1
     if isinstance(symmetry, Mapping) and "mr_copies" in symmetry:
         copies = _integer_field(symmetry.get("mr_copies"), "MR copy count")
+    labin = frozen_phaser_data(report).get("labin")
+    # Only reports frozen before phaser_data existed have no labin.
+    data_lines = [f"  labin = {_phil_string(labin)}"] if labin else []
 
     # Do not set ``phaser.model`` as well as ``phaser.ensemble``.  The shortcut
     # can create an additional anonymous ensemble in some Phenix versions.
@@ -112,6 +162,7 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
         "phaser {",
         "  mode = MR_AUTO",
         f"  hklin = {_phil_string(str(reflections))}",
+        *data_lines,
         "  chain_type = dna",
         "  composition {",
         "    chain {",
@@ -240,6 +291,15 @@ def execute_phaser(
     log_path.write_text(output, encoding="utf-8")
 
     tfz, llg = parse_best_tfz(output)
+    phaser_data = frozen_phaser_data(report)
+    labin_echo = reported_labin(output)
+    used_kind = reported_data_kind(labin_echo)
+    requested_kind = phaser_data.get("requested")
+    data_mismatch = (
+        requested_kind is not None
+        and used_kind is not None
+        and used_kind != requested_kind
+    )
     raw_pdb = _find_solution(phaser_directory, ".pdb")
     raw_mtz = _find_solution(phaser_directory, ".mtz")
     solution_pdb: Path | None = None
@@ -255,6 +315,12 @@ def execute_phaser(
     if return_code != 0:
         status = "MR_FAILED"
         message = f"Phaser exited with status {return_code}; inspect phaser.log"
+    elif data_mismatch:
+        status = "MR_FAILED"
+        message = (
+            f"{describe(str(requested_kind)).capitalize()} ({phaser_data.get('labin')}) "
+            f"were requested but Phaser reported LABIN {labin_echo}; inspect phaser.log"
+        )
     elif tfz is None:
         status = "MR_FAILED"
         message = "Phaser did not report a TFZ; inspect phaser.log"
@@ -292,6 +358,12 @@ def execute_phaser(
             "preserve_heteroatoms": True,
             "model_rmsd": 1.0,
             "composition_nres": report["model_assessment"]["polymer_residue_count"],
+            "reflection_data": {
+                "requested": phaser_data.get("requested"),
+                "labin": phaser_data.get("labin"),
+                "phaser_reported_labin": labin_echo,
+                "phaser_reported_kind": used_kind,
+            },
             "search_copies": (
                 report["symmetry"].get("mr_copies", 1)
                 if isinstance(report.get("symmetry"), Mapping) else 1
@@ -314,6 +386,13 @@ def execute_phaser(
             "Ensembles: 1 (nasolve_model)",
             "Preserve heteroatoms: True",
             "Model RMSD: 1.0 A",
+            "Reflection data: "
+            + (
+                f"{requested_kind} - {describe(str(requested_kind))} "
+                f"({phaser_data.get('labin')})"
+                if phaser_data.get("labin") else "Phenix default (legacy report)"
+            )
+            + (f"; Phaser reported LABIN {labin_echo}" if labin_echo else ""),
             f"Composition residues: {report['model_assessment']['polymer_residue_count']}",
             f"Search copies: {report['execution']['phaser']['search_copies']}",
             f"Best TFZ: {tfz if tfz is not None else 'not reported'}",
@@ -343,5 +422,6 @@ __all__ = [
     "PhaserExecutionResult",
     "build_phaser_eff",
     "execute_phaser",
+    "frozen_phaser_data",
     "parse_best_tfz",
 ]
