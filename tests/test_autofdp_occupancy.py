@@ -22,6 +22,7 @@ from nasolve.autofdp import (
     AutoFDPError,
     propose_occupancy,
     write_site_occupancy,
+    wrong_response,
 )
 
 from .helpers import pdb_record
@@ -36,11 +37,16 @@ from .test_autofdp_round import (
 )
 
 
-def make_scaling_refine(root: Path, signal: dict[str, tuple[float, float]], *,
+def make_scaling_refine(root: Path, signal: dict[str, object], *,
                         fail_below: float | None = None) -> Path:
     """Stand-in phenix.refine reporting f'' = a + S/q for each group in
     ``signal`` (selection -> (a, S)), with q read from the input model.
-    ``fail_below``: exit 1 when a site's occupancy is below it."""
+
+    A dict instead of (a, S) can bend the curve the way Hg h:1 of PdUHgPdU
+    did: ``peak`` makes f'' fall again below that occupancy (a + S q/peak^2),
+    ``trough`` makes it rise again above it; ``peak_while`` = (selection,
+    occupancy) keeps the peak only while that other site is above the
+    occupancy. ``fail_below``: exit 1 when a site's occupancy is below it."""
     make_fdp_refine(root)          # phenix.python with the theory: AG 2.03, HG 10.1
     executable = root / "phenix.refine"
     executable.write_text(
@@ -75,12 +81,24 @@ def make_scaling_refine(root: Path, signal: dict[str, tuple[float, float]], *,
         "    selection = re.search(r'selection = \"(.*?)\"', block).group(1)\n"
         "    if selection not in signal:\n"
         "        continue\n"
-        "    offset, scale = signal[selection]\n"
+        "    spec = signal[selection]\n"
+        "    if not isinstance(spec, dict):\n"
+        "        spec = {'a': spec[0], 'S': spec[1]}\n"
+        "    offset, scale, q = spec.get('a', 0.0), spec['S'], values[selection]\n"
+        "    peak, trough, condition = spec.get('peak'), spec.get('trough'), spec.get('peak_while')\n"
+        "    if condition is not None and values[condition[0]] <= condition[1]:\n"
+        "        peak = None\n"
+        "    if peak is not None and q < peak:\n"
+        "        value = offset + scale * q / peak ** 2\n"
+        "    elif trough is not None and q > trough:\n"
+        "        value = offset + scale * q / trough ** 2\n"
+        "    else:\n"
+        "        value = offset + scale / q\n"
         "    print('Anomalous scatterer group:')\n"
         "    print(f'  Selection: \"{selection}\"')\n"
         "    print('  Number of selected scatterers: 1')\n"
         "    print('  f_prime: ' + re.search(r'f_prime = (\\S+)', block).group(1))\n"
-        "    print(f'  f_double_prime: {offset + scale / values[selection]:.3f}')\n"
+        "    print(f'  f_double_prime: {value:.3f}')\n"
     )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     return executable
@@ -149,6 +167,27 @@ class ProposeOccupancyTests(unittest.TestCase):
                     propose_occupancy(history, theory)
         with self.assertRaisesRegex(AutoFDPError, "occupancy floor"):
             propose_occupancy([(0.9, 1.0)], 2.03, floor=1.0)
+
+
+class WrongResponseTests(unittest.TestCase):
+    def test_fdp_falling_with_occupancy_returns_the_occupancy_with_the_highest_fdp(self):
+        # PdUHgPdU AutoFDP/run_003, Hg h:1 (live, Phenix 2.2.1): f'' rose from
+        # 1.00 to 0.34, then fell from 0.34 to 0.20.
+        self.assertIsNone(wrong_response([(1.0, 3.44426), (0.34, 6.6448)]))
+        response = wrong_response([(1.0, 3.44426), (0.34, 6.6448), (0.2, 6.38852)])
+        self.assertEqual(
+            (response.lowered, response.occupancy_before, response.occupancy_after,
+             response.best_occupancy, response.best_f_double_prime),
+            (True, 0.34, 0.2, 0.34, 6.6448),
+        )
+
+    def test_mirror_case_and_rounds_without_an_occupancy_change(self):
+        response = wrong_response([(0.5, 12.12), (0.6, 13.447)])   # raised, f'' rose
+        self.assertEqual((response.lowered, response.best_occupancy), (False, 0.5))
+        self.assertIsNone(wrong_response([(0.5, 12.12), (0.6, 11.0)]))
+        # Another site was adjusted: same occupancy, so no verdict.
+        self.assertIsNone(wrong_response([(0.3, 7.4), (0.3, 7.0)]))
+        self.assertIsNone(wrong_response([(0.5, 4.0)]))
 
 
 class WriteSiteOccupancyTests(unittest.TestCase):
@@ -311,6 +350,96 @@ class OccupancyLoopTests(unittest.TestCase):
             self.assertEqual([outcome.selection for outcome in result.outcomes], [SILVER])
             self.assertEqual(occupancy_of(result.final_model, "C", "1", "HG"), 0.5)
 
+    def test_site_whose_fdp_falls_is_held_while_others_are_adjusted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root, mercury=True)   # Ag 0.90 and Hg 0.50
+            # Hg follows 1/q (theory at q 0.20) only once Ag is below 0.7;
+            # before that its f'' falls below q 0.35, as Hg h:1 of PdUHgPdU did.
+            refine = make_scaling_refine(root, {
+                SILVER: (0.0, 1.218),
+                MERCURY: {"S": 2.02, "peak": 0.35, "peak_while": (SILVER, 0.7)},
+            })
+            result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
+                              tolerance=0.3)
+            self.assertEqual(result.status, STATUS_CONVERGED, result.message)
+            self.assertEqual(
+                [(a.round, a.selection, a.occupancy_before, a.occupancy_after, a.method)
+                 for a in result.adjustments],
+                [(2, MERCURY, 0.5, 0.2, "proportional"),   # f'' 4.04 -> 3.30: fell
+                 (3, MERCURY, 0.2, 0.5, "restore"),        # back to the highest f''
+                 (4, SILVER, 0.9, 0.6, "proportional"),    # Hg held at 0.50
+                 (5, MERCURY, 0.5, 0.2, "proportional")],  # taken up again
+            )
+            self.assertEqual(
+                result.adjustments[1].note,
+                "f'' fell from 4.04 to 3.30 as occupancy went 0.50 -> 0.20; back to 0.50 "
+                "(highest f'' 4.04), held while the other sites are adjusted",
+            )
+            self.assertTrue(result.adjustments[3].note.startswith("taken up again after the other sites"))
+            mercury_round_4 = next(s for s in result.rounds[3].sites if s.selection == MERCURY)
+            self.assertEqual(mercury_round_4.occupancy, 0.5)
+            final = {outcome.selection: outcome for outcome in result.outcomes}
+            self.assertEqual((final[MERCURY].occupancy_final, final[MERCURY].adjustments,
+                              final[MERCURY].held), (0.2, 2, 1))
+            self.assertEqual(final[MERCURY].reason,
+                             "within +/-0.3 e- of theory after 2 adjustment(s), held back 1 time(s)")
+            report = json.loads(result.report_path.read_text())
+            self.assertEqual(report["rounds"][2]["method"], "restore")
+            self.assertEqual(report["occupancy"]["sites"][1]["held"], 1)
+            self.assertIn("held there while the other sites are adjusted", report["occupancy"]["method"])
+
+    def test_second_fall_stops_the_site_at_its_best_occupancy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root, mercury=True)
+            # Hg f'' peaks at 8.66 (q 0.35) whatever happens: theory 10.1 is out of reach.
+            refine = make_scaling_refine(root, {
+                SILVER: (0.0, 1.218), MERCURY: {"S": 3.03, "peak": 0.35},
+            })
+            result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
+                              tolerance=0.3)
+            self.assertEqual(result.status, STATUS_REVIEW)
+            self.assertEqual(
+                [(a.selection, a.occupancy_after, a.method) for a in result.adjustments],
+                [(MERCURY, 0.3, "proportional"),   # f'' 6.06 -> 7.42: rose, fine
+                 (MERCURY, 0.17, "secant"),        # 7.42 -> 4.20: fell
+                 (MERCURY, 0.3, "restore"),        # held at 0.30
+                 (SILVER, 0.6, "proportional"),
+                 (MERCURY, 0.22, "proportional"),  # taken up again: 7.42 -> 5.44, fell again
+                 (MERCURY, 0.3, "restore")],       # stopped at 0.30
+            )
+            final = {outcome.selection: outcome for outcome in result.outcomes}
+            self.assertEqual(
+                final[MERCURY].reason,
+                "f'' fell again when occupancy was lowered (0.30 -> 0.22); kept at 0.30, "
+                "where f'' was highest (7.42)",
+            )
+            self.assertEqual((final[MERCURY].occupancy_final, final[MERCURY].held), (0.3, 2))
+            self.assertTrue(final[SILVER].converged)
+            self.assertEqual(occupancy_of(result.final_model, "C", "1", "HG"), 0.3)
+            self.assertEqual(occupancy_of(result.final_model, "B", "101", "AG"), 0.6)
+            self.assertEqual(len(result.rounds), 7)
+
+    def test_fdp_rising_as_occupancy_rises_is_held_the_same_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root, mercury=True)
+            refine = make_scaling_refine(root, {
+                SILVER: (0.0, 1.8), MERCURY: {"S": 6.06, "trough": 0.52},
+            })
+            result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine)
+            self.assertEqual(result.status, STATUS_REVIEW)
+            self.assertEqual(
+                [(a.occupancy_after, a.method) for a in result.adjustments],
+                [(0.6, "proportional"), (0.5, "restore"), (0.6, "proportional"), (0.5, "restore")],
+            )
+            self.assertEqual(
+                result.outcomes[1].reason,
+                "f'' rose again when occupancy was raised (0.50 -> 0.60); kept at 0.50, "
+                "where f'' was lowest (12.12)",
+            )
+
     def test_a_failed_later_round_stops_the_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -359,6 +488,21 @@ class OccupancyCommandTests(unittest.TestCase):
             run = mtz.parent.resolve() / "AutoFDP" / "run_001"
             self.assertEqual(launched.call_args.args[0], run / "round_003" / "refined_001.pdb")
             self.assertIn(f"Model with the final occupancies: {run / 'final_model.pdb'}", out)
+
+    def test_command_prints_restore_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root, mercury=True)
+            refine = make_scaling_refine(root, {
+                SILVER: (0.0, 1.218), MERCURY: {"S": 3.03, "peak": 0.35},
+            })
+            code, out, err, _ = self._main(
+                root, [str(model), str(mtz), "--tolerance", "0.3", "--no-coot"], refine=refine
+            )
+            self.assertEqual(code, 2, err)
+            self.assertIn("round_004  C:1 HG  occupancy 0.17 -> 0.30 (restore)", out)
+            self.assertIn("back to 0.30 (highest f'' 7.42), held while the other sites are adjusted", out)
+            self.assertIn("kept at 0.30, where f'' was highest (7.42)", out)
 
     def test_review_exits_2(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -119,6 +119,17 @@ entries are reconstructed from repository history.
     `settings.max_iterations`/`occupancy_floor`; `steps.occupancy_adjustment`
     is now `done`, `review`, `failed` or `not run`. The `decide_site_update`
     stub is replaced by `propose_occupancy`.
+  - Step 3, f'' moving with occupancy: when an adjustment lowers a site's
+    occupancy and its f'' falls (or raises it and f'' rises), the site goes
+    back to its earlier occupancy with the highest (lowest) f'' in a restore
+    round and is held there while the other sites are adjusted; it is taken
+    up again when no other site can be adjusted (same per-site limit), and a
+    second such response stops it there for review. Before, the proportional
+    step kept lowering it (PdUHgPdU Hg h:1, live on Phenix 2.2.1: f'' peaked
+    near occupancy 0.3 and the site was pushed to the 0.05 floor while its
+    neighbours' f'' rose to 12-15 e-). New `wrong_response`; rounds may have
+    `method: "restore"` (its note says why); outcomes gain `held`; restores
+    are not counted as adjustments.
   - Output: a new `run_NNN` in `AutoFDP/` beside the MTZ (`--output` for
     another folder). Schema: `report.json` (`workflow: "autofdp"`, schema 2)
     with portable, checksummed references to the inputs (dataset anchor) and

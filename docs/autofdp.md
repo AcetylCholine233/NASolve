@@ -253,18 +253,33 @@ left out with `--site` are refined in every round but never adjusted.
   "f″ below theory at the occupancy floor" (for example, in the JACS paper an
   "Hg" site that stayed short of 10.17 below occupancy 0.10 turned out to be
   Ag). Both go to review.
+- **f″ moving with occupancy** (`wrong_response`). When an adjustment lowers
+  *q* and *f″ref* falls (or raises *q* and *f″ref* rises), the site goes back
+  to the earlier occupancy with the highest *f″ref* (the lowest, when *q* was
+  raised), over all its rounds, in a "restore" round. It is then held there,
+  its occupancy fixed, while the other sites are adjusted. When no other site
+  can be adjusted (all within the tolerance or stopped), it is taken up again
+  from that occupancy, with the same per-site limit (restore rounds do not
+  count). A second such response stops it at its best occupancy, again with
+  a restore round, and it goes to review: "f″ fell again when occupancy was
+  lowered (…); kept at *q*, where f″ was highest (…)". Seen live in
+  PdUHgPdU (Phenix 2.2.1, 2026-11-13): Hg h:1's f″ rose as *q* went from 1.0
+  to about 0.3 and fell below that (run_003: 6.64 at 0.34, 6.39 at 0.20, 0.95
+  at 0.05), while h:2 and h:3 rose to 12-15 e⁻ when h:1 was very low. Before
+  this rule, h:1 was pushed down to the 0.05 floor.
 
 **Each round** after an adjustment (`round_002`, `round_003`, ...) is the same
 f″-only round as round_001: the same `autofdp.params` (only
 `group_anomalous`; f′ fixed at theory and f″ refined from 0 for every site),
 the same `--cycles` and ReadySet dictionaries. Its model,
 `round_NNN/input_model.pdb`, is the previous round's model with only that
-site's occupancy changed; B stays as set in step 1.
+site's occupancy changed (adjusted or restored); B stays as set in step 1.
 
 **The end.** `AUTOFDP_CONVERGED` when every calibrated site is within the
 tolerance in the last round; `AUTOFDP_REVIEW` when one is not (at a bound, out
-of adjustments, not adjusted with `--max-iterations 0`, or moved out of the
-tolerance while another site was adjusted). The last round's model is copied to
+of adjustments, f″ moving with occupancy twice, not adjusted with
+`--max-iterations 0`, or moved out of the tolerance while another site was
+adjusted). The last round's model is copied to
 `final_model.pdb` in both cases; its occupancies are the measured ones only for
 converged sites.
 
@@ -272,8 +287,8 @@ The last round's model and map coefficients open in Coot (2mFo-DFc and mFo-DFc
 with `--auto`, and ANOM/PHANOM at 3σ when present), unless `--no-coot`. Coot's
 files go to `run_NNN/CootGUI/`. A Coot problem never fails the run; the model
 and map paths are printed instead. The command prints round_001's table, one
-line per adjustment round (site, occupancy before → after, method, f″ against
-theory), and a final table with each site's start and final occupancy and the
+line per adjustment or restore round (site, occupancy before → after,
+method, f″ against theory, and why a site was restored), and a final table with each site's start and final occupancy and the
 reason it stopped.
 
 Not implemented in this step: the mFo-DFc check that would change B instead of

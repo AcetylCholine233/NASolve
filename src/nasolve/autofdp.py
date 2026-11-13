@@ -1230,6 +1230,45 @@ def propose_occupancy(
     return OccupancyStep(proposed / 100, method, bound, "; ".join(notes))
 
 
+@dataclass(frozen=True)
+class WrongResponse:
+    """A site whose f'' moved with its occupancy in its last adjustment."""
+
+    occupancy_before: float
+    occupancy_after: float
+    f_double_prime_before: float
+    f_double_prime_after: float
+    lowered: bool                  # occupancy went down (and f'' fell)
+    best_occupancy: float          # earlier occupancy to go back to
+    best_f_double_prime: float     # its f'': highest (lowered) or lowest (raised)
+
+
+def wrong_response(history: Sequence[tuple[float | None, float | None]]) -> WrongResponse | None:
+    """Did f'' fall as occupancy fell (or rise as it rose) in the site's last round?
+
+    The anomalous signal fixes occupancy x f'', so f'' should move against
+    the occupancy. When the site's last two rounds have different occupancies
+    and f'' moved with it instead, return the earlier occupancy to go back to:
+    of every round of the site at another occupancy, the one with the highest
+    f'' when occupancy was lowered (the lowest f'' when it was raised).
+    """
+    if len(history) < 2:
+        return None
+    (before, f_before), (after, f_after) = history[-2], history[-1]
+    if None in (before, after, f_before, f_after) or abs(after - before) < 0.005:
+        return None
+    lowered = after < before
+    if (lowered and f_after >= f_before) or (not lowered and f_after <= f_before):
+        return None
+    earlier = [
+        (occupancy, refined) for occupancy, refined in history
+        if occupancy is not None and refined is not None and abs(occupancy - after) >= 0.005
+    ]
+    choose = max if lowered else min
+    best_occupancy, best_refined = choose(earlier, key=lambda point: point[1])
+    return WrongResponse(before, after, f_before, f_after, lowered, best_occupancy, best_refined)
+
+
 def _set_occupancy(line: str, value: float) -> str:
     """Replace the occupancy columns (55-60) and keep the rest of the line."""
     if not 0 <= value <= 1:
@@ -1267,7 +1306,11 @@ def write_site_occupancy(
 
 @dataclass(frozen=True)
 class OccupancyAdjustment:
-    """One step 3 change: the occupancy one site had in round ``round``."""
+    """One step 3 change: the occupancy one site had in round ``round``.
+
+    ``method`` is "proportional" or "secant" for an adjustment, "restore" when
+    the site went back to an earlier occupancy (``wrong_response``).
+    """
 
     round: int
     selection: str
@@ -1297,6 +1340,7 @@ class SiteOutcome:
     converged: bool
     reason: str
     history: tuple[tuple[int, float | None, float | None], ...]   # (round, occupancy, f'')
+    held: int = 0          # times it went back to an earlier occupancy (restores)
 
 
 @dataclass(frozen=True)
@@ -1561,11 +1605,15 @@ def _site_outcomes(
             match = next((item for item in result.sites if item.selection == site.selection), None)
             if match is not None:
                 history.append((number, match.occupancy, match.f_double_prime_refined))
-        count = sum(1 for adjustment in adjustments if adjustment.selection == site.selection)
+        count = sum(1 for adjustment in adjustments
+                    if adjustment.selection == site.selection and adjustment.method != "restore")
+        held = sum(1 for adjustment in adjustments
+                   if adjustment.selection == site.selection and adjustment.method == "restore")
         converged = bool(site.within_tolerance)
         if converged:
             reason = (f"within +/-{tolerance:g} e- of theory"
-                      + (f" after {count} adjustment(s)" if count else " without adjustment"))
+                      + (f" after {count} adjustment(s)" if count else " without adjustment")
+                      + (f", held back {held} time(s)" if held else ""))
         elif site.selection in stopped and not stopped[site.selection].startswith("within"):
             reason = stopped[site.selection]
         elif site.selection in stopped:
@@ -1587,6 +1635,7 @@ def _site_outcomes(
             converged=converged,
             reason=reason,
             history=tuple(history),
+            held=held,
         ))
     return outcomes
 
@@ -1624,6 +1673,13 @@ def execute_autofdp(
     next site, ranked again by the latest round. Every round refines every
     site's f'' from 0 with the same parameters. ``max_iterations=0`` runs
     round_001 only.
+
+    When an adjustment moves f'' with the occupancy (``wrong_response``:
+    f'' fell as occupancy fell, or rose as it rose), the site goes back to its
+    earlier occupancy with the highest (lowest) f'' in a "restore" round and
+    is held there while the other sites are adjusted. When no other site can
+    be adjusted, it is taken up again (same per-site limit). A second such
+    response stops it at that occupancy, again with a restore round.
 
     Status ``AUTOFDP_CONVERGED`` when every calibrated site is within
     ``tolerance`` in the last round (written as ``final_model.pdb``),
@@ -1758,19 +1814,84 @@ def execute_autofdp(
 
     # Step 3: one site at a time, the one furthest from theory first.
     failure = None if first.status == STATUS_ROUND_DONE else first.message
-    history: dict[str, list[tuple[float, float | None]]] = {}
+    history: dict[str, list[tuple[float | None, float | None]]] = {}
     for site in first.sites:
         history[site.selection] = [(site.occupancy, site.f_double_prime_refined)]
     stopped: dict[str, str] = {}    # selection -> why its adjustment ended
-    used: dict[str, int] = {}
+    used: dict[str, int] = {}       # adjustments per site (restores not counted)
+    held: dict[str, int] = {}       # times each site went back to an earlier occupancy
+    holding: set[str] = set()       # held back now, while the other sites are adjusted
     active: str | None = None
+
+    def change(site: FdpSiteResult, occupancy: float, method: str,
+               bound: str | None = None, note: str = "") -> None:
+        """One round with ``site`` at ``occupancy``; nothing else changes."""
+        nonlocal failure
+        number = len(rounds) + 1
+        directory = run_directory / f"round_{number:03d}"
+        directory.mkdir()
+        model = directory / "input_model.pdb"
+        write_site_occupancy(
+            inputs[-1], model, site.site, site.atom_name, site.alternate, occupancy
+        )
+        adjustment = OccupancyAdjustment(
+            round=number,
+            selection=site.selection,
+            site=site.site,
+            atom_name=site.atom_name,
+            occupancy_before=site.occupancy,
+            occupancy_after=occupancy,
+            method=method,
+            bound=bound,
+            note=note,
+        )
+        adjustments.append(adjustment)
+        try:
+            result = refine(number, model, adjustment)
+        except AutoFDPError as exc:
+            failure = str(exc)
+            return
+        if result.status != STATUS_ROUND_DONE:
+            failure = f"round_{number:03d}: {result.message}"
+            return
+        for item in result.sites:
+            history[item.selection].append((item.occupancy, item.f_double_prime_refined))
+
     while failure is None:
         latest = {site.selection: site for site in rounds[-1].sites}
+        resumed = False
         if active is not None:
             site = latest[active]
+            response = wrong_response(history[active])
             if site.within_tolerance:
                 stopped[active] = f"within +/-{tolerance:g} e- of theory"
                 active = None
+            elif response is not None:
+                # f'' moved with occupancy: back to the earlier occupancy with
+                # the best f''. The first time, hold the site there while the
+                # other sites are adjusted; the second time, stop it there.
+                held[active] = held.get(active, 0) + 1
+                fell = "fell" if response.lowered else "rose"
+                best = "highest" if response.lowered else "lowest"
+                moved = (f"{response.occupancy_before:.2f} -> {response.occupancy_after:.2f}")
+                if held[active] == 1:
+                    holding.add(active)
+                    note = (
+                        f"f'' {fell} from {response.f_double_prime_before:.2f} to "
+                        f"{response.f_double_prime_after:.2f} as occupancy went {moved}; back to "
+                        f"{response.best_occupancy:.2f} ({best} f'' "
+                        f"{response.best_f_double_prime:.2f}), held while the other sites are adjusted"
+                    )
+                else:
+                    stopped[active] = note = (
+                        f"f'' {fell} again when occupancy was "
+                        f"{'lowered' if response.lowered else 'raised'} ({moved}); kept at "
+                        f"{response.best_occupancy:.2f}, where f'' was {best} "
+                        f"({response.best_f_double_prime:.2f})"
+                    )
+                active = None
+                change(site, response.best_occupancy, "restore", note=note)
+                continue
             elif used[active] >= max_iterations:
                 stopped[active] = (
                     f"still {site.deviation:+.2f} e- from theory after "
@@ -1780,16 +1901,37 @@ def execute_autofdp(
         if active is None:
             pending = [
                 site for site in rounds[-1].sites
-                if site.calibrated and site.selection not in stopped and not site.within_tolerance
+                if site.calibrated and site.selection not in stopped
+                and site.selection not in holding and not site.within_tolerance
             ]
-            if not pending:
+            if pending:
+                if max_iterations == 0:
+                    for site in pending:
+                        stopped[site.selection] = "not adjusted (--max-iterations 0)"
+                    break
+                active = max(pending, key=lambda item: abs(item.deviation)).selection
+                used.setdefault(active, 0)
+            elif holding:
+                # Nothing else to adjust: take up a held site again.
+                active = max(
+                    (latest[selection] for selection in holding),
+                    key=lambda item: abs(item.deviation),
+                ).selection
+                holding.discard(active)
+                resumed = True
+                if latest[active].within_tolerance:
+                    stopped[active] = f"within +/-{tolerance:g} e- of theory"
+                    active = None
+                    continue
+                if used[active] >= max_iterations:
+                    stopped[active] = (
+                        f"still {latest[active].deviation:+.2f} e- from theory after "
+                        f"{max_iterations} adjustment(s) (--max-iterations)"
+                    )
+                    active = None
+                    continue
+            else:
                 break
-            if max_iterations == 0:
-                for site in pending:
-                    stopped[site.selection] = "not adjusted (--max-iterations 0)"
-                break
-            active = max(pending, key=lambda item: abs(item.deviation)).selection
-            used[active] = 0
         site = latest[active]
         if site.occupancy is None:
             failure = f"{site.site} {site.atom_name} has no readable occupancy"
@@ -1801,36 +1943,11 @@ def execute_autofdp(
             stopped[active] = step.note
             active = None
             continue
-        number = len(rounds) + 1
-        directory = run_directory / f"round_{number:03d}"
-        directory.mkdir()
-        model = directory / "input_model.pdb"
-        write_site_occupancy(
-            inputs[-1], model, site.site, site.atom_name, site.alternate, step.occupancy
-        )
-        adjustment = OccupancyAdjustment(
-            round=number,
-            selection=active,
-            site=site.site,
-            atom_name=site.atom_name,
-            occupancy_before=site.occupancy,
-            occupancy_after=step.occupancy,
-            method=step.method,
-            bound=step.bound,
-            note=step.note,
-        )
-        adjustments.append(adjustment)
+        note = step.note
+        if resumed:
+            note = "taken up again after the other sites" + (f"; {note}" if note else "")
         used[active] += 1
-        try:
-            result = refine(number, model, adjustment)
-        except AutoFDPError as exc:
-            failure = str(exc)
-            break
-        if result.status != STATUS_ROUND_DONE:
-            failure = f"round_{number:03d}: {result.message}"
-            break
-        for item in result.sites:
-            history[item.selection].append((item.occupancy, item.f_double_prime_refined))
+        change(site, step.occupancy, step.method, step.bound, note)
 
     finished = [result for result in rounds if result.status == STATUS_ROUND_DONE]
     outcomes = _site_outcomes(finished, adjustments, stopped, tolerance) if finished else []
@@ -1860,7 +1977,11 @@ def execute_autofdp(
         "method": (
             "one site at a time, furthest from theory first; proportional first step "
             "(q x f''/theory), then a secant on 1/q through the site's last two "
-            "occupancies; at most 4-fold and at least 0.01 per step"
+            "occupancies; at most 4-fold and at least 0.01 per step. When f'' moves "
+            "with occupancy (falls as it falls, or rises as it rises), the site goes "
+            "back to its earlier occupancy with the highest (lowest) f'' and is held "
+            "there while the other sites are adjusted, then taken up again; a second "
+            "such response stops it there"
         ),
         "max_iterations": max_iterations,
         "floor": occupancy_floor,
@@ -2015,4 +2136,6 @@ __all__ = [
     "surrounding_b",
     "theoretical_scattering",
     "write_site_occupancy",
+    "wrong_response",
+    "WrongResponse",
 ]
