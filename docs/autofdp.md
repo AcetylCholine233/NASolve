@@ -4,10 +4,10 @@
 `nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
 file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
 (B start) copies the model and sets each metal's B to the mean B of its
-neighbouring nucleotides. Step 2 (f″ round) runs one phenix.refine round on
-that copy with every strategy off except the anomalous scatterers, opens the
-result and its maps in Coot, and prints each refined f″ against its
-theoretical value. Occupancy adjustment and the steps after it (3-6) are
+neighbouring nucleotides. Step 2 (f″ round) runs ReadySet on that copy (no
+hydrogens) for the restraint dictionaries, then one phenix.refine round with
+every strategy off except the anomalous scatterers, opens the result and its
+maps in Coot, and prints each refined f″ against its theoretical value. Occupancy adjustment and the steps after it (3-6) are
 documented stubs in `src/nasolve/autofdp.py` that raise `NotImplementedError`;
 options that belong to them are accepted but have no effect yet, and
 `--element` is refused. The defaults marked *(to confirm)* follow my reading of
@@ -68,7 +68,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--output` | `AutoFDP` beside the MTZ | folder in which a new `run_NNN` is made |
 | `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable. Every metal site is still refined in the f″ round |
 | `--wavelength` | MTZ header | X-ray wavelength (Å), for an MTZ whose header has none; a disagreement with the header is recorded |
-| `--cif` | none | restraint dictionary for a residue phenix.refine does not know; repeatable; also given to Coot |
+| `--cif` | none | restraint dictionary to give ReadySet (and phenix.refine) for a residue; repeatable; also given to Coot. ReadySet makes dictionaries for other unknown residues, and NASolve's curated ones are added automatically |
 | `--element` | element in the model | treat a site as another element, e.g. `B:101=HG` |
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17`; repeatable. f′ stays the Henke value |
@@ -106,7 +106,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 - **Theory**: f′ and f″ of every metal element at that wavelength (cctbx Henke
   via the `phenix.python` beside `phenix.refine`), with `--theory` replacing an
   element's f″. Each theoretical f″ must be positive.
-- `--cif` files must exist.
+- `--cif` files must exist. `phenix.ready_set` must be available (step 2).
 
 `--plan` stops here and prints the labels, Free-R flags, wavelength, theory,
 sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
@@ -156,8 +156,31 @@ AutoFDP, as in the papers.
 
 ### 2. f″ round (implemented)
 
-`fdp_round`. One phenix.refine run on `start_model.pdb`, in
-`run_NNN/round_001/`:
+**ReadySet first** (`run_readyset`, in `run_NNN/ReadySet/`). With only a
+model and an MTZ, the restraint dictionaries come from `phenix.ready_set` on
+`start_model.pdb`, with PostMR's actions (`postmr.READYSET_ACTIONS`):
+`hydrogens=False`, `ligands=True`, `optimise_ligand_geometry=False`.
+
+- NASolve's curated dictionaries for curated residues in the model (C38, 5IU,
+  DU, DE, DF, S6G, 1AP) and any `--cif` files are given to ReadySet, combined
+  into `input_dictionaries.cif` (`ready_set.input.cif_file_name`). Two files
+  defining the same residue stop AutoFDP.
+- ReadySet's model must keep every atom with its coordinates, occupancy and B
+  (largest changes recorded; any change stops AutoFDP) and must add no
+  hydrogen. It is saved as `run_NNN/readyset_model.pdb`, the model
+  phenix.refine gets. "No unknown residues" without an updated model keeps the
+  start model.
+- The dictionaries for phenix.refine follow PostMR's precedence
+  (`ligand_profiles.effective_restraints`): ReadySet's generated
+  `start_model.ligands.cif`, passed on as `readyset_supplement.cif` without the
+  residues NASolve overrides, plus the curated dictionaries it does not cover.
+  A `--cif` file whose residues ReadySet regenerated is not passed twice; one
+  that ReadySet only partly regenerated stops AutoFDP (split the file).
+- A ReadySet failure is recorded (`steps.readyset = failed`) and AutoFDP
+  stops before phenix.refine.
+
+**Then the round** (`fdp_round`): one phenix.refine run on
+`readyset_model.pdb`, in `run_NNN/round_001/`:
 
 - strategy `group_anomalous` only. Coordinates, real-space coordinates, B and
   occupancy are not refined, for any atom, and the X-ray/geometry and ADP
@@ -166,15 +189,13 @@ AutoFDP, as in the papers.
   left out of step 1 with `--site`), each with f′ fixed at its theoretical
   value for the wavelength and f″ refined from 0;
 - `--cycles` macrocycles (default 3), the MTZ's anomalous observations and
-  Free-R flags, no experimental phases, and any `--cif` dictionaries.
+  Free-R flags, no experimental phases, and the ReadySet dictionaries.
 
 The parameters (`autofdp.params`) and the command come from AutoRefine's
 writers, so labels, Free-R handling and the Phenix 2.x data-manager format are
 the same as in AutoRefine. phenix.refine checks them with `--dry_run` first.
 Geometry restraints are not needed for an f″-only round, so no NARestraints or
-secondary-structure file is passed; phenix.refine still needs a dictionary for
-every residue it does not know, which `--cif` supplies (for example the PostMR
-`ReadySet/prepared_model.ligands.cif`).
+secondary-structure file is passed.
 
 After the round, for each group:
 
@@ -263,6 +284,11 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
 
 - `source_model.pdb` (unchanged copy of the given model) and
   `start_model.pdb` (metal B set), from step 1;
+- `ReadySet/`: `ready_set.log`, the dictionaries given to ReadySet
+  (`input_dictionaries.cif` and the copies it was made from), ReadySet's
+  `start_model.updated.pdb` and `start_model.ligands.cif`, and
+  `readyset_supplement.cif`; and `readyset_model.pdb`, the model phenix.refine
+  gets;
 - `round_001/`: `autofdp.params`, `command.json`, `phenix.refine.preflight.log`,
   `phenix.refine.log`, and phenix.refine's outputs (`refined_001.pdb`,
   `refined_001_map_coeffs.mtz`, ...);
@@ -277,6 +303,9 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
     used and its source, Henke f″);
   - `b_start`: the two model files and, per site, occupancy, B before and
     after, and the neighbours used;
+  - `readyset`: the command, mode, log, model, generated and input
+    dictionaries, curated residues, the dictionaries passed to phenix.refine,
+    and the model comparison;
   - `rounds`: per round, the folder, strategy, starting groups, cycles, R-work
     and R-free, the held-parameter check, the refined model and map
     coefficients, and per site the occupancy, B, fixed f′, refined f″, theory,

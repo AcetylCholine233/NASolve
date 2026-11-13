@@ -79,7 +79,13 @@ entries are reconstructed from repository history.
     base contacts within 3.6 A; otherwise nucleotides within 6 A), to
     `start_model.pdb`. Only the B columns change. `--site`, `--b-start
     model|VALUE`.
-  - Step 2 (f'' round): one phenix.refine round on `start_model.pdb` with
+  - Step 2 (f'' round): first `phenix.ready_set` on `start_model.pdb` with
+    PostMR's actions (no hydrogens, dictionaries for unknown residues, no
+    geometry optimisation), given NASolve's curated dictionaries for curated
+    residues in the model and any `--cif` files; its model must keep every
+    atom, coordinate, occupancy and B and becomes `readyset_model.pdb`, and its
+    dictionaries (PostMR's precedence, `effective_restraints`) go to
+    phenix.refine. Then one phenix.refine round on `readyset_model.pdb` with
     every strategy off except `group_anomalous` (no coordinate, real-space, B
     or occupancy refinement; one group per metal site, f' fixed at its cctbx
     Henke value for the wavelength, f'' refined from 0; `--cycles`, default
@@ -88,7 +94,8 @@ entries are reconstructed from repository history.
     `--tolerance`, default 1 e-), checks that coordinates, occupancy and B did
     not move, and opens the round's model and maps in Coot (`--no-coot`,
     `--coot`). `--theory ELEMENT=FDP` replaces an element's theoretical f''.
-    `--cif` passes dictionaries for residues phenix.refine does not know.
+    `--cif` adds dictionaries for ReadySet and phenix.refine. Schema:
+    `report.json` gains `readyset` and `steps.readyset`.
   - Output: a new `run_NNN` in `AutoFDP/` beside the MTZ (`--output` for
     another folder). Schema: `report.json` (`workflow: "autofdp"`, schema 2)
     with portable, checksummed references to the inputs (dataset anchor) and

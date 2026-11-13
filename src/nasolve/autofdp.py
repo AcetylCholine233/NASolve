@@ -14,9 +14,12 @@ Implemented:
 
 - Step 1 (``prepare_start_model``): copy the model and set each metal's B to
   the mean B of the nucleotides around it (NARestraints metal-pair search).
-- Step 2 (``fdp_round``): one phenix.refine round on that copy with every
-  strategy off except ``group_anomalous`` (f' fixed at theory, f'' refined
-  from 0), then each refined f'' compared with its theoretical value.
+- Step 2: ``run_readyset`` (phenix.ready_set on that copy, no hydrogens, for
+  the restraint dictionaries of non-standard residues; curated NASolve
+  dictionaries and ``--cif`` files are given to it), then ``fdp_round``: one
+  phenix.refine round on ReadySet's model with every strategy off except
+  ``group_anomalous`` (f' fixed at theory, f'' refined from 0), and each
+  refined f'' compared with its theoretical value.
 
 ``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 and 2.
 Everything after that (occupancy adjustment, identity check, B confirmation,
@@ -675,6 +678,174 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
 
 
 @dataclass(frozen=True)
+class ReadySetResult:
+    """AutoFDP's ReadySet step: restraint dictionaries for the f'' round."""
+
+    model: Path                       # the model phenix.refine gets (B from step 1 kept)
+    dictionaries: tuple[Path, ...]    # restraint CIFs for phenix.refine (and Coot)
+    generated: Path | None            # ReadySet's <model>.ligands.cif
+    input_dictionaries: Path | None   # curated + --cif dictionaries given to ReadySet
+    curated_codes: tuple[str, ...]    # NASolve-curated residues found in the model
+    log: Path
+    command: tuple[str, ...]
+    mode: str                         # "updated model" or "no unknown residues"
+    changes: Mapping[str, object]     # start model -> ReadySet model (must be none)
+
+
+def _component_codes(path: Path) -> set[str]:
+    """Residue codes a restraint CIF defines atoms for."""
+    from .ligand_profiles import _blocks, _component_ids
+
+    codes: set[str] = set()
+    for block in _blocks(path):
+        codes |= _component_ids(block)
+    return codes
+
+
+def _hydrogen_count(path: Path) -> int:
+    count = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith(("ATOM  ", "HETATM")):
+            element = line[76:78].strip().upper() if len(line) > 76 else ""
+            name = line[12:16].strip().upper()
+            if element in {"H", "D"} or (not element and name[:1] in {"H", "D"}
+                                          and line[17:20].strip() != "HG"):
+                count += 1
+    return count
+
+
+def run_readyset(
+    start_model: Path,
+    directory: Path,
+    ready_set_executable: Path,
+    *,
+    extra_dictionaries: Sequence[Path] = (),
+    environment: Mapping[str, str] | None = None,
+) -> ReadySetResult:
+    """Run phenix.ready_set on the step-1 model for the f'' round's restraints.
+
+    The actions are PostMR's (``postmr.READYSET_ACTIONS``): dictionaries for
+    unknown residues only, no hydrogens, no geometry optimisation. NASolve's
+    curated dictionaries for curated residues in the model (C38, 5IU, DU, ...)
+    and any ``--cif`` files are given to ReadySet, combined into
+    ``input_dictionaries.cif``. ReadySet's model must keep every atom with its
+    coordinates, occupancy and B (it becomes ``readyset_model.pdb`` beside
+    ``directory``), and must add no hydrogen. The restraints for phenix.refine
+    follow PostMR's precedence (``ligand_profiles.effective_restraints``):
+    ReadySet's generated dictionary, with the curated ones where NASolve
+    overrides it; a ``--cif`` file whose residues ReadySet regenerated is not
+    passed twice.
+    """
+    from .curated_ligands import CURATED_LIGANDS, ligand_dictionary, validate_ligand_dictionary
+    from .ligand_profiles import (
+        combine_dictionary_inputs,
+        effective_restraints,
+        normalize_ccp4_torsion_alternates,
+    )
+    from .phosphate import PhosphateError
+    from .postmr import READYSET_ACTIONS
+
+    directory.mkdir(parents=True)
+    residues = {
+        line[17:20].strip()
+        for line in start_model.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.startswith(("ATOM  ", "HETATM"))
+    }
+    curated_codes = tuple(sorted(residues & set(CURATED_LIGANDS)))
+    curated_copies: list[Path] = []
+    for code in curated_codes:
+        try:
+            source = ligand_dictionary(code).resolve()
+            validate_ligand_dictionary(code, source)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise AutoFDPError(f"Curated dictionary for {code}: {exc}") from exc
+        destination = directory / source.name
+        if code == "1AP":
+            normalize_ccp4_torsion_alternates(source, destination)
+        else:
+            shutil.copyfile(source, destination)
+        curated_copies.append(destination)
+    user_copies: list[Path] = []
+    for path in extra_dictionaries:
+        destination = directory / f"user_{path.name}"
+        if destination.exists():
+            raise AutoFDPError(f"Two --cif files are named {path.name}")
+        shutil.copyfile(path, destination)
+        user_copies.append(destination)
+    combined: Path | None = None
+    if curated_copies or user_copies:
+        combined = directory / "input_dictionaries.cif"
+        try:
+            combine_dictionary_inputs([*curated_copies, *user_copies], combined)
+        except PhosphateError as exc:
+            raise AutoFDPError(f"The restraint dictionaries cannot be combined: {exc}") from exc
+    command = [str(ready_set_executable), str(start_model), *READYSET_ACTIONS]
+    if combined is not None:
+        command.append(f"ready_set.input.cif_file_name={combined}")
+    log = directory / "ready_set.log"
+    try:
+        completed = subprocess.run(
+            command, cwd=directory,
+            env=dict(environment) if environment is not None else None,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+    except OSError as exc:
+        raise AutoFDPError(f"Could not launch ReadySet: {exc}") from exc
+    log.write_text(completed.stdout or "", encoding="utf-8")
+    if completed.returncode:
+        raise AutoFDPError(f"ReadySet failed with status {completed.returncode}; see {log}")
+    updated = directory / f"{start_model.stem}.updated.pdb"
+    generated = directory / f"{start_model.stem}.ligands.cif"
+    if updated.is_file():
+        source, mode = updated, "updated model"
+    elif re.search(r"\bNo unknown residues\b", completed.stdout or "", re.I):
+        source, mode = start_model, "no unknown residues"
+    else:
+        raise AutoFDPError(f"ReadySet wrote no updated model; see {log}")
+    hydrogens = _hydrogen_count(source)
+    if hydrogens:
+        raise AutoFDPError(f"ReadySet added {hydrogens} hydrogen atom(s) despite hydrogens=False")
+    changes = held_parameter_changes(start_model, source)
+    if (
+        changes["atoms_only_in_start"] or changes["atoms_only_in_refined"]
+        or changes["max_coordinate_shift"] > 0.001
+        or changes["max_occupancy_change"] > 0.001
+        or changes["max_b_change"] > 0.01
+    ):
+        raise AutoFDPError(
+            "ReadySet changed the model (atoms added, removed or renamed, or coordinates, "
+            f"occupancy or B moved): {dict(changes)}; see {log}"
+        )
+    model = directory.parent / "readyset_model.pdb"
+    shutil.copyfile(source, model)
+    generated_path = generated if generated.is_file() else None
+    dictionaries, _ = effective_restraints(curated_copies, generated_path, directory)
+    regenerated = _component_codes(generated_path) if generated_path else set()
+    for path in user_copies:
+        codes = _component_codes(path)
+        if codes and codes <= regenerated:
+            continue   # ReadySet's dictionary already carries these residues
+        if codes & regenerated:
+            raise AutoFDPError(
+                f"{path.name[5:]} defines {', '.join(sorted(codes))}, but ReadySet regenerated "
+                f"only {', '.join(sorted(codes & regenerated))}; give those residues in "
+                "separate --cif files"
+            )
+        dictionaries.append(path)
+    return ReadySetResult(
+        model=model,
+        dictionaries=tuple(dictionaries),
+        generated=generated_path,
+        input_dictionaries=combined,
+        curated_codes=curated_codes,
+        log=log,
+        command=tuple(command),
+        mode=mode,
+        changes=changes,
+    )
+
+
+@dataclass(frozen=True)
 class FdpSiteResult:
     """One anomalous group after an f''-only round."""
 
@@ -959,6 +1130,7 @@ class AutoFDPResult:
     run_directory: Path
     b_start: BStart
     round: FdpRoundResult
+    readyset: ReadySetResult
     report_path: Path
     log_path: Path
     status: str
@@ -1046,7 +1218,12 @@ def _file_record(path: Path, run_directory: Path) -> dict[str, object]:
     }
 
 
-def _log_lines(plan: AutoFDPPlan, b_start: BStart, round_result: FdpRoundResult | None) -> list[str]:
+def _log_lines(
+    plan: AutoFDPPlan,
+    b_start: BStart,
+    round_result: FdpRoundResult | None,
+    readyset: "ReadySetResult | None" = None,
+) -> list[str]:
     reflections = plan.reflections
     lines = [
         f"AutoFDP, {_now()}",
@@ -1071,6 +1248,15 @@ def _log_lines(plan: AutoFDPPlan, b_start: BStart, round_result: FdpRoundResult 
                     f"over {item.atoms} atoms; closest {item.contact}"
                 )
     lines.extend(f"Warning: {warning}" for warning in b_start.warnings)
+    if readyset is not None:
+        lines.extend([
+            "",
+            f"ReadySet (no hydrogens): {readyset.mode}; model unchanged "
+            f"({readyset.changes.get('atoms_compared')} atoms compared)",
+            "Curated dictionaries: " + (", ".join(readyset.curated_codes) or "none"),
+            "Refinement dictionaries: "
+            + (", ".join(path.name for path in readyset.dictionaries) or "none"),
+        ])
     if round_result is not None:
         lines.extend(["", f"Step 2 (f''-only round): {round_result.status}: {round_result.message}",
                       f"R-work {round_result.r_work}, R-free {round_result.r_free}"])
@@ -1089,6 +1275,7 @@ def _log_lines(plan: AutoFDPPlan, b_start: BStart, round_result: FdpRoundResult 
 def execute_autofdp(
     plan: AutoFDPPlan,
     refine_executable: Path,
+    ready_set_executable: Path,
     *,
     phenix_version: str,
     b_start: str | float = "surrounding",
@@ -1100,8 +1287,10 @@ def execute_autofdp(
 ) -> AutoFDPResult:
     """Run steps 1 and 2 in a new ``run_NNN`` folder of ``plan.output_root``.
 
-    Step 1 writes ``source_model.pdb`` and ``start_model.pdb``; step 2 runs the
-    f''-only round in ``round_001``. ``report.json`` (workflow ``autofdp``,
+    Step 1 writes ``source_model.pdb`` and ``start_model.pdb``. Step 2 runs
+    ReadySet on the start model (``ReadySet/``, no hydrogens) for the restraint
+    dictionaries, then the f''-only round on ReadySet's model in
+    ``round_001``. ``report.json`` (workflow ``autofdp``,
     schema 2) and ``autofdp.log`` record the inputs (paths and checksums),
     what was read from the MTZ, the theory, the B changes and the round.
     Nothing outside the new folder is written. The later steps (occupancy
@@ -1148,9 +1337,34 @@ def execute_autofdp(
     report_path = run_directory / "report.json"
     _write_json(report_path, report)
     log_path = run_directory / "autofdp.log"
+    readyset: ReadySetResult | None = None
     try:
+        readyset = run_readyset(
+            written.start_model, run_directory / "ReadySet", ready_set_executable,
+            extra_dictionaries=plan.restraints, environment=environment,
+        )
+        report["readyset"] = {
+            "command": list(readyset.command),
+            "mode": readyset.mode,
+            "log": _file_record(readyset.log, run_directory),
+            "model": _file_record(readyset.model, run_directory),
+            "generated_dictionary": (
+                _file_record(readyset.generated, run_directory) if readyset.generated else None
+            ),
+            "input_dictionaries": (
+                _file_record(readyset.input_dictionaries, run_directory)
+                if readyset.input_dictionaries else None
+            ),
+            "curated_residues": list(readyset.curated_codes),
+            "refinement_dictionaries": [
+                _file_record(path, run_directory) for path in readyset.dictionaries
+            ],
+            "model_changes": dict(readyset.changes),
+        }
+        report["steps"]["readyset"] = "done"
+        _write_json(report_path, report)
         round_result = fdp_round(
-            written.start_model,
+            readyset.model,
             reflections,
             refine_executable,
             run_directory / "round_001",
@@ -1159,16 +1373,18 @@ def execute_autofdp(
             calibrated=plan.calibrated,
             cycles=cycles,
             tolerance=tolerance,
-            restraints=plan.restraints,
+            restraints=readyset.dictionaries,
             environment=environment,
             processor_count=processor_count,
         )
     except AutoFDPError as exc:
         report.update(status=STATUS_FAILED, message=str(exc))
+        if readyset is None:
+            report["steps"]["readyset"] = "failed"
         report["steps"]["fdp_rounds"] = "failed before phenix.refine ran"
         _write_json(report_path, report)
-        log_path.write_text("\n".join(_log_lines(plan, written, None)
-                                      + ["", f"Step 2 failed: {exc}"]) + "\n", encoding="utf-8")
+        log_path.write_text("\n".join(_log_lines(plan, written, None, readyset)
+                                      + ["", f"Failed: {exc}"]) + "\n", encoding="utf-8")
         raise
     entry = {
         "round": 1,
@@ -1201,12 +1417,15 @@ def execute_autofdp(
     report.update(status=round_result.status, message=round_result.message)
     report["steps"]["fdp_rounds"] = "1 run"
     _write_json(report_path, report)
-    log_path.write_text("\n".join(_log_lines(plan, written, round_result)) + "\n", encoding="utf-8")
+    log_path.write_text(
+        "\n".join(_log_lines(plan, written, round_result, readyset)) + "\n", encoding="utf-8"
+    )
     return AutoFDPResult(
         plan=plan,
         run_directory=run_directory,
         b_start=written,
         round=round_result,
+        readyset=readyset,
         report_path=report_path,
         log_path=log_path,
         status=round_result.status,
@@ -1308,6 +1527,7 @@ __all__ = [
     "Neighbour",
     "NeighbourB",
     "NOT_IMPLEMENTED_MESSAGE",
+    "ReadySetResult",
     "ReflectionInputs",
     "SiteState",
     "STATUS_CONVERGED",
@@ -1330,6 +1550,7 @@ __all__ = [
     "plan_autofdp",
     "prepare_start_model",
     "read_reflections",
+    "run_readyset",
     "surrounding_b",
     "theoretical_scattering",
 ]

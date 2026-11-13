@@ -279,7 +279,8 @@ def build_parser() -> argparse.ArgumentParser:
             "an MTZ with anomalous data and Free-R flags; labels, flags and "
             "wavelength are read from the MTZ, the metal sites from the model. Only "
             "steps 1 and 2 are implemented: copy the model and set each metal's B to "
-            "the mean B of its neighbouring nucleotides (step 1), then run one "
+            "the mean B of its neighbouring nucleotides (step 1), then run ReadySet "
+            "(no hydrogens) for the restraint dictionaries and one "
             "phenix.refine round with every strategy off except the anomalous "
             "scatterers (f' fixed at theory, f'' refined from 0), open the result "
             "and its maps in Coot, and print each refined f'' against theory "
@@ -311,7 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--cif", action="append", default=[], type=Path, metavar="FILE",
-        help="restraint dictionary for a residue phenix.refine does not know; repeatable",
+        help="restraint dictionary to give ReadySet and phenix.refine for a residue; "
+             "repeatable (ReadySet makes the others; curated NASolve residues are automatic)",
     )
     autofdp.add_argument(
         "--element", action="append", default=[], metavar="SITE=ELEMENT",
@@ -1678,6 +1680,15 @@ def _print_fdp_round(result) -> None:
     """Print AutoFDP step 2: refined f'' of every site against theory."""
     round_result = result.round
     status_color = "32" if result.status == "AUTOFDP_FDP_ROUND_DONE" else "31"
+    readyset = result.readyset
+    print(f"\nReadySet (no hydrogens): {readyset.mode}; atoms, coordinates and B unchanged")
+    if readyset.curated_codes:
+        print("  curated dictionaries given: " + ", ".join(readyset.curated_codes))
+    print(
+        "  restraints for phenix.refine: "
+        + (", ".join(_relative_to(path, result.run_directory) for path in readyset.dictionaries)
+           or "none needed")
+    )
     print(
         f"\nAutoFDP step 2: f''-only round ({_relative_to(round_result.directory, result.run_directory)}, "
         f"{round_result.cycles} cycles; only the anomalous scatterers refined, f' fixed at "
@@ -1741,7 +1752,7 @@ def _open_fdp_view(args: argparse.Namespace, result) -> None:
             coot.executable,
             working_directory=result.run_directory / "CootGUI",
             source=f"AutoFDP f''-only round ({result.run_directory.name})",
-            dictionaries=result.plan.restraints,
+            dictionaries=result.readyset.dictionaries,
         )
     except (ConfigError, CootDiscoveryError, CootViewError) as exc:
         print(f"Coot view error: {exc}", file=sys.stderr)
@@ -1784,8 +1795,11 @@ def _autofdp(args: argparse.Namespace) -> int:
             save_config(config)
         refine = phenix.executables.get("phenix.refine")
         mtz_dump = phenix.executables.get("phenix.mtz.dump")
-        if refine is None or mtz_dump is None:
-            raise AutoFDPError("AutoFDP requires phenix.refine and phenix.mtz.dump")
+        ready_set = phenix.executables.get("phenix.ready_set")
+        if refine is None or mtz_dump is None or ready_set is None:
+            raise AutoFDPError(
+                "AutoFDP requires phenix.refine, phenix.mtz.dump and phenix.ready_set"
+            )
         plan = plan_autofdp(
             model, mtz, refine, mtz_dump,
             sites=tuple(args.site), b_start=b_start, theory_overrides=theory,
@@ -1795,15 +1809,16 @@ def _autofdp(args: argparse.Namespace) -> int:
         _print_autofdp_plan(plan)
         if args.plan:
             print(
-                f"\nThen: one f''-only phenix.refine round of {args.cycles} cycles (every "
-                "strategy off except the anomalous scatterers; f' fixed at theory, "
+                "\nThen: ReadySet on the start model (no hydrogens) for the restraint "
+                f"dictionaries, and one f''-only phenix.refine round of {args.cycles} cycles "
+                "(every strategy off except the anomalous scatterers; f' fixed at theory, "
                 f"f'' from 0), in a new run folder of {plan.output_root}"
             )
             print("Plan only: no refinement was run and nothing was written.")
             return 0
         print(f"\nAutoFDP f'' round started ({args.cycles} cycles)")
         result = execute_autofdp(
-            plan, refine,
+            plan, refine, ready_set,
             phenix_version=phenix.version, b_start=b_start, sites=tuple(args.site),
             cycles=args.cycles, tolerance=args.tolerance, environment=phenix.environment,
         )

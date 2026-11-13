@@ -1324,6 +1324,15 @@ def _atom_counts(path: Path) -> tuple[int, int, int]:
     return atoms, heteroatoms, hydrogens
 
 
+#: ReadySet actions used by PostMR and AutoFDP: restraint dictionaries for
+#: unknown residues only; no hydrogens and no geometry changes.
+READYSET_ACTIONS = (
+    "ready_set.actions.hydrogens=False",
+    "ready_set.actions.ligands=True",
+    "ready_set.actions.optimise_ligand_geometry=False",
+)
+
+
 def _run_readyset(
     model: Path,
     ready_set_executable: Path,
@@ -1335,13 +1344,7 @@ def _run_readyset(
     allow_op3_sites: tuple[str, ...] = (),
     passthrough_sites: tuple[str, ...] = (),
 ) -> tuple[Path, Path, Path | None, list[str], dict[str, object]]:
-    command = [
-        str(ready_set_executable),
-        str(model),
-        "ready_set.actions.hydrogens=False",
-        "ready_set.actions.ligands=True",
-        "ready_set.actions.optimise_ligand_geometry=False",
-    ]
+    command = [str(ready_set_executable), str(model), *READYSET_ACTIONS]
     if ligand_cif is not None:
         command.append(f"ready_set.input.cif_file_name={ligand_cif}")
     log = readyset_directory / "ready_set.log"
@@ -2048,6 +2051,7 @@ __all__ = [
     "PostMRPreparationError",
     "PostMRResult",
     "ModelMutationPlan",
+    "READYSET_ACTIONS",
     "apply_model_mutations",
     "build_mutation_plan",
     "plan_model_mutations",

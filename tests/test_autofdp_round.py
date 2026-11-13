@@ -113,6 +113,46 @@ def make_fdp_refine(root: Path, fdp: dict[str, float] | None = None, *,
     return executable
 
 
+def make_ready_set(root: Path, *, mode: str = "copy", generated: tuple[str, ...] = ()) -> Path:
+    """Stand-in phenix.ready_set. ``copy`` writes <stem>.updated.pdb unchanged
+    (and <stem>.ligands.cif for the ``generated`` residue codes); ``noop`` says
+    "No unknown residues" and writes nothing; ``fail``, ``change_b`` and
+    ``add_h`` misbehave."""
+    executable = root / "phenix.ready_set"
+    cif = ""
+    if generated:
+        cif = "data_comp_list\nloop_\n_chem_comp.id\n_chem_comp.group\n" + "".join(
+            f"{code} non-polymer\n" for code in generated
+        ) + "".join(
+            f"\ndata_comp_{code}\nloop_\n_chem_comp_atom.comp_id\n_chem_comp_atom.atom_id\n"
+            f"_chem_comp_atom.type_symbol\n{code} C1 C\n{code} C2 C\n"
+            for code in generated
+        )
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path('readyset_args.json').write_text(json.dumps(sys.argv[1:]))\n"
+        f"mode = {mode!r}\n"
+        "model = Path(sys.argv[1])\n"
+        "if mode == 'fail':\n"
+        "    print('Sorry: cannot process'); raise SystemExit(1)\n"
+        "if mode == 'noop':\n"
+        "    print('No unknown residues found'); raise SystemExit(0)\n"
+        "lines = model.read_text().splitlines(keepends=True)\n"
+        "if mode == 'change_b':\n"
+        "    lines[0] = lines[0][:60] + '%6.2f' % (float(lines[0][60:66]) + 9) + lines[0][66:]\n"
+        "if mode == 'add_h':\n"
+        "    lines.insert(0, lines[0][:12] + ' H1 ' + lines[0][16:76] + ' H\\n')\n"
+        "Path(model.stem + '.updated.pdb').write_text(''.join(lines))\n"
+        f"cif = {cif!r}\n"
+        "if cif:\n"
+        "    Path(model.stem + '.ligands.cif').write_text(cif)\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    return executable
+
+
 def custom_mtz_dump(root: Path, text: str) -> Path:
     executable = root / "custom.mtz.dump"
     executable.write_text("#!/bin/sh\ncat <<'EOF'\n" + text + "EOF\n")
@@ -131,6 +171,7 @@ def _plan(root, model, mtz, **keywords):
 def _execute(plan, root, **keywords):
     return execute_autofdp(
         plan, keywords.pop("refine", None) or make_fdp_refine(root),
+        keywords.pop("ready_set", None) or make_ready_set(root),
         phenix_version=PHENIX_21, environment=ENV, processor_count=1, **keywords,
     )
 
@@ -218,7 +259,20 @@ class FdpRoundTests(unittest.TestCase):
             self.assertIn("optimize_adp_weight = False", params)
             self.assertIn("number_of_macro_cycles = 3", params)
             received = json.loads((run / "round_001" / "received_args.json").read_text())
-            self.assertIn(str(run / "start_model.pdb"), received)
+            self.assertIn(str(run / "readyset_model.pdb"), received)
+            # ReadySet ran on the step-1 model without hydrogens; the fixture's
+            # DU is a curated residue, so NASolve's DU dictionary went with it.
+            readyset_args = json.loads((run / "ReadySet" / "readyset_args.json").read_text())
+            self.assertEqual(readyset_args[0], str(run / "start_model.pdb"))
+            for flag in ("ready_set.actions.hydrogens=False", "ready_set.actions.ligands=True",
+                         "ready_set.actions.optimise_ligand_geometry=False",
+                         f"ready_set.input.cif_file_name={run / 'ReadySet' / 'input_dictionaries.cif'}"):
+                self.assertIn(flag, readyset_args)
+            self.assertEqual(result.readyset.curated_codes, ("DU",))
+            self.assertEqual(result.readyset.dictionaries, (run / "ReadySet" / "DU.cif",))
+            self.assertIn(str(run / "ReadySet" / "DU.cif"), received)
+            self.assertEqual((run / "readyset_model.pdb").read_bytes(),
+                             (run / "start_model.pdb").read_bytes())
             self.assertIn(str(mtz.resolve()), received)
             self.assertIn("xray_data.r_free_flags.generate=False", received)
 
@@ -263,8 +317,18 @@ class FdpRoundTests(unittest.TestCase):
             self.assertEqual(entry["sites"][0]["deviation"], 0.57)
             self.assertEqual(entry["held_parameter_changes"]["max_b_change"], 0.0)
             self.assertEqual(entry["refined_model"]["relative_path"], "round_001/refined_001.pdb")
+            self.assertEqual(report["steps"]["readyset"], "done")
+            self.assertEqual(report["readyset"]["mode"], "updated model")
+            self.assertEqual(report["readyset"]["curated_residues"], ["DU"])
+            self.assertEqual(report["readyset"]["model"]["relative_path"], "readyset_model.pdb")
+            self.assertEqual(
+                [item["relative_path"] for item in report["readyset"]["refinement_dictionaries"]],
+                ["ReadySet/DU.cif"],
+            )
+            self.assertEqual(report["readyset"]["model_changes"]["max_b_change"], 0.0)
             log = result.log_path.read_text()
-            for text in ("Step 1 (B start)", "B 379.99 -> 50.00", "Step 2", "deviation +0.57"):
+            for text in ("Step 1 (B start)", "B 379.99 -> 50.00", "ReadySet (no hydrogens)",
+                         "Step 2", "deviation +0.57"):
                 self.assertIn(text, log)
 
             again = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, {SILVER: 5.0}))
@@ -344,9 +408,74 @@ class FdpRoundTests(unittest.TestCase):
             changed = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, change_b=True))
             self.assertIn("Held parameters changed", changed.round.warnings[0])
             self.assertEqual(
-                held_parameter_changes(changed.b_start.start_model, changed.round.model_path)["max_b_change"],
+                held_parameter_changes(changed.readyset.model, changed.round.model_path)["max_b_change"],
                 5.0,
             )
+
+
+class ReadySetStepTests(unittest.TestCase):
+    """ReadySet (no hydrogens) makes the restraint dictionaries for the f''
+    round from the model alone; it must not change the model."""
+
+    def test_generated_and_user_dictionaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root)
+            # A --cif for a residue ReadySet regenerates, and one it does not.
+            regenerated = root / "pdu.cif"
+            regenerated.write_text(
+                "data_comp_PDU\nloop_\n_chem_comp_atom.comp_id\n_chem_comp_atom.atom_id\n"
+                "_chem_comp_atom.type_symbol\nPDU C1 C\n"
+            )
+            extra = root / "xyz.cif"
+            extra.write_text(
+                "data_comp_XYZ\nloop_\n_chem_comp_atom.comp_id\n_chem_comp_atom.atom_id\n"
+                "_chem_comp_atom.type_symbol\nXYZ C1 C\n"
+            )
+            plan = _plan(root, model, mtz, restraints=[regenerated, extra])
+            result = _execute(plan, root, ready_set=make_ready_set(root, generated=("PDU",)))
+            run = result.run_directory
+            names = [path.name for path in result.readyset.dictionaries]
+            # ReadySet's start_model.ligands.cif goes on as readyset_supplement.cif
+            # (PostMR's precedence: curated overrides filtered out).
+            self.assertEqual(names, ["readyset_supplement.cif", "DU.cif", "user_xyz.cif"])
+            self.assertEqual(result.readyset.generated,
+                             run / "ReadySet" / "start_model.ligands.cif")
+            received = json.loads((run / "round_001" / "received_args.json").read_text())
+            self.assertIn(str(run / "ReadySet" / "readyset_supplement.cif"), received)
+            self.assertNotIn(str(run / "ReadySet" / "user_pdu.cif"), received)  # not twice
+            from nasolve.autofdp import _component_codes
+
+            self.assertEqual(_component_codes(run / "ReadySet" / "input_dictionaries.cif"),
+                             {"DU", "PDU", "XYZ"})
+
+    def test_no_unknown_residues_keeps_the_start_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root)
+            result = _execute(_plan(root, model, mtz), root, ready_set=make_ready_set(root, mode="noop"))
+            self.assertEqual(result.status, STATUS_ROUND_DONE)
+            self.assertEqual(result.readyset.mode, "no unknown residues")
+            self.assertIsNone(result.readyset.generated)
+            self.assertEqual((result.run_directory / "readyset_model.pdb").read_bytes(),
+                             result.b_start.start_model.read_bytes())
+
+    def test_readyset_problems_stop_before_refinement(self):
+        cases = (("fail", "ReadySet failed with status 1"),
+                 ("change_b", "ReadySet changed the model"),
+                 ("add_h", "ReadySet added 1 hydrogen"))
+        for mode, message in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model, mtz = make_inputs(root)
+                with self.assertRaisesRegex(AutoFDPError, message):
+                    _execute(_plan(root, model, mtz), root, ready_set=make_ready_set(root, mode=mode))
+                run = mtz.parent.resolve() / "AutoFDP" / "run_001"
+                report = json.loads((run / "report.json").read_text())
+                self.assertEqual((report["status"], report["steps"]["readyset"]),
+                                 (STATUS_FAILED, "failed"))
+                self.assertFalse((run / "round_001").exists())
+                self.assertIn("Failed:", (run / "autofdp.log").read_text())
 
 
 class AutoFDPCommandTests(unittest.TestCase):
@@ -354,6 +483,7 @@ class AutoFDPCommandTests(unittest.TestCase):
         installation = PhenixInstallation(
             root=None, setup_script=None, version=PHENIX_21,
             executables={"phenix.refine": make_fdp_refine(root),
+                         "phenix.ready_set": make_ready_set(root),
                          "phenix.mtz.dump": dump or make_mtz_dump(root, wavelength=1.00743)},
             environment=ENV, source="test",
         )
@@ -390,6 +520,9 @@ class AutoFDPCommandTests(unittest.TestCase):
                 "Theory: AG cctbx-henke",
                 "AUTOFDP_FDP_ROUND_DONE",
                 "Opened Coot (PID 4321) with refined_001.pdb and refined_001_map_coeffs.mtz",
+                "ReadySet (no hydrogens): updated model; atoms, coordinates and B unchanged",
+                "curated dictionaries given: DU",
+                "restraints for phenix.refine: ReadySet/DU.cif",
                 "Occupancy adjustment and the later AutoFDP steps are not implemented yet",
             ):
                 self.assertIn(text, out)
@@ -401,6 +534,7 @@ class AutoFDPCommandTests(unittest.TestCase):
             self.assertEqual(args[0], run / "round_001" / "refined_001.pdb")
             self.assertEqual(args[1], run / "round_001" / "refined_001_map_coeffs.mtz")
             self.assertEqual(kwargs["working_directory"], run / "CootGUI")
+            self.assertEqual(kwargs["dictionaries"], (run / "ReadySet" / "DU.cif",))
 
             # Either order, without Coot, with a theory override: a new run folder.
             code, out, err, launched = self._main(
@@ -430,7 +564,9 @@ class AutoFDPCommandTests(unittest.TestCase):
             code, out, err, launched = self._main(root, [str(model), str(mtz), "--plan"])
             self.assertEqual(code, 0, err)
             self.assertIn("B 379.99 -> 50.00", out)
-            self.assertIn("Then: one f''-only phenix.refine round of 3 cycles", out)
+            self.assertIn("Then: ReadySet on the start model (no hydrogens)", out)
+            self.assertIn("one f''-only phenix.refine round of 3 cycles", out)
+            self.assertFalse((root / "readyset_args.json").exists())
             self.assertIn("Plan only", out)
             launched.assert_not_called()
             self.assertFalse((mtz.parent / "AutoFDP").exists())
