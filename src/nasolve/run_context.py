@@ -20,7 +20,7 @@ ABSOLUTE_ANCHOR = "absolute"
 
 
 # Numbered run series that live directly in a dataset directory.
-_DATASET_RUN_SERIES = {"AutoMR", "AutoSolMetal"}
+_DATASET_RUN_SERIES = {"AutoMR", "AutoSolMetal", "AutoFDP"}
 
 
 def dataset_directory(run_directory: Path) -> Path:

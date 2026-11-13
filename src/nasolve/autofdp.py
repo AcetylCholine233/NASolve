@@ -1,15 +1,24 @@
-"""AutoFDP: measure anomalous-scatterer occupancy by f'' refinement.
+"""AutoFDP: measure metal-site occupancy by f'' refinement.
 
-PARTLY IMPLEMENTED.
+PARTLY IMPLEMENTED. AutoFDP needs only a starting model (PDB) and an MTZ file;
+it reads no NASolve run report or checkpoint.
 
-- Step 1 (``prepare_start_model``): copy an AutoRefine result, find the metal
-  HETATM sites, set each one's B to the mean B of the nucleotides around it
-  (NARestraints metal-pair search), and record the copy as a new checkpoint.
-- Step 2 (``fdp_round``): one phenix.refine round from that checkpoint with
-  every strategy off except ``group_anomalous`` (f' fixed at theory, f''
-  refined from 0), then the refined f'' of each site compared with its
-  theoretical value.
+- From the MTZ (``phenix.mtz.dump``): the anomalous observations
+  (F(+)/SIGF(+)/F(-)/SIGF(-), or the intensity equivalent), the Free-R flags
+  (never regenerated) and the wavelength (MTZ header; ``--wavelength`` if the
+  header has none).
+- From the model: the metal HETATM sites (NARestraints heavy-atom search, as
+  in PostMR) and the B factors of the nucleotides around each one.
 
+Implemented:
+
+- Step 1 (``prepare_start_model``): copy the model and set each metal's B to
+  the mean B of the nucleotides around it (NARestraints metal-pair search).
+- Step 2 (``fdp_round``): one phenix.refine round on that copy with every
+  strategy off except ``group_anomalous`` (f' fixed at theory, f'' refined
+  from 0), then each refined f'' compared with its theoretical value.
+
+``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 and 2.
 Everything after that (occupancy adjustment, identity check, B confirmation,
 final round) is a documented stub that raises NotImplementedError. The full
 contract, defaults and open questions are in docs/autofdp.md.
@@ -24,38 +33,27 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
-from .checkpoints import (
-    REUSABLE_STATUSES,
-    CheckpointError,
-    append_checkpoint,
-    inherited_paths,
-    next_checkpoint_id,
-    read_registry,
-    resolve_checkpoint,
-)
 from .model_assessment import file_sha256
 from .run_context import artifact_reference
 
 WORKFLOW = "autofdp"
-SCHEMA_VERSION = 1
+# 2: standalone (a model and an MTZ). 1 was the AutoRefine-checkpoint layout.
+SCHEMA_VERSION = 2
 
-STATUS_PREPARED = "AUTOFDP_PREPARED"    # exit 0; step 1 only (B start)
-STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"  # exit 0; one f''-only round
-STATUS_CONVERGED = "AUTOFDP_CONVERGED"  # exit 0
-STATUS_REVIEW = "AUTOFDP_REVIEW"        # exit 2
-STATUS_FAILED = "AUTOFDP_FAILED"        # exit 1
-
-RECIPE_B_START = "AutoFDP/b-start"
-RECIPE_FDP = "AutoFDP/fdp"
-RECIPE_CONFIRM_B = "AutoFDP/confirm-b"
-RECIPE_FINAL = "AutoFDP/final"
+STATUS_PREPARED = "AUTOFDP_PREPARED"           # step 1 written, round not yet run
+STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"    # exit 0; one f''-only round
+STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0 (later steps)
+STATUS_REVIEW = "AUTOFDP_REVIEW"                # exit 2 (later steps)
+STATUS_FAILED = "AUTOFDP_FAILED"                # exit 1
 
 NOT_IMPLEMENTED_MESSAGE = (
     "this AutoFDP step is specified but not implemented yet; see docs/autofdp.md "
@@ -64,6 +62,14 @@ NOT_IMPLEMENTED_MESSAGE = (
 
 #: Fallback radius (A) when a metal touches no base atom.
 NEIGHBOUR_FALLBACK_DISTANCE = 6.0
+
+MODEL_SUFFIXES = (".pdb", ".ent")
+ANOMALOUS_LABEL_SETS = (
+    ("F(+)", "SIGF(+)", "F(-)", "SIGF(-)"),
+    ("I(+)", "SIGI(+)", "I(-)", "SIGI(-)"),
+)
+#: Plausible X-ray wavelengths (A), as for the MTZ-header reader.
+WAVELENGTH_RANGE = (0.1, 5.0)
 
 
 class AutoFDPError(RuntimeError):
@@ -107,60 +113,6 @@ class SiteState:
     decision: str | None = None
 
 
-def plan_autofdp(
-    run_directory: Path,
-    mtz_dump_executable: Path,
-    refine_executable: Path,
-    settings: AutoFDPSettings,
-    *,
-    from_checkpoint: str | None = None,
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    """Preflight: check everything and return the plan, writing nothing.
-
-    Checks that the run has a completed PostMR and a usable starting
-    checkpoint; that the observations hold an anomalous quartet and a Free-R
-    label (never regenerated); reads the wavelength from the MTZ header
-    (AutoSol record as fallback, stop if neither); collects the sites (PostMR
-    metal sites plus nucleotide heavy-atom candidates, or ``settings.sites``),
-    each present exactly once in the starting model; computes theoretical
-    f'/f'' for every site and candidate element (or uses ``settings.theory``);
-    records the Phenix version; and checks with ``phenix.refine --dry_run``
-    that the f''-only parameters are accepted. Raises AutoFDPError on any
-    failure.
-    """
-    raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
-
-
-def execute_autofdp(
-    run_directory: Path,
-    refine_executable: Path,
-    mtz_dump_executable: Path,
-    *,
-    phenix_version: str,
-    settings: AutoFDPSettings,
-    from_checkpoint: str | None = None,
-    environment: Mapping[str, str] | None = None,
-    processor_count: int | None = None,
-) -> dict[str, object]:
-    """Run the whole calibration and return the AutoFDP report.
-
-    1. ``plan_autofdp``.
-    2. ``prepare_start_model`` (implemented): copy the AutoRefine result and
-       set each metal's B from its neighbouring nucleotides, as a new
-       checkpoint.
-    3. Repeat up to ``settings.max_iterations``: ``fdp_round``, then
-       ``decide_site_update`` for every unconverged site, and write the new
-       occupancy/B as a model-edit checkpoint.
-    4. ``identity_check`` after the first round.
-    5. ``confirm_b_round`` unless disabled; ``final_round`` if requested.
-    6. Write ``AutoFDP/fdp_NNN/report.json``, ``autofdp.log`` and
-       ``fdp_table.tsv``. On convergence, bookmark the final checkpoint as
-       ``autofdp-NNN``. Never change the current checkpoint.
-    """
-    raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
-
-
 def parse_theory_overrides(values: Sequence[str]) -> dict[str, float]:
     """``ELEMENT=FDP`` strings (from ``--theory``) as {ELEMENT: f''}."""
     overrides: dict[str, float] = {}
@@ -182,56 +134,157 @@ def parse_theory_overrides(values: Sequence[str]) -> dict[str, float]:
 
 
 def theoretical_scattering(
-    report: Mapping[str, object],
-    plan: object,
+    elements: Sequence[str],
+    wavelength: float,
     refine_executable: Path,
     environment: Mapping[str, str] | None = None,
     overrides: Mapping[str, float] | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Theoretical f'/f'' for every anomalous selection of the run.
+    """Return {element: {f_prime, f_double_prime, f_double_prime_henke, source}}.
 
-    Values come from the cctbx Henke table at the reflection plan's wavelength
-    (MTZ header first), through ``phenix.python``, exactly as AutoRefine's
-    calculated scattering. An override (``--theory``) replaces the theoretical
-    f'' of that element and is recorded with source ``user (--theory)``; f'
-    always stays the Henke value. Returns {selection: {element, f_prime,
-    f_double_prime, f_double_prime_henke, source, wavelength,
-    wavelength_source}}.
+    Values come from the cctbx Henke table at ``wavelength`` through the
+    ``phenix.python`` beside ``refine_executable`` (as in AutoRefine). An
+    override (``--theory``) replaces an element's f'' and is recorded with
+    source ``user (--theory)``; f' always stays the Henke value.
     """
-    from .autorefine import AutoRefineError, calculated_anomalous_groups
-
-    try:
-        calculated = calculated_anomalous_groups(report, refine_executable, environment, plan)
-    except AutoRefineError as exc:
-        raise AutoFDPError(str(exc)) from exc
+    wanted = sorted({element.upper() for element in elements})
+    if not wanted:
+        raise AutoFDPError("No element to calculate scattering for")
     overrides = {key.upper(): value for key, value in (overrides or {}).items()}
-    used = {str(group.get("element")) for group in calculated.values()}
-    unused = sorted(set(overrides) - used)
+    unused = sorted(set(overrides) - set(wanted))
     if unused:
         raise AutoFDPError(
             f"--theory names {', '.join(unused)}, which is not an anomalous scatterer "
-            f"here ({', '.join(sorted(used))})"
+            f"here ({', '.join(wanted)})"
         )
+    script = (
+        "import json\nfrom cctbx.eltbx import henke\nvalues = {}\n"
+        f"for element in {wanted!r}:\n"
+        f"    value = henke.table(element).at_angstrom({float(wavelength)!r})\n"
+        "    values[element] = [value.fp(), value.fdp()]\n"
+        "print('NASOLVE_SCATTERING_JSON:' + json.dumps(values))\n"
+    )
+    python = refine_executable.expanduser().resolve().parent / "phenix.python"
+    try:
+        completed = subprocess.run(
+            [str(python), "-c", script],
+            env=dict(environment) if environment is not None else None,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AutoFDPError(f"Cannot calculate anomalous scattering with {python}: {exc}") from exc
+    matches = re.findall(r"^NASOLVE_SCATTERING_JSON:(\{.*\})$", completed.stdout, re.M)
+    if completed.returncode or len(matches) != 1:
+        raise AutoFDPError(
+            f"phenix.python returned no scattering values for {', '.join(wanted)}"
+        )
+    values = json.loads(matches[0])
     result: dict[str, dict[str, object]] = {}
-    for selection, group in calculated.items():
-        element = str(group["element"])
-        henke = float(group["f_double_prime"])
-        theory = overrides.get(element, henke)
+    for element in wanted:
+        pair = values.get(element) if isinstance(values, dict) else None
+        if not isinstance(pair, list) or len(pair) != 2 or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+            for v in pair
+        ):
+            raise AutoFDPError(f"Invalid calculated scattering values for {element}")
+        theory = overrides.get(element, float(pair[1]))
         if not math.isfinite(theory) or theory <= 0:
             raise AutoFDPError(
-                f"The theoretical f'' of {element} at this wavelength is {theory:g}; "
+                f"The theoretical f'' of {element} at {wavelength:g} A is {theory:g}; "
                 "give one with --theory"
             )
-        result[selection] = {
-            "element": element,
-            "f_prime": float(group["f_prime"]),
+        result[element] = {
+            "f_prime": float(pair[0]),
             "f_double_prime": theory,
-            "f_double_prime_henke": henke,
-            "source": "user (--theory)" if element in overrides else str(group["source"]),
-            "wavelength": group.get("wavelength"),
-            "wavelength_source": group.get("wavelength_source"),
+            "f_double_prime_henke": float(pair[1]),
+            "source": "user (--theory)" if element in overrides else "cctbx-henke",
         }
     return result
+
+
+@dataclass(frozen=True)
+class ReflectionInputs:
+    """What AutoFDP takes from the MTZ file."""
+
+    mtz: Path
+    observation_labels: tuple[str, ...]
+    free_r_label: str
+    free_r_test_value: int
+    wavelength: float
+    wavelength_source: Mapping[str, object]
+    resolution_limit: float | None
+
+
+def read_reflections(
+    mtz: Path,
+    mtz_dump_executable: Path,
+    environment: Mapping[str, str] | None = None,
+    *,
+    wavelength: float | None = None,
+) -> ReflectionInputs:
+    """Read labels, Free-R flags and wavelength from ``phenix.mtz.dump``.
+
+    The anomalous array is F(+)/SIGF(+)/F(-)/SIGF(-) (or I(+)/SIGI(+)/I(-)/
+    SIGI(-)); without one, f'' cannot be refined and AutoFDP stops. The Free-R
+    label must exist (flags are never generated); its test value is 1 for
+    Phenix ``R-free-flags`` and 0 for the CCP4 labels (FreeR_flag, FREE,
+    FreeR), as AutoRefine uses for STARANISO data. The wavelength is the MTZ
+    header value of the dataset holding the data, unless ``wavelength`` is
+    given.
+    """
+    from .autorefine import (
+        AutoRefineError,
+        _first_label_set,
+        _free_r_label,
+        _resolution_limit,
+        _run_mtz_dump,
+    )
+    from .reflection_data import ReflectionDataError, mtz_wavelength
+
+    mtz = mtz.expanduser().resolve()
+    if not mtz.is_file():
+        raise AutoFDPError(f"No MTZ file: {mtz}")
+    try:
+        dump = _run_mtz_dump(mtz, mtz_dump_executable, environment)
+        free_r = _free_r_label(dump)
+    except AutoRefineError as exc:
+        raise AutoFDPError(str(exc)) from exc
+    labels = _first_label_set(dump, ANOMALOUS_LABEL_SETS)
+    if labels is None:
+        raise AutoFDPError(
+            f"{mtz.name} has no anomalous data (F(+)/SIGF(+)/F(-)/SIGF(-) or "
+            "I(+)/SIGI(+)/I(-)/SIGI(-)); f'' cannot be refined"
+        )
+    try:
+        header, dataset = mtz_wavelength(dump)
+        header_error = None
+    except ReflectionDataError as exc:
+        header, dataset, header_error = None, None, str(exc)
+    if wavelength is not None:
+        low, high = WAVELENGTH_RANGE
+        if not math.isfinite(wavelength) or not low <= wavelength <= high:
+            raise AutoFDPError(f"--wavelength must be between {low:g} and {high:g} A")
+        value = float(wavelength)
+        source = {"method": "--wavelength", "mtz_header": header, "mtz_error": header_error}
+        if header is not None and abs(header - value) > 1e-4:
+            source["warning"] = (
+                f"--wavelength {value:g} A differs from the MTZ header ({header:g} A)"
+            )
+    elif header is not None:
+        value = header
+        source = {"method": "MTZ header (phenix.mtz.dump)", "mtz_dataset": dataset}
+    else:
+        raise AutoFDPError(f"{header_error}; give the wavelength with --wavelength")
+    return ReflectionInputs(
+        mtz=mtz,
+        observation_labels=tuple(labels),
+        free_r_label=free_r,
+        free_r_test_value=1 if free_r == "R-free-flags" else 0,
+        wavelength=value,
+        wavelength_source=source,
+        resolution_limit=_resolution_limit(dump),
+    )
 
 
 @dataclass(frozen=True)
@@ -272,21 +325,14 @@ class BStartSite:
 
 
 @dataclass(frozen=True)
-class AutoFDPPreparation:
-    """Result of AutoFDP step 1 (B start)."""
+class BStart:
+    """AutoFDP step 1 (B start): the metal sites and their B before and after."""
 
-    run_directory: Path
-    source_checkpoint: str
-    source_model: Path                # the AutoRefine result that was copied
+    model: Path                       # the starting model given on the command line
     sites: tuple[BStartSite, ...]
     warnings: tuple[str, ...]
-    plan_only: bool
-    output_directory: Path | None = None
-    source_copy: Path | None = None
-    start_model: Path | None = None
-    checkpoint_id: str | None = None
-    report_path: Path | None = None
-    status: str = STATUS_PREPARED
+    source_copy: Path | None = None   # unchanged copy, once written
+    start_model: Path | None = None   # copy with the metal B set, once written
 
 
 def _now() -> str:
@@ -459,122 +505,46 @@ def _set_b_factor(line: str, value: float) -> str:
     return body[:60] + f"{value:6.2f}" + body[66:] + ending
 
 
-def _next_fdp_directory(run: Path) -> Path:
-    root = run / "AutoFDP"
-    root.mkdir(parents=True, exist_ok=True)
-    numbers = [
-        int(match.group(1))
-        for path in root.glob("fdp_*")
-        if path.is_dir() and (match := re.fullmatch(r"fdp_(\d+)", path.name))
-    ]
-    destination = root / f"fdp_{max(numbers, default=0) + 1:03d}"
-    destination.mkdir()
-    return destination
-
-
-def _file_reference(path: Path, run: Path) -> dict[str, object]:
-    return {
-        **artifact_reference(path, run),
-        "sha256": file_sha256(path),
-        "size": path.stat().st_size,
-    }
-
-
-def _site_record(site: BStartSite) -> dict[str, object]:
-    record = {
-        key: value for key, value in asdict(site).items()
-        if key not in {"neighbour_b", "line_number"}
-    }
-    record["neighbour_method"] = site.neighbour_b.method if site.neighbour_b else None
-    record["neighbour_mean_b"] = site.neighbour_b.b_factor if site.neighbour_b else None
-    record["neighbours"] = (
-        [asdict(item) for item in site.neighbour_b.neighbours] if site.neighbour_b else []
-    )
-    return record
-
-
-def _log_lines(preparation: AutoFDPPreparation) -> list[str]:
-    lines = [
-        f"AutoFDP step 1 (B start), {_now()}",
-        f"Source checkpoint: {preparation.source_checkpoint}",
-        f"Source model: {preparation.source_model}",
-    ]
-    for site in preparation.sites:
-        lines.append(
-            f"{site.site} {site.atom_name} ({site.element}): occupancy {site.occupancy:.2f}; "
-            f"B {site.b_before:.2f} -> {site.b_after:.2f} ({site.b_source})"
-        )
-        if site.neighbour_b is not None:
-            lines.append(f"  neighbours: {site.neighbour_b.method}")
-            for item in site.neighbour_b.neighbours:
-                lines.append(
-                    f"    {item.residue} {item.residue_name}: mean B {item.mean_b:.2f} "
-                    f"over {item.atoms} atoms; closest {item.contact}"
-                )
-    lines.extend(f"Warning: {warning}" for warning in preparation.warnings)
-    return lines
+def checked_model(path: Path) -> Path:
+    """The starting model: an existing PDB-format file."""
+    model = path.expanduser().resolve()
+    if not model.is_file():
+        raise AutoFDPError(f"No model file: {model}")
+    if model.suffix.lower() not in MODEL_SUFFIXES:
+        raise AutoFDPError(f"AutoFDP needs a PDB-format model (.pdb), not {model.name}")
+    return model
 
 
 def prepare_start_model(
-    run_directory: Path,
+    model: Path,
     *,
-    from_checkpoint: str | None = None,
     sites: Sequence[str] = (),
     b_start: str | float = "surrounding",
-    plan_only: bool = False,
-) -> AutoFDPPreparation:
-    """AutoFDP step 1: copy an AutoRefine result and set the metals' B.
+    output_directory: Path | None = None,
+) -> BStart:
+    """AutoFDP step 1: find the metal sites and set their B.
 
-    The starting checkpoint (``from_checkpoint``, default the current one)
-    must be an AutoRefine refinement. Its model is copied unchanged to
-    ``AutoFDP/fdp_NNN/source_model.pdb``; the metal HETATM sites are found as
-    in PostMR (NARestraints ``find_heavy_atoms``: Z >= 21, outside nucleotides,
-    not Li/Be/Na/Mg/Al/K/Ca), optionally restricted to ``sites``; and each
-    site's B is set according to ``b_start``:
+    The metal HETATM sites are found as in PostMR (NARestraints
+    ``find_heavy_atoms``: Z >= 21, outside nucleotides, not Li/Be/Na/Mg/Al/
+    K/Ca), optionally restricted to ``sites``, and each site's B is set
+    according to ``b_start``:
 
     - ``"surrounding"``: :func:`surrounding_b`, the mean B of the neighbouring
       nucleotides;
     - ``"model"``: unchanged;
     - a number: that B factor.
 
-    Only the B column of those atom lines changes, in
-    ``AutoFDP/fdp_NNN/start_model.pdb``, which is registered as a new
-    model-edit checkpoint ``autofdp-NNN`` (kind ``manual``, recipe
-    ``AutoFDP/b-start``, status REVIEW) under the source checkpoint. The
-    current checkpoint is not changed. With ``plan_only`` nothing is written.
+    Without ``output_directory`` nothing is written (the plan). With it, the
+    model is copied unchanged to ``source_model.pdb`` and, with only the B
+    column of the metal lines changed, to ``start_model.pdb``.
     """
+    model = checked_model(model)
     b_mode = parse_b_start(b_start)
-    try:
-        run, registry = read_registry(run_directory)
-        item = resolve_checkpoint(registry, from_checkpoint)
-    except CheckpointError as exc:
-        raise AutoFDPError(str(exc)) from exc
-    checkpoint = str(item.get("id"))
-    if item.get("kind") != "refinement":
-        refinements = [
-            str(other.get("id")) for other in registry.get("checkpoints", [])
-            if isinstance(other, Mapping) and other.get("kind") == "refinement"
-        ]
-        hint = (
-            f"choose one with --from ({', '.join(refinements)})" if refinements
-            else "run 'nasolve autorefine' first"
-        )
-        raise AutoFDPError(
-            f"Checkpoint {checkpoint} is a {item.get('kind')} checkpoint, not an "
-            f"AutoRefine result; {hint}"
-        )
-    if item.get("usable") is not True or item.get("status") not in REUSABLE_STATUSES:
-        raise AutoFDPError(f"Checkpoint {checkpoint} is not reusable")
-    try:
-        model = inherited_paths(item, run)["model"]
-    except CheckpointError as exc:
-        raise AutoFDPError(str(exc)) from exc
-    assert isinstance(model, Path)
-    if model.suffix.lower() != ".pdb":
-        raise AutoFDPError(f"AutoFDP needs a PDB model, not {model.name}")
-
     found, warnings = _metal_sites(model, sites)
-    text = model.read_text(encoding="utf-8", errors="strict")
+    try:
+        text = model.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AutoFDPError(f"Could not read {model.name}: {exc}") from exc
     lines = text.splitlines(keepends=True)
     prepared: list[BStartSite] = []
     for candidate, site_object in found:
@@ -614,223 +584,50 @@ def prepare_start_model(
             b_source=source,
             neighbour_b=neighbour_b,
         ))
+    result = BStart(model=model, sites=tuple(prepared), warnings=tuple(warnings))
+    if output_directory is None:
+        return result
 
-    preparation = AutoFDPPreparation(
-        run_directory=run,
-        source_checkpoint=checkpoint,
-        source_model=model,
-        sites=tuple(prepared),
-        warnings=tuple(warnings),
-        plan_only=plan_only,
-    )
-    if plan_only:
-        return preparation
-
-    destination = _next_fdp_directory(run)
-    source_copy = destination / "source_model.pdb"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    source_copy = output_directory / "source_model.pdb"
     shutil.copyfile(model, source_copy)
     if file_sha256(source_copy) != file_sha256(model):
-        raise AutoFDPError("The copy of the AutoRefine model does not match its source")
+        raise AutoFDPError("The copy of the starting model does not match its source")
     edited = list(lines)
     for site in prepared:
         edited[site.line_number - 1] = _set_b_factor(lines[site.line_number - 1], site.b_after)
-    start_model = destination / "start_model.pdb"
+    start_model = output_directory / "start_model.pdb"
     start_model.write_text("".join(edited), encoding="utf-8", newline="")
+    return replace(result, source_copy=source_copy, start_model=start_model)
 
-    report_path = destination / "report.json"
-    checkpoint_id = next_checkpoint_id(registry, "autofdp")
-    edits = [
-        {"site": site.site, "atom_name": site.atom_name, "b_before": site.b_before,
-         "b_after": site.b_after, "b_source": site.b_source}
-        for site in prepared
-    ]
-    payload = {
-        "id": checkpoint_id,
-        "parent": checkpoint,
-        # A model edit outside phenix.refine, like an imported model, so the
-        # viewer shows it with its parent's maps and AutoRefine accepts it.
-        "kind": "manual",
-        "status": "REVIEW",
-        "usable": True,
-        "recipe": RECIPE_B_START,
-        "label": None,
-        "model": _file_reference(start_model, run),
-        "observations": item.get("observations"),
-        "phases": item.get("phases"),
-        "restraints": item.get("restraints", []),
-        **(
-            {"terminal_geometry_protection": item["terminal_geometry_protection"]}
-            if "terminal_geometry_protection" in item else {}
-        ),
-        "metrics": {},
-        "compatibility": {
-            "validated": False,
-            "source": f"AutoFDP B start from {checkpoint}",
-            "review_required": True,
-        },
-        "autofdp": {
-            "step": "b-start",
-            "record": artifact_reference(destination, run),
-            "edits": edits,
-        },
+
+def _site_record(site: BStartSite) -> dict[str, object]:
+    record = {
+        key: value for key, value in asdict(site).items()
+        if key not in {"neighbour_b", "line_number"}
     }
-    preparation = replace(
-        preparation,
-        output_directory=destination,
-        source_copy=source_copy,
-        start_model=start_model,
-        checkpoint_id=checkpoint_id,
-        report_path=report_path,
+    record["neighbour_method"] = site.neighbour_b.method if site.neighbour_b else None
+    record["neighbour_mean_b"] = site.neighbour_b.b_factor if site.neighbour_b else None
+    record["neighbours"] = (
+        [asdict(item) for item in site.neighbour_b.neighbours] if site.neighbour_b else []
     )
-    report: dict[str, object] = {
-        "workflow": WORKFLOW,
-        "schema_version": SCHEMA_VERSION,
-        "status": STATUS_PREPARED,
-        "created_utc": _now(),
-        "steps": {"b_start": "done", "fdp_rounds": "not implemented"},
-        "source_checkpoint": checkpoint,
-        "source_model": {
-            **_file_reference(source_copy, run),
-            "copied_from": artifact_reference(model, run),
-        },
-        "start_model": _file_reference(start_model, run),
-        "start_checkpoint": checkpoint_id,
-        "settings": {"b_start": b_mode, "sites": list(sites)},
-        "sites": [_site_record(site) for site in prepared],
-        "warnings": list(warnings),
-    }
-    try:
-        append_checkpoint(run, registry, payload, select=False)
-    except CheckpointError as exc:
-        report.update(status=STATUS_FAILED, start_checkpoint=None, error=str(exc))
-        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        raise AutoFDPError(f"Could not register the AutoFDP checkpoint: {exc}") from exc
-    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    (destination / "autofdp.log").write_text(
-        "\n".join(_log_lines(preparation)) + "\n", encoding="utf-8"
-    )
-    return preparation
+    return record
 
 
-@dataclass(frozen=True)
-class FdpStart:
-    """Where an AutoFDP run starts."""
-
-    run_directory: Path
-    checkpoint_id: str
-    needs_b_start: bool              # True: an AutoRefine result; step 1 runs first
-    record_directory: Path | None    # AutoFDP/fdp_NNN of an existing B start
-
-
-def _record_directory(run: Path, item: Mapping[str, object]) -> Path | None:
-    """The AutoFDP/fdp_NNN folder of a B-start checkpoint, or None."""
-    autofdp = item.get("autofdp")
-    if (
-        item.get("kind") != "manual"
-        or item.get("recipe") != RECIPE_B_START
-        or not isinstance(autofdp, Mapping)
-        or autofdp.get("step") != "b-start"
-    ):
-        return None
-    record = autofdp.get("record")
-    relative = record.get("relative_path") if isinstance(record, Mapping) else None
-    if not isinstance(record, Mapping) or record.get("anchor") != "run" or not isinstance(relative, str):
-        raise AutoFDPError(f"Checkpoint {item.get('id')} has no readable AutoFDP record")
-    directory = (run / relative).resolve()
-    root = (run / "AutoFDP").resolve()
-    if root not in directory.parents or not (directory / "report.json").is_file():
-        raise AutoFDPError(
-            f"The AutoFDP record of checkpoint {item.get('id')} is missing: {directory}"
-        )
-    return directory
-
-
-def resolve_fdp_start(run_directory: Path, from_checkpoint: str | None = None) -> FdpStart:
-    """Accept an AutoRefine result (step 1 runs first) or an AutoFDP B start.
-
-    Anything else, such as ``postmr`` or an imported model, is refused with the
-    list of usable starts.
-    """
-    try:
-        run, registry = read_registry(run_directory)
-        item = resolve_checkpoint(registry, from_checkpoint)
-    except CheckpointError as exc:
-        raise AutoFDPError(str(exc)) from exc
-    checkpoint = str(item.get("id"))
-    if item.get("usable") is not True or item.get("status") not in REUSABLE_STATUSES:
-        raise AutoFDPError(f"Checkpoint {checkpoint} is not reusable")
-    if item.get("kind") == "refinement":
-        return FdpStart(run, checkpoint, True, None)
-    record = _record_directory(run, item)
-    if record is not None:
-        return FdpStart(run, checkpoint, False, record)
-    starts = [
-        str(other.get("id")) for other in registry.get("checkpoints", [])
-        if isinstance(other, Mapping)
-        and (other.get("kind") == "refinement" or other.get("recipe") == RECIPE_B_START)
-    ]
-    hint = (
-        f"choose one with --from ({', '.join(starts)})" if starts
-        else "run 'nasolve autorefine' first"
-    )
-    raise AutoFDPError(
-        f"Checkpoint {checkpoint} is a {item.get('kind')} checkpoint, not an "
-        f"AutoRefine result or an AutoFDP B start; {hint}"
-    )
-
-
-@dataclass(frozen=True)
-class FdpSiteResult:
-    """One anomalous group after an f''-only round."""
-
-    selection: str
-    site: str
-    atom_name: str
-    element: str
-    autofdp_site: bool            # False: refined too, but not given its B by AutoFDP
-    occupancy: float | None
-    b_factor: float | None
-    f_prime: float                # fixed at theory
-    f_double_prime_start: float
-    f_double_prime_refined: float | None
-    f_double_prime_theory: float
-    theory_source: str
-    deviation: float | None       # refined - theory
-    within_tolerance: bool | None
-
-
-@dataclass(frozen=True)
-class FdpRoundResult:
-    """Result of AutoFDP step 2 (one f''-only round)."""
-
-    run_directory: Path
-    start_checkpoint: str
-    checkpoint_id: str
-    round_directory: Path
-    autorefine_status: str
-    autorefine_message: str
-    r_work: float | None
-    r_free: float | None
-    cycles: int
-    tolerance: float
-    wavelength: float | None
-    sites: tuple[FdpSiteResult, ...]
-    warnings: tuple[str, ...]
-    status: str
-    message: str
-    record_directory: Path
-    report_path: Path
-    model_path: Path | None
-    map_coefficients: Path | None
-
-
-def _site_selection(site: Mapping[str, object]) -> str:
-    chain, residue = str(site["site"]).split(":", 1)
-    selection = f"chain {chain} and resid {residue} and name {site['atom_name']}"
-    alternate = site.get("alternate")
-    if isinstance(alternate, str) and alternate:
+def _site_selection(site: str, atom_name: str, alternate: str | None) -> str:
+    chain, residue = site.split(":", 1)
+    selection = f"chain {chain} and resid {residue} and name {atom_name}"
+    if alternate:
         selection += f" and altloc {alternate}"
     return selection
+
+
+def _site_key(site: str, atom_name: str, alternate: str | None) -> tuple[str, ...]:
+    """The _coordinate_records key of a site such as "B:101" or "B:101A"."""
+    chain, residue = site.split(":", 1)
+    match = re.fullmatch(r"(-?\d+)([A-Za-z]?)", residue)
+    resseq, icode = (match.group(1), match.group(2)) if match else (residue, "")
+    return (chain if chain != "_" else "", resseq, icode, atom_name, alternate or "")
 
 
 def _coordinate_records(path: Path) -> dict[tuple[str, ...], tuple[float, ...]]:
@@ -877,178 +674,202 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     temporary.replace(path)
 
 
-def _round_log_lines(result: "FdpRoundResult") -> list[str]:
-    lines = [
-        "",
-        f"AutoFDP step 2 (f''-only round), {_now()}",
-        f"Start checkpoint: {result.start_checkpoint}; round checkpoint: {result.checkpoint_id}",
-        f"AutoRefine: {result.autorefine_status} (R-work {result.r_work}, R-free {result.r_free})",
-        f"Status: {result.status}: {result.message}",
-    ]
-    for site in result.sites:
-        refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
-        deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
-        lines.append(
-            f"{site.site} {site.atom_name} ({site.element}): f' {site.f_prime:.2f} fixed; "
-            f"f'' {refined} vs theory {site.f_double_prime_theory:.2f} "
-            f"({site.theory_source}); deviation {deviation}"
-        )
-    lines.extend(f"Warning: {warning}" for warning in result.warnings)
-    return lines
+@dataclass(frozen=True)
+class FdpSiteResult:
+    """One anomalous group after an f''-only round."""
+
+    selection: str
+    site: str
+    atom_name: str
+    element: str
+    calibrated: bool              # False: refined too, but excluded by --site
+    occupancy: float | None
+    b_factor: float | None
+    f_prime: float                # fixed at theory
+    f_double_prime_start: float
+    f_double_prime_refined: float | None
+    f_double_prime_theory: float
+    theory_source: str
+    deviation: float | None       # refined - theory
+    within_tolerance: bool | None
+
+
+@dataclass(frozen=True)
+class FdpRoundResult:
+    """AutoFDP step 2: one f''-only phenix.refine round."""
+
+    directory: Path
+    cycles: int
+    tolerance: float
+    returncode: int
+    r_work: float | None
+    r_free: float | None
+    sites: tuple[FdpSiteResult, ...]
+    warnings: tuple[str, ...]
+    status: str
+    message: str
+    parameters: Path
+    log_path: Path
+    model_path: Path | None
+    map_coefficients: Path | None
+    held_parameter_changes: Mapping[str, object] | None
+
+
+def _newest(directory: Path, pattern: str, keep: Callable[[Path], bool] = lambda path: True) -> Path | None:
+    found = sorted(
+        (path.resolve() for path in directory.glob(pattern) if path.is_file() and keep(path)),
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    )
+    return found[-1] if found else None
+
+
+def _run_phenix_refine(
+    command: list[str],
+    directory: Path,
+    environment: Mapping[str, str] | None,
+) -> int:
+    """``--dry_run`` first, then the refinement; logs in ``directory``."""
+    log_path = directory / "phenix.refine.log"
+    preflight_log = directory / "phenix.refine.preflight.log"
+    env = dict(environment) if environment is not None else None
+    try:
+        with preflight_log.open("w", encoding="utf-8") as handle:
+            preflight = subprocess.run(
+                [command[0], "--dry_run", *command[1:]], cwd=directory, env=env,
+                text=True, stdout=handle, stderr=subprocess.STDOUT, check=False,
+            )
+        if preflight.returncode:
+            log_path.write_text(
+                f"phenix.refine refused the parameters (status {preflight.returncode}); "
+                f"see {preflight_log.name}\n",
+                encoding="utf-8",
+            )
+            return preflight.returncode
+        with log_path.open("w", encoding="utf-8") as handle:
+            completed = subprocess.run(
+                command, cwd=directory, env=env,
+                text=True, stdout=handle, stderr=subprocess.STDOUT, check=False,
+            )
+        return completed.returncode
+    except OSError as exc:
+        log_path.write_text(f"NASolve could not launch phenix.refine: {exc}\n", encoding="utf-8")
+        return 127
 
 
 def fdp_round(
-    run_directory: Path,
+    start_model: Path,
+    reflections: ReflectionInputs,
     refine_executable: Path,
-    mtz_dump_executable: Path,
+    directory: Path,
     *,
     phenix_version: str,
-    start_checkpoint: str,
+    theory: Mapping[str, Mapping[str, object]],
+    calibrated: Sequence[str] = (),
     cycles: int = 3,
     tolerance: float = 1.0,
-    theory_overrides: Mapping[str, float] | None = None,
+    restraints: Sequence[Path] = (),
     environment: Mapping[str, str] | None = None,
     processor_count: int | None = None,
-    progress=None,
 ) -> FdpRoundResult:
-    """AutoFDP step 2: one f''-only refinement from an AutoFDP B start.
+    """AutoFDP step 2: one f''-only phenix.refine round in ``directory``.
 
-    The round is an ordinary AutoRefine round (``AutoRefine/round_NNN``,
-    checkpoint ``refine-NNN``, recipe ``AutoFDP/fdp``) with every strategy off
-    except ``group_anomalous``: no coordinates, real-space, B or occupancy
-    refinement for any atom. Each anomalous group (every PostMR anomalous
-    scatterer) has f' fixed at its theoretical value for the wavelength and
-    f'' refined from 0, for ``cycles`` macrocycles. The current checkpoint is
-    not changed.
+    Every strategy is off except ``group_anomalous``: no coordinate,
+    real-space, B or occupancy refinement for any atom, and no weight
+    optimisation. Every metal site of ``start_model`` gets an anomalous group
+    with f' fixed at ``theory`` for its element and f'' refined from 0, for
+    ``cycles`` macrocycles. The parameters and command come from AutoRefine's
+    writers, so reflection labels, Free-R flags and the Phenix 2.x
+    data-manager handling are the same as in AutoRefine. ``restraints`` are
+    extra dictionaries (CIF) for residues phenix.refine does not know.
 
-    Afterwards the refined f'' of every group is compared with its theoretical
-    value (cctbx Henke, or ``theory_overrides``) and the round is added to the
-    AutoFDP record of the start (``rounds`` in ``AutoFDP/fdp_NNN/report.json``
-    and ``autofdp.log``). Status ``AUTOFDP_FDP_ROUND_DONE`` when phenix.refine
-    reported a refined f'' for every group, otherwise ``AUTOFDP_FAILED``.
+    Afterwards each refined f'' is compared with its theoretical value, and
+    coordinates, occupancy and B are checked to be unchanged. Status
+    ``AUTOFDP_FDP_ROUND_DONE`` when phenix.refine reported a refined f'' for
+    every group, otherwise ``AUTOFDP_FAILED``.
     """
     from .autorefine import (
         AutoRefineError,
-        anomalous_selections,
-        build_reflection_plan,
-        execute_autorefine,
-        with_postmr_metal_sites,
+        ReflectionPlan,
+        _final_anomalous_values,
+        build_refine_command,
+        parse_refinement_statistics,
+        reflection_selector_policy,
+        write_recipe_parameters,
     )
 
     if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
         raise AutoFDPError("--cycles must be a whole number of at least 1")
     if not math.isfinite(tolerance) or tolerance <= 0:
         raise AutoFDPError("--tolerance must be a positive number of electrons")
-    start = resolve_fdp_start(run_directory, start_checkpoint)
-    if start.needs_b_start or start.record_directory is None:
-        raise AutoFDPError(
-            f"Checkpoint {start.checkpoint_id} is an AutoRefine result; the f'' round "
-            "starts from the AutoFDP B start made from it (step 1)"
-        )
-    run = start.run_directory
-    record_path = start.record_directory / "report.json"
+    sites, _ = _metal_sites(start_model, ())
+    groups: dict[str, dict[str, float]] = {}
+    described: dict[str, tuple[str, str, str, str | None]] = {}
+    for candidate, _site in sites:
+        element = str(candidate["element"]).upper()
+        if element not in theory:
+            raise AutoFDPError(f"No theoretical scattering for {element}")
+        alternate = candidate.get("alternate") or None
+        selection = _site_selection(str(candidate["site"]), str(candidate["atom_name"]), alternate)
+        groups[selection] = {"f_prime": float(theory[element]["f_prime"]), "f_double_prime": 0.0}
+        described[selection] = (str(candidate["site"]), str(candidate["atom_name"]), element, alternate)
+    unknown = sorted(set(calibrated) - set(groups))
+    if unknown:
+        raise AutoFDPError("Not a metal site of the start model: " + "; ".join(unknown))
+
+    plan = ReflectionPlan(
+        observation_labels=reflections.observation_labels,
+        free_r_label=reflections.free_r_label,
+        free_r_test_value=reflections.free_r_test_value,
+        anomalous=True,
+        phase_labels=(),
+        phase_file=None,
+        anomalous_fallback=False,
+        fallback_is_error=False,
+        resolution_limit=reflections.resolution_limit,
+        wavelength=reflections.wavelength,
+        wavelength_source=dict(reflections.wavelength_source),
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    parameters = directory / "autofdp.params"
     try:
-        record = json.loads(record_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AutoFDPError(f"Could not read the AutoFDP record {record_path}: {exc}") from exc
-    if record.get("workflow") != WORKFLOW or record.get("start_checkpoint") != start.checkpoint_id:
-        raise AutoFDPError(f"{record_path} is not the AutoFDP record of {start.checkpoint_id}")
-
-    try:
-        run_record, registry = read_registry(run)
-        item = resolve_checkpoint(registry, start.checkpoint_id)
-        inputs = inherited_paths(item, run_record)
-        report = with_postmr_metal_sites(
-            json.loads((run / "report.json").read_text(encoding="utf-8")), run
-        )
-        observations, start_model = inputs["observations"], inputs["model"]
-        assert isinstance(observations, Path) and isinstance(start_model, Path)
-        plan = build_reflection_plan(report, observations, mtz_dump_executable, environment)
-        selections = anomalous_selections(report)
-    except (CheckpointError, AutoRefineError) as exc:
-        raise AutoFDPError(str(exc)) from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AutoFDPError(f"Could not read the run report: {exc}") from exc
-    if not plan.anomalous:
-        raise AutoFDPError(
-            "AutoFDP needs anomalous observations (F(+)/SIGF(+)/F(-)/SIGF(-)); "
-            f"{observations.name} has none"
-        )
-    sites = [site for site in record.get("sites", []) if isinstance(site, Mapping)]
-    own = {_site_selection(site) for site in sites}
-    missing = sorted(own - set(selections))
-    if missing:
-        raise AutoFDPError(
-            "Not among the run's anomalous scatterers (from PostMR): "
-            + "; ".join(missing)
-        )
-    theory = theoretical_scattering(report, plan, refine_executable, environment, theory_overrides)
-    groups = {
-        selection: {"f_prime": values["f_prime"], "f_double_prime": 0.0}
-        for selection, values in theory.items()
-    }
-
-    round_entry: dict[str, object] = {
-        "round": len(record.get("rounds", [])) + 1,
-        "created_utc": _now(),
-        "start_checkpoint": start.checkpoint_id,
-        "cycles": cycles,
-        "tolerance": tolerance,
-        "strategy": ["group_anomalous"],
-        "wavelength": plan.wavelength,
-        "wavelength_source": dict(plan.wavelength_source),
-        "theory": theory,
-        "starting_groups": groups,
-        "phenix_version": phenix_version,
-    }
-
-    def save(status: str, message: str, extra: Mapping[str, object]) -> None:
-        entry = {**round_entry, **extra, "status": status, "message": message}
-        record.setdefault("rounds", []).append(entry)
-        record["status"] = status
-        record["steps"] = {
-            **(record.get("steps") if isinstance(record.get("steps"), Mapping) else {}),
-            "fdp_rounds": f"{len(record['rounds'])} run",
-            "occupancy_adjustment": "not implemented",
-        }
-        _write_json(record_path, record)
-
-    try:
-        refined = execute_autorefine(
-            run,
-            refine_executable,
-            mtz_dump_executable,
-            phenix_version=phenix_version,
-            environment=environment,
-            from_checkpoint=start.checkpoint_id,
-            recipe=RECIPE_FDP,
+        strategies = write_recipe_parameters(
+            parameters,
+            selector_policy=reflection_selector_policy(phenix_version),
+            observations=reflections.mtz,
+            reflection_plan=plan,
             macro_cycles=cycles,
-            processor_count=processor_count,
+            processor_count=max(1, processor_count or os.cpu_count() or 1),
+            anomalous_atom_selections=tuple(groups),
             real_space_sites=False,
-            refine_coordinates=False,
             adp_mode="none",
             refine_occupancies=False,
             anomalous_mode="fdp-only",
+            refine_coordinates=False,
             anomalous_groups=groups,
-            auto_select_success=False,
-            progress=progress,
         )
     except AutoRefineError as exc:
-        save(STATUS_FAILED, str(exc), {"checkpoint": None})
-        raise AutoFDPError(f"The f'' round could not run: {exc}") from exc
-
-    payload = json.loads(refined.report_path.read_text(encoding="utf-8"))
-    refinement = payload.get("refinement") if isinstance(payload.get("refinement"), Mapping) else {}
-    warnings: list[str] = []
-    if list(refinement.get("strategies", [])) != ["group_anomalous"]:
-        warnings.append(
-            "phenix.refine was not given group_anomalous alone: "
-            + ", ".join(refinement.get("strategies", []))
-        )
-    changes = (
-        held_parameter_changes(start_model, refined.model_path)
-        if refined.model_path is not None and refined.model_path.is_file() else None
+        raise AutoFDPError(str(exc)) from exc
+    if tuple(strategies) != ("group_anomalous",):
+        raise AutoFDPError("Internal error: the f'' round must refine group_anomalous only")
+    command = build_refine_command(
+        refine_executable, start_model, reflections.mtz,
+        [path.expanduser().resolve() for path in restraints], parameters, plan,
     )
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
+    returncode = _run_phenix_refine(command, directory, environment)
+
+    log_path = directory / "phenix.refine.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    model_path = _newest(directory, "refined_*.pdb")
+    map_coefficients = _newest(directory, "refined_*map_coeffs.mtz")
+    if map_coefficients is None and model_path is not None and model_path.with_suffix(".mtz").is_file():
+        map_coefficients = model_path.with_suffix(".mtz")
+    statistics = parse_refinement_statistics(
+        log_text, model_path.read_text(encoding="utf-8", errors="replace") if model_path else ""
+    )
+    refined_values = _final_anomalous_values(log_text)
+    warnings: list[str] = []
+    changes = held_parameter_changes(start_model, model_path) if model_path is not None else None
     if changes is not None and (
         changes["max_coordinate_shift"] > 0.01
         or changes["max_occupancy_change"] > 0.01
@@ -1059,89 +880,338 @@ def fdp_round(
             f"coordinates up to {changes['max_coordinate_shift']} A, occupancy up to "
             f"{changes['max_occupancy_change']}, B up to {changes['max_b_change']}"
         )
-
-    diagnostics = {
-        (str(entry.get("site")), str(entry.get("atom_name"))): entry
-        for entry in refined.statistics.get("anomalous_scatterers", [])
-        if isinstance(entry, Mapping)
-    }
-    site_keys = {(str(site["site"]), str(site["atom_name"])) for site in sites}
+    records = _coordinate_records(start_model)
     results: list[FdpSiteResult] = []
-    for selection, values in theory.items():
-        match = re.fullmatch(r"chain (\S+) and resid (\S+) and name (\S+)(?: and altloc \S+)?", selection)
-        site_label, atom_name = (f"{match.group(1)}:{match.group(2)}", match.group(3)) if match else (selection, "")
-        entry = diagnostics.get((site_label, atom_name), {})
-        value = entry.get("refined_f_double_prime")
-        refined_fdp = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-        theory_fdp = float(values["f_double_prime"])
-        deviation = None if refined_fdp is None else round(refined_fdp - theory_fdp, 3)
+    for selection, (site, atom_name, element, alternate) in described.items():
+        record = records.get(_site_key(site, atom_name, alternate))
+        refined = refined_values.get(selection)
+        theory_fdp = float(theory[element]["f_double_prime"])
+        deviation = None if refined is None else round(refined - theory_fdp, 3)
         results.append(FdpSiteResult(
             selection=selection,
-            site=site_label,
+            site=site,
             atom_name=atom_name,
-            element=str(values["element"]),
-            autofdp_site=(site_label, atom_name) in site_keys,
-            occupancy=entry.get("model_occupancy"),
-            b_factor=entry.get("b_factor"),
-            f_prime=float(values["f_prime"]),
+            element=element,
+            calibrated=not calibrated or selection in calibrated,
+            occupancy=record[3] if record else None,
+            b_factor=record[4] if record else None,
+            f_prime=float(theory[element]["f_prime"]),
             f_double_prime_start=0.0,
-            f_double_prime_refined=refined_fdp,
+            f_double_prime_refined=refined,
             f_double_prime_theory=theory_fdp,
-            theory_source=str(values["source"]),
+            theory_source=str(theory[element]["source"]),
             deviation=deviation,
             within_tolerance=None if deviation is None else abs(deviation) <= tolerance,
         ))
 
-    if refined.status in {"AUTOREFINE_FAILED", "AUTOREFINE_ANOMALOUS_FALLBACK"}:
-        status, message = STATUS_FAILED, f"{refined.status}: {refined.message}"
+    if returncode != 0 or model_path is None:
+        status = STATUS_FAILED
+        message = f"phenix.refine failed (exit status {returncode}); see {log_path}"
     elif any(site.f_double_prime_refined is None for site in results):
         status = STATUS_FAILED
         message = "phenix.refine reported no refined f'' for " + ", ".join(
             site.selection for site in results if site.f_double_prime_refined is None
         )
     else:
-        outside = [site for site in results if site.within_tolerance is False]
         status = STATUS_ROUND_DONE
+        outside = [site for site in results if site.within_tolerance is False]
         message = (
             f"refined f'' within {tolerance:g} e- of theory for every site"
             if not outside else
             f"{len(outside)} of {len(results)} site(s) more than {tolerance:g} e- from theory"
         )
-
-    result = FdpRoundResult(
-        run_directory=run,
-        start_checkpoint=start.checkpoint_id,
-        checkpoint_id=refined.checkpoint_id,
-        round_directory=refined.round_directory,
-        autorefine_status=refined.status,
-        autorefine_message=refined.message,
-        r_work=refined.statistics.get("r_work"),
-        r_free=refined.statistics.get("r_free"),
+    return FdpRoundResult(
+        directory=directory,
         cycles=cycles,
         tolerance=tolerance,
-        wavelength=plan.wavelength,
+        returncode=returncode,
+        r_work=statistics.get("r_work"),
+        r_free=statistics.get("r_free"),
         sites=tuple(results),
         warnings=tuple(warnings),
         status=status,
         message=message,
-        record_directory=start.record_directory,
-        report_path=record_path,
-        model_path=refined.model_path,
-        map_coefficients=refined.map_coefficients,
+        parameters=parameters,
+        log_path=log_path,
+        model_path=model_path,
+        map_coefficients=map_coefficients,
+        held_parameter_changes=changes,
     )
-    save(status, message, {
-        "checkpoint": refined.checkpoint_id,
-        "round_directory": artifact_reference(refined.round_directory, run),
-        "autorefine_status": refined.status,
-        "r_work": result.r_work,
-        "r_free": result.r_free,
-        "held_parameter_changes": changes,
-        "sites": [asdict(site) for site in results],
-        "warnings": warnings,
-    })
-    with (start.record_directory / "autofdp.log").open("a", encoding="utf-8") as handle:
-        handle.write("\n".join(_round_log_lines(result)) + "\n")
-    return result
+
+
+@dataclass(frozen=True)
+class AutoFDPPlan:
+    """Everything checked before anything is written (the preflight)."""
+
+    model: Path
+    reflections: ReflectionInputs
+    b_start: BStart
+    theory: Mapping[str, Mapping[str, object]]
+    selections: tuple[str, ...]          # every metal site: one anomalous group each
+    calibrated: tuple[str, ...]          # the sites whose B step 1 sets
+    restraints: tuple[Path, ...]
+    output_root: Path                    # run_NNN is created inside it
+
+
+@dataclass(frozen=True)
+class AutoFDPResult:
+    plan: AutoFDPPlan
+    run_directory: Path
+    b_start: BStart
+    round: FdpRoundResult
+    report_path: Path
+    log_path: Path
+    status: str
+    message: str
+
+
+def plan_autofdp(
+    model: Path,
+    mtz: Path,
+    refine_executable: Path,
+    mtz_dump_executable: Path,
+    *,
+    sites: Sequence[str] = (),
+    b_start: str | float = "surrounding",
+    theory_overrides: Mapping[str, float] | None = None,
+    wavelength: float | None = None,
+    restraints: Sequence[Path] = (),
+    output_root: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> AutoFDPPlan:
+    """Preflight: check the inputs and return the plan, writing nothing.
+
+    Reads the model's metal sites and their planned B (step 1), the MTZ
+    labels, Free-R flags and wavelength (``phenix.mtz.dump``), and the
+    theoretical f'/f'' of every metal element (``phenix.python``). Runs no
+    refinement. ``output_root`` defaults to ``AutoFDP`` beside the MTZ file.
+    """
+    model = checked_model(model)
+    plan_b = prepare_start_model(model, sites=sites, b_start=b_start)
+    found, _ = _metal_sites(model, ())
+    selections = tuple(
+        _site_selection(str(candidate["site"]), str(candidate["atom_name"]),
+                        candidate.get("alternate") or None)
+        for candidate, _ in found
+    )
+    calibrated = tuple(
+        _site_selection(site.site, site.atom_name, site.alternate) for site in plan_b.sites
+    )
+    files = []
+    for path in restraints:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            raise AutoFDPError(f"No restraint file: {resolved}")
+        files.append(resolved)
+    reflections = read_reflections(mtz, mtz_dump_executable, environment, wavelength=wavelength)
+    elements = {str(candidate["element"]).upper() for candidate, _ in found}
+    theory = theoretical_scattering(
+        sorted(elements), reflections.wavelength, refine_executable, environment, theory_overrides
+    )
+    root = (output_root or reflections.mtz.parent / "AutoFDP").expanduser().resolve()
+    return AutoFDPPlan(
+        model=model,
+        reflections=reflections,
+        b_start=plan_b,
+        theory=theory,
+        selections=selections,
+        calibrated=calibrated,
+        restraints=tuple(files),
+        output_root=root,
+    )
+
+
+def _next_run_directory(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    numbers = [
+        int(match.group(1))
+        for path in root.glob("run_*")
+        if path.is_dir() and (match := re.fullmatch(r"run_(\d+)", path.name))
+    ]
+    destination = root / f"run_{max(numbers, default=0) + 1:03d}"
+    destination.mkdir()
+    return destination
+
+
+def _file_record(path: Path, run_directory: Path) -> dict[str, object]:
+    """A portable reference (run or dataset anchor) with checksum and size.
+
+    The absolute path at creation is kept as provenance only.
+    """
+    return {
+        **artifact_reference(path, run_directory),
+        "absolute_path_at_creation": str(path.resolve()),
+        "sha256": file_sha256(path),
+        "size": path.stat().st_size,
+    }
+
+
+def _log_lines(plan: AutoFDPPlan, b_start: BStart, round_result: FdpRoundResult | None) -> list[str]:
+    reflections = plan.reflections
+    lines = [
+        f"AutoFDP, {_now()}",
+        f"Model: {plan.model}",
+        f"MTZ: {reflections.mtz}",
+        f"Observations: {','.join(reflections.observation_labels)}; Free-R "
+        f"{reflections.free_r_label} (test value {reflections.free_r_test_value})",
+        f"Wavelength: {reflections.wavelength:g} A ({reflections.wavelength_source.get('method')})",
+        "",
+        "Step 1 (B start)",
+    ]
+    for site in b_start.sites:
+        lines.append(
+            f"{site.site} {site.atom_name} ({site.element}): occupancy {site.occupancy:.2f}; "
+            f"B {site.b_before:.2f} -> {site.b_after:.2f} ({site.b_source})"
+        )
+        if site.neighbour_b is not None:
+            lines.append(f"  neighbours: {site.neighbour_b.method}")
+            for item in site.neighbour_b.neighbours:
+                lines.append(
+                    f"    {item.residue} {item.residue_name}: mean B {item.mean_b:.2f} "
+                    f"over {item.atoms} atoms; closest {item.contact}"
+                )
+    lines.extend(f"Warning: {warning}" for warning in b_start.warnings)
+    if round_result is not None:
+        lines.extend(["", f"Step 2 (f''-only round): {round_result.status}: {round_result.message}",
+                      f"R-work {round_result.r_work}, R-free {round_result.r_free}"])
+        for site in round_result.sites:
+            refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
+            deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
+            lines.append(
+                f"{site.site} {site.atom_name} ({site.element}): f' {site.f_prime:.2f} fixed; "
+                f"f'' {refined} vs theory {site.f_double_prime_theory:.2f} "
+                f"({site.theory_source}); deviation {deviation}"
+            )
+        lines.extend(f"Warning: {warning}" for warning in round_result.warnings)
+    return lines
+
+
+def execute_autofdp(
+    plan: AutoFDPPlan,
+    refine_executable: Path,
+    *,
+    phenix_version: str,
+    b_start: str | float = "surrounding",
+    sites: Sequence[str] = (),
+    cycles: int = 3,
+    tolerance: float = 1.0,
+    environment: Mapping[str, str] | None = None,
+    processor_count: int | None = None,
+) -> AutoFDPResult:
+    """Run steps 1 and 2 in a new ``run_NNN`` folder of ``plan.output_root``.
+
+    Step 1 writes ``source_model.pdb`` and ``start_model.pdb``; step 2 runs the
+    f''-only round in ``round_001``. ``report.json`` (workflow ``autofdp``,
+    schema 2) and ``autofdp.log`` record the inputs (paths and checksums),
+    what was read from the MTZ, the theory, the B changes and the round.
+    Nothing outside the new folder is written. The later steps (occupancy
+    adjustment onward) are not implemented.
+    """
+    run_directory = _next_run_directory(plan.output_root)
+    written = prepare_start_model(
+        plan.model, sites=sites, b_start=b_start, output_directory=run_directory
+    )
+    assert written.start_model is not None and written.source_copy is not None
+    reflections = plan.reflections
+    report: dict[str, object] = {
+        "workflow": WORKFLOW,
+        "schema_version": SCHEMA_VERSION,
+        "status": STATUS_PREPARED,
+        "created_utc": _now(),
+        "phenix_version": phenix_version,
+        "inputs": {
+            "model": _file_record(plan.model, run_directory),
+            "mtz": _file_record(reflections.mtz, run_directory),
+            "restraints": [_file_record(path, run_directory) for path in plan.restraints],
+        },
+        "reflections": {
+            "observation_labels": list(reflections.observation_labels),
+            "free_r_label": reflections.free_r_label,
+            "free_r_test_value": reflections.free_r_test_value,
+            "wavelength": reflections.wavelength,
+            "wavelength_source": dict(reflections.wavelength_source),
+            "resolution_limit": reflections.resolution_limit,
+        },
+        "settings": {
+            "sites": list(sites), "b_start": b_start, "cycles": cycles, "tolerance": tolerance,
+        },
+        "theory": {element: dict(values) for element, values in plan.theory.items()},
+        "b_start": {
+            "source_model": _file_record(written.source_copy, run_directory),
+            "start_model": _file_record(written.start_model, run_directory),
+            "sites": [_site_record(site) for site in written.sites],
+            "warnings": list(written.warnings),
+        },
+        "rounds": [],
+        "steps": {"b_start": "done", "fdp_rounds": "running", "occupancy_adjustment": "not implemented"},
+    }
+    report_path = run_directory / "report.json"
+    _write_json(report_path, report)
+    log_path = run_directory / "autofdp.log"
+    try:
+        round_result = fdp_round(
+            written.start_model,
+            reflections,
+            refine_executable,
+            run_directory / "round_001",
+            phenix_version=phenix_version,
+            theory=plan.theory,
+            calibrated=plan.calibrated,
+            cycles=cycles,
+            tolerance=tolerance,
+            restraints=plan.restraints,
+            environment=environment,
+            processor_count=processor_count,
+        )
+    except AutoFDPError as exc:
+        report.update(status=STATUS_FAILED, message=str(exc))
+        report["steps"]["fdp_rounds"] = "failed before phenix.refine ran"
+        _write_json(report_path, report)
+        log_path.write_text("\n".join(_log_lines(plan, written, None)
+                                      + ["", f"Step 2 failed: {exc}"]) + "\n", encoding="utf-8")
+        raise
+    entry = {
+        "round": 1,
+        "directory": "round_001",
+        "strategy": ["group_anomalous"],
+        "starting_groups": {
+            selection: {"f_prime": float(plan.theory[element]["f_prime"]), "f_double_prime": 0.0}
+            for selection, element in (
+                (site.selection, site.element) for site in round_result.sites
+            )
+        },
+        "cycles": cycles,
+        "returncode": round_result.returncode,
+        "r_work": round_result.r_work,
+        "r_free": round_result.r_free,
+        "held_parameter_changes": round_result.held_parameter_changes,
+        "refined_model": (
+            _file_record(round_result.model_path, run_directory) if round_result.model_path else None
+        ),
+        "map_coefficients": (
+            _file_record(round_result.map_coefficients, run_directory)
+            if round_result.map_coefficients else None
+        ),
+        "sites": [asdict(site) for site in round_result.sites],
+        "warnings": list(round_result.warnings),
+        "status": round_result.status,
+        "message": round_result.message,
+    }
+    report["rounds"] = [entry]
+    report.update(status=round_result.status, message=round_result.message)
+    report["steps"]["fdp_rounds"] = "1 run"
+    _write_json(report_path, report)
+    log_path.write_text("\n".join(_log_lines(plan, written, round_result)) + "\n", encoding="utf-8")
+    return AutoFDPResult(
+        plan=plan,
+        run_directory=run_directory,
+        b_start=written,
+        round=round_result,
+        report_path=report_path,
+        log_path=log_path,
+        status=round_result.status,
+        message=round_result.message,
+    )
 
 
 def map_value_at_site(
@@ -1226,23 +1296,27 @@ def final_round(
 
 
 __all__ = [
+    "ANOMALOUS_LABEL_SETS",
     "AutoFDPError",
-    "AutoFDPPreparation",
+    "AutoFDPPlan",
+    "AutoFDPResult",
     "AutoFDPSettings",
+    "BStart",
     "BStartSite",
     "FdpRoundResult",
     "FdpSiteResult",
-    "FdpStart",
     "Neighbour",
     "NeighbourB",
-    "SiteState",
     "NOT_IMPLEMENTED_MESSAGE",
+    "ReflectionInputs",
+    "SiteState",
     "STATUS_CONVERGED",
-    "STATUS_PREPARED",
-    "STATUS_ROUND_DONE",
     "STATUS_FAILED",
+    "STATUS_PREPARED",
     "STATUS_REVIEW",
+    "STATUS_ROUND_DONE",
     "WORKFLOW",
+    "checked_model",
     "confirm_b_round",
     "decide_site_update",
     "execute_autofdp",
@@ -1255,7 +1329,7 @@ __all__ = [
     "parse_theory_overrides",
     "plan_autofdp",
     "prepare_start_model",
-    "resolve_fdp_start",
+    "read_reflections",
     "surrounding_b",
     "theoretical_scattering",
 ]

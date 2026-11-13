@@ -1,22 +1,14 @@
-"""AutoFDP step 1: copy an AutoRefine result and set each metal's B from the
+"""AutoFDP step 1: copy the starting model and set each metal's B from the
 nucleotides around it (NARestraints metal-pair search). Pure Python; no
-Phenix program runs in this step."""
+Phenix program runs in this step, and no NASolve run is needed."""
 
-import contextlib
-import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from nasolve.autofdp import AutoFDPError, prepare_start_model, surrounding_b
-from nasolve.checkpoints import append_checkpoint, initialize_registry, list_checkpoints
-from nasolve.cli import main
-from nasolve.model_assessment import file_sha256
-from nasolve.run_context import artifact_reference
 
 from .helpers import pdb_record
-from .test_autorefine import make_refine_run
 
 
 def _residue(serial, name, chain, number, b, atoms):
@@ -51,32 +43,10 @@ def bridged_model_text(metal_b=379.99, occupancy=0.9) -> str:
     return "".join(lines) + "END\n"
 
 
-def make_refined_run(root: Path, model_text: str = None) -> Path:
-    """A PostMR run plus one AutoRefine checkpoint, refine-001, whose result
-    is ``model_text``. The current checkpoint stays postmr (a REVIEW round)."""
-    run = make_refine_run(root)
-    run, registry = initialize_registry(run)
-    round_dir = run / "AutoRefine" / "round_001"
-    round_dir.mkdir(parents=True)
-    model = round_dir / "refined_001.pdb"
-    model.write_text(model_text or bridged_model_text())
-    root_item = registry["checkpoints"][0]
-    append_checkpoint(run, registry, {
-        "id": "refine-001",
-        "parent": "postmr",
-        "kind": "refinement",
-        "status": "REVIEW",
-        "usable": True,
-        "recipe": "AutoRefine/default",
-        "label": None,
-        "model": {**artifact_reference(model, run), "sha256": file_sha256(model),
-                  "size": model.stat().st_size},
-        "observations": root_item.get("observations"),
-        "phases": root_item.get("phases"),
-        "restraints": root_item.get("restraints", []),
-        "metrics": {},
-    })
-    return run
+def write_model(root: Path, text: str | None = None, name: str = "refined_001.pdb") -> Path:
+    path = root / name
+    path.write_text(text or bridged_model_text())
+    return path
 
 
 def _b(line: str) -> float:
@@ -84,12 +54,13 @@ def _b(line: str) -> float:
 
 
 class BStartTests(unittest.TestCase):
-    def test_metal_b_set_to_mean_of_bridged_pair_in_a_new_checkpoint(self):
+    def test_metal_b_set_to_mean_of_bridged_pair(self):
         with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
-            source = run / "AutoRefine" / "round_001" / "refined_001.pdb"
-            registry_before = json.loads((run / "AutoRefine" / "checkpoints.json").read_text())
-            result = prepare_start_model(run, from_checkpoint="refine-001")
+            root = Path(directory)
+            source = write_model(root)
+            original = source.read_bytes()
+            output = root / "AutoFDP" / "run_001"
+            result = prepare_start_model(source, output_directory=output)
 
             (site,) = result.sites
             self.assertEqual((site.site, site.atom_name, site.element), ("B:101", "AG", "AG"))
@@ -102,12 +73,14 @@ class BStartTests(unittest.TestCase):
                 [("B:4", "DU", 40.0), ("A:12", "DC", 60.0)],
             )
 
-            # The source copy is byte-identical; only the metal's B column changed.
-            self.assertEqual(result.output_directory, run / "AutoFDP" / "fdp_001")
-            self.assertEqual(result.source_copy.read_bytes(), source.read_bytes())
+            # The given model is untouched, the copy byte-identical, and only
+            # the metal's B column changed in the start model.
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(result.source_copy, output / "source_model.pdb")
+            self.assertEqual(result.source_copy.read_bytes(), original)
             before = source.read_text().splitlines()
             after = result.start_model.read_text().splitlines()
-            changed = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+            changed = [i for i, (x, y) in enumerate(zip(before, after)) if x != y]
             self.assertEqual(len(before), len(after))
             self.assertEqual(len(changed), 1)
             line = after[changed[0]]
@@ -116,77 +89,42 @@ class BStartTests(unittest.TestCase):
             self.assertEqual(line[:60], before[changed[0]][:60])
             self.assertEqual(line[66:], before[changed[0]][66:])
 
-            # Registered as a model-edit checkpoint; current unchanged.
-            records, current, _ = list_checkpoints(run)
-            self.assertEqual(current, "postmr")
-            registry = json.loads((run / "AutoRefine" / "checkpoints.json").read_text())
-            item = next(c for c in registry["checkpoints"] if c["id"] == "autofdp-001")
-            self.assertEqual(result.checkpoint_id, "autofdp-001")
-            self.assertEqual(
-                (item["kind"], item["parent"], item["recipe"], item["status"], item["usable"]),
-                ("manual", "refine-001", "AutoFDP/b-start", "REVIEW", True),
-            )
-            self.assertEqual(item["model"]["relative_path"], "AutoFDP/fdp_001/start_model.pdb")
-            self.assertEqual(item["model"]["sha256"], file_sha256(result.start_model))
-            self.assertEqual(item["observations"], registry_before["checkpoints"][0]["observations"])
-            self.assertEqual(item["autofdp"]["edits"][0]["b_after"], 50.0)
-
-            report = json.loads(result.report_path.read_text())
-            self.assertEqual(report["workflow"], "autofdp")
-            self.assertEqual(report["status"], "AUTOFDP_PREPARED")
-            self.assertEqual(report["source_checkpoint"], "refine-001")
-            self.assertEqual(report["start_checkpoint"], "autofdp-001")
-            self.assertEqual(report["source_model"]["sha256"], file_sha256(source))
-            self.assertEqual(report["sites"][0]["neighbour_mean_b"], 50.0)
-            self.assertIn("B 379.99 -> 50.00", (result.output_directory / "autofdp.log").read_text())
-
-            # A second run gets its own numbered folder and checkpoint.
-            again = prepare_start_model(run, from_checkpoint="refine-001")
-            self.assertEqual(again.output_directory.name, "fdp_002")
-            self.assertEqual(again.checkpoint_id, "autofdp-002")
-
-    def test_start_must_be_an_autorefine_result(self):
-        # Regression for the 7CU_Ag case: REVIEW rounds are not selected, so
-        # the current checkpoint is still postmr.
-        with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
-            with self.assertRaisesRegex(AutoFDPError, r"postmr checkpoint.*--from \(refine-001\)"):
-                prepare_start_model(run)
-            self.assertFalse((run / "AutoFDP").exists())
-
     def test_plan_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
-            registry = (run / "AutoRefine" / "checkpoints.json").read_bytes()
-            result = prepare_start_model(run, from_checkpoint="refine-001", plan_only=True)
+            root = Path(directory)
+            source = write_model(root)
+            result = prepare_start_model(source)
             self.assertEqual(result.sites[0].b_after, 50.0)
             self.assertIsNone(result.start_model)
-            self.assertFalse((run / "AutoFDP").exists())
-            self.assertEqual((run / "AutoRefine" / "checkpoints.json").read_bytes(), registry)
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["refined_001.pdb"])
 
     def test_site_selection_and_other_b_modes(self):
         with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
+            root = Path(directory)
+            source = write_model(root)
             with self.assertRaisesRegex(AutoFDPError, "No metal site B:102.*metal sites: B:101"):
-                prepare_start_model(run, from_checkpoint="refine-001", sites=["B:102"], plan_only=True)
-            kept = prepare_start_model(run, from_checkpoint="refine-001", b_start="model", plan_only=True)
+                prepare_start_model(source, sites=["B:102"])
+            kept = prepare_start_model(source, b_start="model")
             self.assertEqual(kept.sites[0].b_after, 379.99)
             self.assertIsNone(kept.sites[0].neighbour_b)
-            fixed = prepare_start_model(run, from_checkpoint="refine-001", b_start="123.4")
+            fixed = prepare_start_model(source, b_start="123.4", output_directory=root / "out")
             self.assertEqual(_b(next(line for line in fixed.start_model.read_text().splitlines()
                                      if line.startswith("HETATM"))), 123.4)
             for bad in ("hot", "0", "1000"):
                 with self.subTest(b_start=bad), self.assertRaises(AutoFDPError):
-                    prepare_start_model(run, from_checkpoint="refine-001", b_start=bad, plan_only=True)
+                    prepare_start_model(source, b_start=bad)
 
-    def test_model_without_a_metal_stops(self):
+    def test_model_checks(self):
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             text = "".join(l for l in bridged_model_text().splitlines(keepends=True)
                            if not l.startswith("HETATM"))
-            run = make_refined_run(Path(directory), text)
             with self.assertRaisesRegex(AutoFDPError, "No metal HETATM"):
-                prepare_start_model(run, from_checkpoint="refine-001")
-            self.assertFalse((run / "AutoFDP").exists())
+                prepare_start_model(write_model(root, text, "no_metal.pdb"))
+            with self.assertRaisesRegex(AutoFDPError, "needs a PDB-format model"):
+                prepare_start_model(write_model(root, name="model.cif"))
+            with self.assertRaisesRegex(AutoFDPError, "No model file"):
+                prepare_start_model(root / "missing.pdb")
 
 
 class NeighbourFallbackTests(unittest.TestCase):
@@ -220,35 +158,6 @@ class NeighbourFallbackTests(unittest.TestCase):
             path, line = self._model(root, (40.0, 40.0, 40.0))
             with self.assertRaisesRegex(AutoFDPError, "No nucleotide within 6 A"):
                 surrounding_b(path, line)
-
-
-class AutoFDPCommandTests(unittest.TestCase):
-    def test_command_prints_the_step_one_change(self):
-        # The full command (step 1, then the f'' round and Coot) is tested in
-        # test_autofdp_round.py; --plan shows step 1 alone and writes nothing.
-        with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
-            out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = main(["autofdp", str(run), "--from", "refine-001", "--plan"])
-            self.assertEqual(code, 0, err.getvalue())
-            text = out.getvalue()
-            self.assertIn("B:101 AG (AG), occupancy 0.90: B 379.99 -> 50.00", text)
-            self.assertIn("B:4 DU  mean B 40.00", text)
-            self.assertIn("Plan only: nothing was written.", text)
-            self.assertFalse((run / "AutoFDP").exists())
-
-    def test_command_errors(self):
-        with tempfile.TemporaryDirectory() as directory:
-            run = make_refined_run(Path(directory))
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(main(["autofdp", str(run)]), 1)
-                self.assertEqual(main(["autofdp", str(run), "--from", "refine-001",
-                                       "--element", "B:101=HG"]), 2)
-            self.assertIn("not an AutoRefine result", err.getvalue())
-            self.assertIn("--element is not implemented yet", err.getvalue())
-            self.assertFalse((run / "AutoFDP").exists())
 
 
 if __name__ == "__main__":

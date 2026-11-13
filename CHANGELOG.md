@@ -36,48 +36,43 @@ entries are reconstructed from repository history.
 
 ### Added
 
-- `nasolve autofdp` step 2 (f'' round). After step 1, the command runs one
-  phenix.refine round from the new B start with every strategy off except
-  `group_anomalous` (no coordinate, real-space, B or occupancy refinement; f'
-  of every PostMR anomalous scatterer fixed at its cctbx Henke value for the
-  MTZ-header wavelength, f'' refined from 0; `--cycles`, default 3). The round
-  is an ordinary AutoRefine round and checkpoint (recipe `AutoFDP/fdp`, parent
-  the B start; current checkpoint unchanged). AutoFDP then prints each refined
-  f'' against theory (deviation, and whether it is within `--tolerance`,
-  default 1 e-), checks that coordinates, occupancy and B did not move, and
-  opens the round's model and maps in Coot (`--no-coot` to skip, `--coot`,
-  `--phenix-root`). `--theory ELEMENT=FDP` replaces the theoretical f'' of an
-  element for the comparison. `--from autofdp-NNN` starts from an existing B
-  start and adds another round to its record. `--plan` now also describes the
-  round and runs no Phenix program. Schema: `AutoFDP/fdp_NNN/report.json` gains
-  `rounds` (checkpoint, wavelength, theory table, starting groups, R values,
-  held-parameter check, per-site refined f'', theory and deviation) and status
-  `AUTOFDP_FDP_ROUND_DONE` or `AUTOFDP_FAILED`. Occupancy adjustment is still
-  not implemented. phenix.refine, phenix.python and Coot simulated in tests;
-  not yet run on real data.
-- `nasolve autofdp` step 1 (B start): `nasolve autofdp RUN --from refine-NNN`
-  copies the AutoRefine result to `AutoFDP/fdp_NNN/source_model.pdb`, finds
-  the metal HETATM sites as PostMR does, and sets each one's B to the mean B
-  of its neighbouring nucleotides, chosen with the NARestraints metal-pair
-  search (the bridged pair; otherwise base contacts within 3.6 A; otherwise
-  nucleotides within 6 A). Only the B columns change. The result,
-  `start_model.pdb`, is a new model-edit checkpoint `autofdp-NNN` (kind
-  `manual`, recipe `AutoFDP/b-start`, status REVIEW); the current checkpoint
-  is unchanged. `--plan` prints the changes without writing; `--b-start
-  model|VALUE` keeps the model's B or sets a number; `--element` is refused for
-  now. The start must be an AutoRefine checkpoint (a PostMR or imported one is
-  refused with the list of AutoRefine checkpoints). Schema: new
-  `AutoFDP/fdp_NNN/report.json` (`workflow: "autofdp"`, schema 1, status
-  `AUTOFDP_PREPARED`) and an `autofdp` block on the checkpoint. Pure Python;
-  no Phenix program runs in this step.
-- `nasolve autofdp` is specified but not implemented beyond step 2. It will measure metal
-  occupancy by f'' refinement, following the mmDNA supplements (Adv. Mater.
-  2023, JACS 2023, Small 2025, Sci. Adv. 2026): coordinates, B and occupancy
-  held, f' fixed at theory for the MTZ-header wavelength, f'' refined alone, and
-  occupancy adjusted until f'' is within 1 e- of theory, with an identity check,
-  a B-confirmation round and an optional final all-parameter round. The
-  contract, defaults and open questions are in `docs/autofdp.md`; the later
-  steps are documented stubs in `nasolve.autofdp`.
+- `nasolve autofdp MODEL.pdb DATA.mtz` (steps 1-2 of the f'' occupancy
+  calibration specified in `docs/autofdp.md`, after the mmDNA supplements:
+  Adv. Mater. 2023, JACS 2023, Small 2025, Sci. Adv. 2026). It needs only a
+  starting model and an MTZ; it reads no run report, AutoRefine round or
+  checkpoint. From the MTZ (`phenix.mtz.dump`): the anomalous observations
+  (F(+)/SIGF(+)/F(-)/SIGF(-) or the intensity equivalent; required), the
+  Free-R label (never generated; test value 1 for `R-free-flags`, 0 for the
+  CCP4 labels) and the wavelength (MTZ header, or `--wavelength`). From the
+  model: the metal HETATM sites, found as in PostMR.
+  - Step 1 (B start): the model is copied unchanged to `source_model.pdb` and,
+    with each metal's B set to the atom-weighted mean B of its neighbouring
+    nucleotides (NARestraints metal-pair search: the bridged pair; otherwise
+    base contacts within 3.6 A; otherwise nucleotides within 6 A), to
+    `start_model.pdb`. Only the B columns change. `--site`, `--b-start
+    model|VALUE`.
+  - Step 2 (f'' round): one phenix.refine round on `start_model.pdb` with
+    every strategy off except `group_anomalous` (no coordinate, real-space, B
+    or occupancy refinement; one group per metal site, f' fixed at its cctbx
+    Henke value for the wavelength, f'' refined from 0; `--cycles`, default
+    3), with parameters from AutoRefine's writers and a `--dry_run` check
+    first. AutoFDP prints each refined f'' against theory (deviation, within
+    `--tolerance`, default 1 e-), checks that coordinates, occupancy and B did
+    not move, and opens the round's model and maps in Coot (`--no-coot`,
+    `--coot`). `--theory ELEMENT=FDP` replaces an element's theoretical f''.
+    `--cif` passes dictionaries for residues phenix.refine does not know.
+  - Output: a new `run_NNN` in `AutoFDP/` beside the MTZ (`--output` for
+    another folder). Schema: `report.json` (`workflow: "autofdp"`, schema 2)
+    with portable, checksummed references to the inputs (dataset anchor) and
+    outputs (run anchor), what was read from the MTZ, the theory, the B start
+    and `rounds`; status `AUTOFDP_FDP_ROUND_DONE` or `AUTOFDP_FAILED`.
+    `AutoFDP` joins `AutoMR` and `AutoSolMetal` as a dataset-level run series
+    for path anchoring. `--plan` does the preflight (running only
+    `phenix.mtz.dump` and `phenix.python`) and writes nothing.
+  - Not implemented yet: occupancy adjustment, identity check, B confirmation
+    and the final round (documented stubs in `nasolve.autofdp`); `--element`
+    is refused. phenix.refine, phenix.mtz.dump, phenix.python and Coot are
+    simulated in tests; not yet run on real data.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals

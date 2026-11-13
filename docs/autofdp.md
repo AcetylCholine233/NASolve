@@ -1,18 +1,17 @@
 # AutoFDP: occupancy from f″ refinement
 
 **Status: steps 1 and 2 implemented, later steps specified only (2026-11-13).**
-`nasolve autofdp RUN --from refine-NNN` runs step 1 (B start): it copies an
-AutoRefine result and sets each metal's B to the mean B of its neighbouring
-nucleotides, as a new checkpoint. It then runs step 2 (f″ round): one
-phenix.refine round from that checkpoint with every strategy off except the
-anomalous scatterers, opens the result and its maps in Coot, and prints each
-refined f″ against its theoretical value. Starting from the B start itself
-(`--from autofdp-NNN`) skips step 1. Occupancy adjustment and the steps after
-it (3-6) are documented stubs in `src/nasolve/autofdp.py` that raise
-`NotImplementedError`; options that belong to them are accepted but have no
-effect yet, and `--element` is refused. The defaults marked *(to confirm)*
-follow my reading of the papers below and have not yet been checked by the
-lab.
+`nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
+file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
+(B start) copies the model and sets each metal's B to the mean B of its
+neighbouring nucleotides. Step 2 (f″ round) runs one phenix.refine round on
+that copy with every strategy off except the anomalous scatterers, opens the
+result and its maps in Coot, and prints each refined f″ against its
+theoretical value. Occupancy adjustment and the steps after it (3-6) are
+documented stubs in `src/nasolve/autofdp.py` that raise `NotImplementedError`;
+options that belong to them are accepted but have no effect yet, and
+`--element` is refused. The defaults marked *(to confirm)* follow my reading of
+the papers below and have not yet been checked by the lab.
 
 ## Purpose
 
@@ -46,22 +45,31 @@ occupancy and B and let f′ drift.
 ## Command line
 
 ```
-nasolve autofdp [RUN] [--from CHECKPOINT]
-                [--site SITE]... [--element SITE=ELEMENT]...
-                [--candidates ELEMENT[,ELEMENT...]] [--theory ELEMENT=FDP]...
-                [--tolerance E] [--max-iterations N] [--cycles N]
-                [--b-start surrounding|model|VALUE] [--b-step A2]
+nasolve autofdp MODEL.pdb DATA.mtz
+                [--output DIR] [--site SITE]... [--wavelength A] [--cif FILE]...
+                [--element SITE=ELEMENT]... [--candidates ELEMENT[,ELEMENT...]]
+                [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
+                [--cycles N] [--b-start surrounding|model|VALUE] [--b-step A2]
                 [--occupancy-floor Q] [--map-sigma S]
                 [--no-confirm-b] [--final] [--plan]
                 [--no-coot] [--coot PATH] [--phenix-root PATH]
 ```
 
+For 7CU_Ag, from the dataset folder:
+
+```
+nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_alldata-unique.mtz
+```
+
 | Option | Default | Meaning |
 |---|---|---|
-| `RUN` | active workspace run | AutoMR run folder with a completed PostMR |
-| `--from` | current checkpoint | an AutoRefine checkpoint (step 1 runs first) or an AutoFDP B start such as `autofdp-001` (step 1 is skipped) |
-| `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable |
-| `--element` | element in the model | treat a site as another element, e.g. `B:101=HG`; renames the atom in a new checkpoint |
+| `MODEL.pdb` | required | the starting model, PDB format, for example an AutoRefine `refined_001.pdb`; never changed |
+| `DATA.mtz` | required | reflections with anomalous data and Free-R flags. The two files may be given in either order |
+| `--output` | `AutoFDP` beside the MTZ | folder in which a new `run_NNN` is made |
+| `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable. Every metal site is still refined in the f″ round |
+| `--wavelength` | MTZ header | X-ray wavelength (Å), for an MTZ whose header has none; a disagreement with the header is recorded |
+| `--cif` | none | restraint dictionary for a residue phenix.refine does not know; repeatable; also given to Coot |
+| `--element` | element in the model | treat a site as another element, e.g. `B:101=HG` |
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17`; repeatable. f′ stays the Henke value |
 | `--tolerance` | 1.0 e⁻ | a site matches theory when \|refined f″ − theory\| ≤ tolerance |
@@ -73,44 +81,44 @@ nasolve autofdp [RUN] [--from CHECKPOINT]
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the B-confirmation round |
 | `--final` | off | after convergence, refine XYZ, B, occupancy and f″ together (Adv. Mater. ending) |
-| `--plan` | off | print the sites, B changes and the round to run, writing nothing and running no Phenix program (later: the full preflight) |
+| `--plan` | off | do the preflight and print what was read, without refining or writing anything |
 | `--no-coot` | open Coot | do not open the f″ round's model and maps in Coot |
 | `--coot` | configured Coot | Coot executable or installation |
 | `--phenix-root` | configured Phenix | Phenix installation |
 
 ## What one run does
 
-### 0. Preflight (fails before anything is written)
+### 0. Preflight (implemented; fails before anything is written)
 
-- The run has a completed PostMR. The starting checkpoint exists and is usable.
-- The observations have an anomalous quartet (F(+), SIGF(+), F(−), SIGF(−), or
-  the intensity equivalent) and a Free-R label. Flags are never regenerated.
-- The wavelength comes from the MTZ header, with the AutoSol record as a
-  fallback (as in AutoRefine). Without a wavelength, stop.
-- The sites are the PostMR metal sites plus nucleotide heavy-atom candidates,
-  or those named with `--site`. Each must occur exactly once in the starting
-  model, with a known element.
-- Theoretical f′ and f″ are calculated for every site element and candidate
-  element at the wavelength (cctbx Henke via `phenix.python`), unless
-  `--theory` overrides them. Each theoretical f″ must be positive.
-- The Phenix version is recorded, and `phenix.refine --dry_run` must accept the
-  f″-only parameters.
+`plan_autofdp`. Everything AutoFDP needs comes from the two files:
 
-`--plan` stops here and prints the sites, elements, theoretical values,
-starting occupancy and B, and the settings.
+- **Model**: an existing PDB-format file. Its metal sites (step 1) must be
+  found, each with a known element.
+- **MTZ** (`phenix.mtz.dump`):
+  - the anomalous observations, F(+)/SIGF(+)/F(−)/SIGF(−) or
+    I(+)/SIGI(+)/I(−)/SIGI(−). Without them f″ cannot be refined and AutoFDP
+    stops;
+  - the Free-R label (FreeR_flag, R-free-flags, FREE or FreeR). Flags are
+    never generated. The test value is 1 for Phenix `R-free-flags` and 0 for
+    the CCP4 labels, as AutoRefine uses for STARANISO data;
+  - the wavelength from the MTZ header (the dataset that holds the data, as in
+    AutoSol and AutoRefine), or `--wavelength` when the header has none.
+- **Theory**: f′ and f″ of every metal element at that wavelength (cctbx Henke
+  via the `phenix.python` beside `phenix.refine`), with `--theory` replacing an
+  element's f″. Each theoretical f″ must be positive.
+- `--cif` files must exist.
+
+`--plan` stops here and prints the labels, Free-R flags, wavelength, theory,
+sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
+(read-only) but not `phenix.refine`, and writes nothing.
 
 ### 1. B start (implemented)
 
-`nasolve autofdp RUN --from refine-NNN`:
+`prepare_start_model`:
 
-1. **Source.** The starting checkpoint (`--from`, default the current one)
-   must be an AutoRefine refinement (`kind: refinement`) that is usable. Its
-   model checksum is verified. A PostMR or imported checkpoint is refused with
-   the list of AutoRefine checkpoints. This matters because rounds that end in
-   review are not selected as current, so the current checkpoint is often
-   still `postmr`.
-2. **Copy.** The model is copied unchanged to
-   `AutoFDP/fdp_NNN/source_model.pdb`, and the copy's checksum is checked.
+1. **Source.** The model given on the command line. It is never changed.
+2. **Copy.** The model is copied unchanged to `run_NNN/source_model.pdb`, and
+   the copy's checksum is checked.
 3. **Find the metals.** As in PostMR: NARestraints `find_heavy_atoms`, HETATM
    records with Z >= 21 outside nucleotides, without Li, Be, Na, Mg, Al, K or
    Ca. `--site` restricts the list. No metal, or an unknown `--site`, stops
@@ -130,24 +138,15 @@ starting occupancy and B, and the settings.
    nucleotides (first model), rounded to 0.01 (`--b-start surrounding`).
    `--b-start model` keeps the model's B; a number sets that B. Only the
    B-factor columns (61-66) of the metal lines change. Occupancy, coordinates
-   and every other atom are unchanged. The result is
-   `AutoFDP/fdp_NNN/start_model.pdb`.
-6. **Checkpoint.** The start model is registered as checkpoint `autofdp-NNN`
-   under the source checkpoint. It is a model edit outside phenix.refine, like
-   an imported model, so it has kind `manual`, with recipe `AutoFDP/b-start`,
-   status REVIEW, the parent's observations, phases and restraints, and an
-   `autofdp` block listing the edits. `nasolve show RUN --checkpoint
-   autofdp-NNN` shows it with its parent's maps. The current checkpoint is not
-   changed.
-7. **Record.** `AutoFDP/fdp_NNN/report.json` (status `AUTOFDP_PREPARED`) and
-   `autofdp.log` hold, for each site: occupancy, B before and after, the
-   neighbour rule used, and each neighbour's residue, mean B, atom count and
-   closest contact.
+   and every other atom are unchanged. The result is `run_NNN/start_model.pdb`.
+6. **Record.** `report.json` and `autofdp.log` hold, for each site:
+   occupancy, B before and after, the neighbour rule used, and each
+   neighbour's residue, mean B, atom count and closest contact.
 
-`--plan` does steps 1-5 in memory and prints them, writing nothing. Each run
-gets a new `fdp_NNN` folder and checkpoint; nothing is overwritten.
+`--plan` does steps 3-5 in memory and prints them, writing nothing. Each run
+gets a new `run_NNN` folder; nothing is overwritten.
 
-For 7CU_Ag `refine-002`, the Ag B:101 (B 379.99) bridges B:4 DU (residue mean
+For 7CU_Ag `round_002/refined_001.pdb`, the Ag B:101 (B 379.99) bridges B:4 DU (residue mean
 B 293.1) and A:12 DC (311.6).
 
 AutoFDP expects to start from a model that has already been refined. It does
@@ -157,25 +156,25 @@ AutoFDP, as in the papers.
 
 ### 2. f″ round (implemented)
 
-`fdp_round` in `src/nasolve/autofdp.py`. It starts from an AutoFDP B start
-(the checkpoint step 1 wrote) and runs one phenix.refine round as a normal
-AutoRefine round (`AutoRefine/round_NNN`, checkpoint `refine-NNN`, recipe
-`AutoFDP/fdp`, parent the B start):
+`fdp_round`. One phenix.refine run on `start_model.pdb`, in
+`run_NNN/round_001/`:
 
 - strategy `group_anomalous` only. Coordinates, real-space coordinates, B and
   occupancy are not refined, for any atom, and the X-ray/geometry and ADP
   weight optimisations are off;
-- one anomalous group per PostMR anomalous scatterer (the metal sites, plus any
-  nucleotide heavy atoms), each with f′ fixed at its theoretical value for the
-  wavelength and f″ refined from 0;
-- `--cycles` macrocycles (default 3), the same observations, Free-R flags,
-  restraints and phases as the B start.
+- one anomalous group per metal site of the model (all of them, including any
+  left out of step 1 with `--site`), each with f′ fixed at its theoretical
+  value for the wavelength and f″ refined from 0;
+- `--cycles` macrocycles (default 3), the MTZ's anomalous observations and
+  Free-R flags, no experimental phases, and any `--cif` dictionaries.
 
-Before the round, the B start's metal sites must all be PostMR anomalous
-scatterers, the observations must have F(+)/F(−), and the theoretical values
-are calculated: cctbx Henke at the MTZ-header wavelength through
-`phenix.python` (as in AutoRefine), with `--theory` replacing an element's f″
-for the comparison. f′ is always the Henke value.
+The parameters (`autofdp.params`) and the command come from AutoRefine's
+writers, so labels, Free-R handling and the Phenix 2.x data-manager format are
+the same as in AutoRefine. phenix.refine checks them with `--dry_run` first.
+Geometry restraints are not needed for an f″-only round, so no NARestraints or
+secondary-structure file is passed; phenix.refine still needs a dictionary for
+every residue it does not know, which `--cif` supplies (for example the PostMR
+`ReadySet/prepared_model.ligands.cif`).
 
 After the round, for each group:
 
@@ -185,14 +184,13 @@ After the round, for each group:
 - a check that coordinates, occupancy and B did not change (largest change
   recorded; a warning above 0.01 Å, 0.01 or 0.1 Å²).
 
-The round's model and maps open in Coot (the AutoRefine checkpoint view: model,
-2mFo-DFc and mFo-DFc, and ANOM/PHANOM at 3σ when present), unless `--no-coot`.
-A Coot problem never fails the run; the `nasolve show RUN --checkpoint
-refine-NNN` command is printed instead. The current checkpoint is not changed.
+The round's model and map coefficients open in Coot (2mFo-DFc and mFo-DFc with
+`--auto`, and ANOM/PHANOM at 3σ when present), unless `--no-coot`. Coot's
+files go to `run_NNN/CootGUI/`. A Coot problem never fails the run; the model
+and map paths are printed instead.
 
 Status `AUTOFDP_FDP_ROUND_DONE` when phenix.refine reported a refined f″ for
-every group, otherwise `AUTOFDP_FAILED`. Running AutoFDP again with `--from`
-the same B start adds another round to the same record.
+every group, otherwise `AUTOFDP_FAILED`.
 
 Not yet implemented in this step: the mFo-DFc and anomalous map values at each
 site (`map_value_at_site`).
@@ -219,9 +217,9 @@ Let *q* be the occupancy, *f″ref* the refined value and *f″th* the theory.
   - f″ that barely changes (by less than 0.2 × tolerance *(to confirm)*) after
     an occupancy change: flagged "unresponsive". The JACS paper took this as a
     sign of two metals or a wrong model.
-- AutoFDP writes a checkpoint with the new occupancy/B values (a model-edit
-  checkpoint like step 1's) and runs the next f″ round, for the sites that are not yet
-  converged.
+- AutoFDP writes a model with the new occupancy/B values and runs the next f″
+  round (`round_002`, ...) in the same run folder, for the sites that are not
+  yet converged.
 - After `--max-iterations` rounds, sites that have not converged go to review.
 
 Sites are updated together in each round. Sites closer than 3.5 Å to each other
@@ -243,74 +241,73 @@ the floor and at most 1.0.
   review and suggests `--element SITE=E`.
 
 AutoFDP never changes an element on its own. A new run with `--element`
-renames the atom and residue in a new checkpoint.
+renames the atom and residue in its copy of the model.
 
 ### 5. B confirmation (default on)
 
 Following the Adv. Mater. supplement: one round with occupancy, f′ and f″
-fixed at the converged values, refining only the B of the sites (recipe
-`AutoFDP/confirm-b`). If a site's B moves by more than 25% *(to confirm)*, the
+fixed at the converged values, refining only the B of the sites. If a site's B moves by more than 25% *(to confirm)*, the
 site goes to review.
 
 ### 6. Final round (`--final`, default off)
 
 The Adv. Mater. ending: XYZ, B, occupancy and f″ refined together, with f′
-still fixed at theory (recipe `AutoFDP/final`). The JACS and Small supplements
+still fixed at theory. The JACS and Small supplements
 stop at step 5. AutoFDP reports how far occupancy and f″ move in this round.
 
 ## Outputs
 
-Every phenix.refine run is an ordinary AutoRefine round and checkpoint, so
-`nasolve checkpoints list` and `nasolve show RUN --checkpoint ID` work on every
-step. The AutoFDP record goes to `AutoMR/run_NNN/AutoFDP/fdp_NNN/`, beside
-`AutoRefine/` and `RefineDoctor/`:
+Each run is a new folder, `AutoFDP/run_NNN/` beside the MTZ by default (at the
+same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
+`--output`:
 
-- `source_model.pdb` (unchanged copy of the AutoRefine result) and
+- `source_model.pdb` (unchanged copy of the given model) and
   `start_model.pdb` (metal B set), from step 1;
-- `report.json`, with `workflow: "autofdp"` and schema 1. Implemented so far:
-  the step-1 sites and their B change, and `rounds`, one entry per f″ round
-  with its checkpoint, round folder, cycles, wavelength and its source, the
-  theory table (Henke f′/f″, the f″ used and its source), the starting
-  groups, R-work/R-free, the held-parameter check, and per site the
-  occupancy, B, fixed f′, refined f″, theory, deviation and whether it is
-  within tolerance. Planned, in addition:
-  - the settings, the Phenix version, and the wavelength with its source;
-  - the theory table: f′ and f″ per element, and whether each value came from
-    cctbx Henke or from `--theory`;
-  - the sites and their iterations. For each site and round: the checkpoint,
-    element, occupancy, B, fixed f′, f″ start, refined f″, theory, difference,
-    mFo-DFc and anomalous map σ at the site, and the decision;
-  - the identity check, the final status with a reason per site, and the
-    recommended checkpoint.
-- `autofdp.log`: the human-readable progress.
-- `fdp_table.tsv`: one row per site per round, for plotting.
+- `round_001/`: `autofdp.params`, `command.json`, `phenix.refine.preflight.log`,
+  `phenix.refine.log`, and phenix.refine's outputs (`refined_001.pdb`,
+  `refined_001_map_coeffs.mtz`, ...);
+- `report.json`, with `workflow: "autofdp"` and schema 2:
+  - `inputs`: the model, the MTZ and any `--cif` files, each as a portable
+    reference (anchored to the dataset folder when the run is in
+    `DATASET/AutoFDP/`), with checksum and size; the absolute path at creation
+    is kept as provenance only;
+  - `reflections`: labels, Free-R label and test value, wavelength and its
+    source, resolution;
+  - `settings`, `phenix_version`, and `theory` (per element: Henke f′, the f″
+    used and its source, Henke f″);
+  - `b_start`: the two model files and, per site, occupancy, B before and
+    after, and the neighbours used;
+  - `rounds`: per round, the folder, strategy, starting groups, cycles, R-work
+    and R-free, the held-parameter check, the refined model and map
+    coefficients, and per site the occupancy, B, fixed f′, refined f″, theory,
+    deviation and whether it is within tolerance;
+  - `status`, `message` and `steps`.
 
-PDB files do not store f″. Each AutoFDP checkpoint therefore records its
-anomalous groups (selection, f′, f″, and which values were refined) in its
-checkpoint metadata.
+  Planned, in addition: mFo-DFc and anomalous map σ at each site, the decision
+  per round, the identity check, and the recommended model.
+- `autofdp.log`: the same in human-readable form;
+- `CootGUI/`: Coot's log, backups and map script;
+- planned: `fdp_table.tsv`, one row per site per round, for plotting.
+
+PDB files do not store f″; the refined values are in `report.json`.
 
 ## Status and exit codes
 
 | Status | Exit | When |
 |---|---|---|
-| `AUTOFDP_PREPARED` | 0 | step 1 done (`--plan` or the step-1 record before a round) |
+| `AUTOFDP_PREPARED` | - | in `report.json` between step 1 and the end of the round |
 | `AUTOFDP_FDP_ROUND_DONE` | 0 | step 2 done: one f″ round with a refined f″ for every group (until occupancy adjustment exists) |
 | `AUTOFDP_CONVERGED` | 0 | every site within tolerance and B confirmation passed |
 | `AUTOFDP_REVIEW` | 2 | any site not converged, hit an occupancy bound, unresponsive, coupled, ambiguous in identity, or with B drift; per-site reasons are in the report |
-| `AUTOFDP_FAILED` | 1 | phenix.refine failed; completed rounds and checkpoints are kept |
-| preflight error | 1 | before any folder or checkpoint is written |
-
-## Checkpoints
-
-AutoFDP never changes the current checkpoint, the same as Refine Doctor. On
-`AUTOFDP_CONVERGED`, it bookmarks the final checkpoint as `autofdp-NNN` and
-prints `nasolve checkpoints use RUN autofdp-NNN`.
+| `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″; the run folder is kept |
+| preflight error | 1 | before any folder is written |
 
 ## Interaction with other commands
 
-- `nasolve autorefine --from <AutoFDP checkpoint>` should keep the calibrated
-  f′/f″ fixed instead of refining both again from 0. This needs a small
-  AutoRefine change when AutoFDP is implemented.
+- AutoFDP is independent of AutoMR, PostMR and AutoRefine: it reads no run
+  report or checkpoint and writes nothing outside its own run folder. A
+  NASolve dataset's MTZ and an AutoRefine `refined_NNN.pdb` are the usual
+  inputs, but any model and MTZ with anomalous data work.
 - Refine Doctor is unchanged.
 - Campaigns do not run AutoFDP.
 
@@ -318,11 +315,10 @@ prints `nasolve checkpoints use RUN autofdp-NNN`.
 
 - regenerates Free-R flags;
 - refines coordinates, or refines f′, during f″ rounds;
-- changes atoms other than the sites;
+- changes the given model or MTZ, or atoms other than the sites in its copy;
 - changes an element without `--element`;
 - places or deletes sites;
-- overwrites or deletes earlier rounds or checkpoints;
-- changes the current checkpoint.
+- writes outside its own run folder, or overwrites an earlier run.
 
 ## Questions for the lab before implementation
 
