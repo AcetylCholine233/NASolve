@@ -5,7 +5,7 @@ anomalous group it reads the site's occupancy q from the input model and
 reports f'' = a + S/q, which is how a real f''-only refinement behaves when
 the anomalous signal fixes q x f''. So the loop, the proportional and secant
 steps, the bounds and the per-site limit run end to end. phenix.refine,
-phenix.ready_set, phenix.mtz.dump, phenix.python and Coot are simulated.
+phenix.ready_set, phenix.mtz.dump and phenix.python are simulated.
 """
 
 import json
@@ -461,12 +461,12 @@ class OccupancyLoopTests(unittest.TestCase):
 class OccupancyCommandTests(unittest.TestCase):
     _main = AutoFDPCommandTests._main
 
-    def test_command_prints_each_adjustment_and_opens_the_last_round(self):
+    def test_command_prints_each_adjustment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.5, 0.6)})
-            code, out, err, launched = self._main(
+            code, out, err, coot_lookup = self._main(
                 root, [str(model), str(mtz), "--tolerance", "0.1"], refine=refine
             )
             self.assertEqual(code, 0, err)
@@ -486,7 +486,8 @@ class OccupancyCommandTests(unittest.TestCase):
             for value in ("0.90 -> 0.39", "2.04", "+0.01", "after 2 adjustment(s)"):
                 self.assertIn(value, row)
             run = mtz.parent.resolve() / "AutoFDP" / "run_001"
-            self.assertEqual(launched.call_args.args[0], run / "round_003" / "refined_001.pdb")
+            coot_lookup.assert_not_called()
+            self.assertFalse((run / "CootGUI").exists())
             self.assertIn(f"Model with the final occupancies: {run / 'final_model.pdb'}", out)
 
     def test_command_prints_restore_rounds(self):
@@ -497,7 +498,7 @@ class OccupancyCommandTests(unittest.TestCase):
                 SILVER: (0.0, 1.218), MERCURY: {"S": 3.03, "peak": 0.35},
             })
             code, out, err, _ = self._main(
-                root, [str(model), str(mtz), "--tolerance", "0.3", "--no-coot"], refine=refine
+                root, [str(model), str(mtz), "--tolerance", "0.3"], refine=refine
             )
             self.assertEqual(code, 2, err)
             self.assertIn("round_004  C:1 HG  occupancy 0.17 -> 0.30 (restore)", out)
@@ -510,7 +511,7 @@ class OccupancyCommandTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.0, 2.436)})
             code, out, err, _ = self._main(
-                root, [str(model), str(mtz), "--tolerance", "0.1", "--no-coot"], refine=refine
+                root, [str(model), str(mtz), "--tolerance", "0.1"], refine=refine
             )
             self.assertEqual(code, 2, err)
             self.assertIn("AUTOFDP_REVIEW", out)

@@ -19,11 +19,14 @@ class AutoFDPSpecificationTests(unittest.TestCase):
                        "--site", "--element", "--candidates", "--theory",
                        "--tolerance", "--max-iterations", "--cycles", "--b-start",
                        "--b-step", "--occupancy-floor", "--map-sigma",
-                       "--no-confirm-b", "--final", "--plan", "--no-coot",
-                       "--coot", "--phenix-root"):
+                       "--no-confirm-b", "--final", "--plan", "--phenix-root"):
             self.assertIn(option, help_text)
+        self.assertNotIn("--coot", help_text)        # AutoFDP never opens Coot
+        self.assertNotIn("--no-coot", help_text)     # still accepted, not shown
         flowing = " ".join(help_text.split())  # argparse wraps lines
         self.assertIn("Steps 1 to 3 are implemented", flowing)
+        self.assertIn("Coot is not opened: the maps of an f''-only round are not diagnostic",
+                      flowing)
         self.assertIn("NOT IMPLEMENTED YET", flowing)
 
     def test_engine_functions_are_documented_stubs(self):

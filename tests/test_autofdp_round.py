@@ -3,7 +3,7 @@
 (occupancy adjustment) is in test_autofdp_occupancy.py; here the stand-in f''
 does not depend on occupancy.
 
-phenix.refine, phenix.mtz.dump, phenix.python and Coot are simulated. The
+phenix.refine, phenix.mtz.dump and phenix.python are simulated. The
 stand-in phenix.refine reads the anomalous groups NASolve wrote into its
 parameters and echoes them, with a chosen refined f'', in phenix.refine's log
 format, so the round, the f'' comparison and the record run end to end.
@@ -17,7 +17,6 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from nasolve.autofdp import (
@@ -34,8 +33,6 @@ from nasolve.autofdp import (
 )
 from nasolve.cli import main
 from nasolve.config import AppConfig
-from nasolve.coot_runtime import CootInstallation
-from nasolve.coot_view import CootViewError, launch_coot_files
 from nasolve.model_assessment import file_sha256
 from nasolve.phenix_runtime import PhenixInstallation
 
@@ -504,7 +501,9 @@ class ReadySetStepTests(unittest.TestCase):
 
 
 class AutoFDPCommandTests(unittest.TestCase):
-    def _main(self, root: Path, arguments: list[str], launch=None, dump=None, refine=None):
+    def _main(self, root: Path, arguments: list[str], dump=None, refine=None):
+        """Run ``nasolve autofdp``; the last value is a mock that fails the
+        test if AutoFDP looks for Coot (it never opens Coot)."""
         installation = PhenixInstallation(
             root=None, setup_script=None, version=PHENIX_21,
             executables={"phenix.refine": refine or make_fdp_refine(root),
@@ -512,29 +511,23 @@ class AutoFDPCommandTests(unittest.TestCase):
                          "phenix.mtz.dump": dump or make_mtz_dump(root, wavelength=1.00743)},
             environment=ENV, source="test",
         )
-        coot = root / "coot"
-        coot.write_text("#!/bin/sh\n")
-        launch = launch or (lambda model, maps, *args, **kwargs: SimpleNamespace(
-            pid=4321, model_path=model, map_path=maps, log_path=Path("coot_gui.log"),
-        ))
         out, err = io.StringIO(), io.StringIO()
         with (
             patch("nasolve.cli.load_config", return_value=AppConfig()),
             patch("nasolve.cli.discover_phenix", return_value=installation),
             patch("nasolve.cli.remember_phenix"), patch("nasolve.cli.save_config"),
-            patch("nasolve.cli.discover_coot", return_value=CootInstallation(coot, "test", "fixture")),
-            patch("nasolve.cli.remember_coot"),
-            patch("nasolve.cli.launch_coot_files", side_effect=launch) as launched,
+            patch("nasolve.cli.discover_coot",
+                  side_effect=AssertionError("AutoFDP must not look for Coot")) as coot_lookup,
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
         ):
             code = main(["autofdp", *arguments])
-        return code, out.getvalue(), err.getvalue(), launched
+        return code, out.getvalue(), err.getvalue(), coot_lookup
 
-    def test_command_runs_both_steps_and_opens_coot(self):
+    def test_command_runs_both_steps_without_coot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
-            code, out, err, launched = self._main(root, [str(model), str(mtz)])
+            code, out, err, coot_lookup = self._main(root, [str(model), str(mtz)])
             self.assertEqual(code, 0, err)
             for text in (
                 "Observations: F(+),SIGF(+),F(-),SIGF(-); Free-R FreeR_flag (test value 0)",
@@ -546,7 +539,6 @@ class AutoFDPCommandTests(unittest.TestCase):
                 "AUTOFDP_CONVERGED",
                 "every site already within +/-1 e- of theory; no occupancy changed",
                 "Model with the final occupancies: ",
-                "Opened Coot (PID 4321) with round_001/refined_001.pdb and refined_001_map_coeffs.mtz",
                 "ReadySet (no hydrogens): updated model; atoms, coordinates and B unchanged",
                 "curated dictionaries given: DU",
                 "restraints for phenix.refine: ReadySet/DU.cif",
@@ -556,39 +548,33 @@ class AutoFDPCommandTests(unittest.TestCase):
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG"))
             for value in ("0.90", "50.00", "-0.12", "2.60", "2.03", "+0.57", "within +/-1"):
                 self.assertIn(value, row)
+            # The maps of an f''-only round are not diagnostic: no Coot at all.
             run = mtz.parent.resolve() / "AutoFDP" / "run_001"
-            args, kwargs = launched.call_args
-            self.assertEqual(args[0], run / "round_001" / "refined_001.pdb")
-            self.assertEqual(args[1], run / "round_001" / "refined_001_map_coeffs.mtz")
-            self.assertEqual(kwargs["working_directory"], run / "CootGUI")
-            self.assertEqual(kwargs["dictionaries"], (run / "ReadySet" / "DU.cif",))
+            coot_lookup.assert_not_called()
+            self.assertNotIn("Coot", out)
+            self.assertFalse((run / "CootGUI").exists())
 
-            # Either order, without Coot, with a theory override: a new run folder.
-            code, out, err, launched = self._main(
+            # Either order, with a theory override: a new run folder. The old
+            # --no-coot is still accepted and changes nothing.
+            code, out, err, coot_lookup = self._main(
                 root, [str(mtz), str(model), "--no-coot", "--theory", "AG=2.06"]
             )
             self.assertEqual(code, 0, err)
-            launched.assert_not_called()
+            coot_lookup.assert_not_called()
             self.assertIn("Theory: AG user (--theory)", out)
-            self.assertIn("Maps: " + str(mtz.parent.resolve() / "AutoFDP" / "run_002"), out)
-
-    def test_coot_problem_does_not_fail_the_run(self):
-        def broken(*args, **kwargs):
-            raise CootViewError("fixture: no display")
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            model, mtz = make_inputs(root)
-            code, out, err, _ = self._main(root, [str(model), str(mtz)], launch=broken)
-            self.assertEqual(code, 0)
-            self.assertIn("Coot view error: fixture: no display", err)
-            self.assertIn("Model: ", out)
+            self.assertIn(
+                "Model with the final occupancies: "
+                + str(mtz.parent.resolve() / "AutoFDP" / "run_002" / "final_model.pdb"), out)
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exit:
+                main(["autofdp", str(model), str(mtz), "--coot", "/opt/coot"])
+            self.assertEqual(exit.exception.code, 2)
+            self.assertIn("unrecognized arguments: --coot", err.getvalue())
 
     def test_plan_refines_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
-            code, out, err, launched = self._main(root, [str(model), str(mtz), "--plan"])
+            code, out, err, coot_lookup = self._main(root, [str(model), str(mtz), "--plan"])
             self.assertEqual(code, 0, err)
             self.assertIn("B 379.99 -> 50.00", out)
             self.assertIn("Then: ReadySet on the start model (no hydrogens)", out)
@@ -596,7 +582,7 @@ class AutoFDPCommandTests(unittest.TestCase):
             self.assertIn("then up to 5 occupancy adjustment(s) per site", out)
             self.assertFalse((root / "readyset_args.json").exists())
             self.assertIn("Plan only", out)
-            launched.assert_not_called()
+            coot_lookup.assert_not_called()
             self.assertFalse((mtz.parent / "AutoFDP").exists())
             self.assertFalse((root / "received_args.json").exists())
 
@@ -623,35 +609,6 @@ class AutoFDPCommandTests(unittest.TestCase):
             code, _, err, _ = self._main(root, [str(model), str(mtz)], dump=make_mtz_dump(root))
             self.assertEqual(code, 1)
             self.assertIn("give the wavelength with --wavelength", err)
-
-
-class CootFilesTests(unittest.TestCase):
-    def test_opens_a_model_and_its_maps_outside_a_run(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            model, maps, dictionary = root / "refined_001.pdb", root / "maps.mtz", root / "DU.cif"
-            for path in (model, maps, dictionary):
-                path.write_text("x\n")
-            coot = root / "coot"
-            coot.write_text("#!/bin/sh\n")
-            calls = []
-            view = launch_coot_files(
-                model, maps, coot, working_directory=root / "run_001" / "CootGUI",
-                source="AutoFDP f''-only round", dictionaries=[dictionary],
-                launcher=lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(pid=7),
-            )
-            command, kwargs = calls[0]
-            self.assertEqual(command[1:3], ["--pdb", str(model.resolve())])
-            self.assertIn("--auto", command)
-            self.assertEqual(command[command.index("--auto") + 1], str(maps.resolve()))
-            self.assertEqual(command[command.index("--dictionary") + 1], str(dictionary.resolve()))
-            self.assertEqual(kwargs["cwd"], (root / "run_001" / "CootGUI").resolve())
-            record = json.loads((view.working_directory / "launch.json").read_text())
-            self.assertEqual((record["pid"], record["stage"]), (7, "files"))
-            self.assertIn("ANOM", (view.working_directory / "load_anomalous_map.py").read_text())
-            with self.assertRaisesRegex(CootViewError, "map coefficients is missing"):
-                launch_coot_files(model, root / "none.mtz", coot,
-                                  working_directory=root / "w", source="x")
 
 
 if __name__ == "__main__":

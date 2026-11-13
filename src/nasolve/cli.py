@@ -35,7 +35,7 @@ from .coot_runtime import (
     remember_coot,
 )
 from .coot_view import (
-    CootViewError, launch_coot_files, launch_coot_view, resolve_run, resolve_view_profile,
+    CootViewError, launch_coot_view, resolve_run, resolve_view_profile,
 )
 from .backbone import BackboneError, requested_backbone_policy, write_backbone_review
 from .phenix_runtime import (
@@ -286,9 +286,9 @@ def build_parser() -> argparse.ArgumentParser:
             "one furthest from theory first, lower the occupancy if f'' is below "
             "theory or raise it if above, and run the same round again, until f'' is "
             "within the tolerance or the site has had --max-iterations adjustments "
-            "(step 3). The last round's model and maps open in Coot. The identity "
-            "check, B confirmation and final round are NOT IMPLEMENTED YET. See "
-            "docs/autofdp.md."
+            "(step 3). Coot is not opened: the maps of an f''-only round are not "
+            "diagnostic. The identity check, B confirmation and final round are NOT "
+            "IMPLEMENTED YET. See docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -375,13 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
              "wavelength, theory, B changes) without refining or writing anything",
     )
     autofdp.add_argument(
-        "--no-coot", action="store_true",
-        help="do not open the last f'' round's model and maps in Coot",
-    )
-    autofdp.add_argument(
-        "--coot", type=Path, metavar="PATH",
-        help="Coot executable or installation (default: the configured Coot)",
-    )
+        "--no-coot", action="store_true", help=argparse.SUPPRESS,
+    )  # accepted for old commands; AutoFDP never opens Coot
     autofdp.add_argument(
         "--phenix-root", type=Path, metavar="PATH",
         help="Phenix installation (default: the configured Phenix)",
@@ -1798,40 +1793,6 @@ def _print_fdp_round(result, max_iterations: int) -> None:
     print(f"Run folder: {result.run_directory}")
 
 
-def _open_fdp_view(args: argparse.Namespace, result) -> None:
-    """Open the last f'' round's model and maps; a Coot problem never fails the run."""
-    round_result = result.round
-    if round_result.model_path is None or round_result.map_coefficients is None:
-        return
-    if args.no_coot:
-        print(f"Model: {round_result.model_path}")
-        print(f"Maps: {round_result.map_coefficients}")
-        return
-    try:
-        config = load_config()
-        coot = discover_coot(config, explicit=args.coot)
-        remember_coot(config, coot)
-        save_config(config)
-        view = launch_coot_files(
-            round_result.model_path,
-            round_result.map_coefficients,
-            coot.executable,
-            working_directory=result.run_directory / "CootGUI",
-            source=(f"AutoFDP f''-only round {round_result.directory.name} "
-                    f"({result.run_directory.name})"),
-            dictionaries=result.readyset.dictionaries,
-        )
-    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
-        print(f"Coot view error: {exc}", file=sys.stderr)
-        print(f"Model: {round_result.model_path}")
-        print(f"Maps: {round_result.map_coefficients}")
-        return
-    print(f"Opened Coot (PID {view.pid}) with {round_result.directory.name}/{view.model_path.name} "
-          f"and {view.map_path.name}")
-    print("Anomalous map: Coot also opens ANOM/PHANOM at 3 sigma when present")
-    print(f"Coot log: {view.log_path}")
-
-
 def _autofdp(args: argparse.Namespace) -> int:
     """AutoFDP steps 1 to 3 from a model and an MTZ."""
     from .autofdp import (
@@ -1859,8 +1820,6 @@ def _autofdp(args: argparse.Namespace) -> int:
             raise AutoFDPError("--max-iterations must be 0 or more")
         if not (math.isfinite(args.occupancy_floor) and 0 < args.occupancy_floor < 1):
             raise AutoFDPError("--occupancy-floor must be above 0 and below 1")
-        if args.coot is not None and args.no_coot:
-            raise AutoFDPError("--coot and --no-coot cannot be combined")
         config = load_config()
         phenix = discover_phenix(config, explicit=args.phenix_root)
         if args.phenix_root is None:
@@ -1904,7 +1863,6 @@ def _autofdp(args: argparse.Namespace) -> int:
         print(f"AutoFDP error: {exc}", file=sys.stderr)
         return 1
     _print_fdp_round(result, args.max_iterations)
-    _open_fdp_view(args, result)
     print("Not implemented yet: the identity check, B confirmation and the final "
           "all-parameter round.")
     if result.status == STATUS_CONVERGED:

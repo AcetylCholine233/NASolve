@@ -11,8 +11,8 @@ f″ with its theoretical value. Step 3 (occupancy adjustment) takes the sites
 one at a time, the one furthest from theory first, lowers the occupancy when
 f″ is below theory or raises it when above, and runs the same round again,
 until f″ is within the tolerance or the site has had `--max-iterations`
-adjustments (default 5). The last round's model and maps open in Coot. The
-identity check, B confirmation and final round (steps 4-6) are documented stubs
+adjustments (default 5). Coot is not opened: the maps of an f″-only round
+are not diagnostic. The identity check, B confirmation and final round (steps 4-6) are documented stubs
 in `src/nasolve/autofdp.py` that raise `NotImplementedError`; options that
 belong to them are accepted but have no effect yet, and `--element` is refused.
 The defaults marked *(to confirm)* follow my reading of the papers below and
@@ -57,8 +57,7 @@ nasolve autofdp MODEL.pdb DATA.mtz
                 [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
                 [--cycles N] [--b-start surrounding|model|VALUE] [--b-step A2]
                 [--occupancy-floor Q] [--map-sigma S]
-                [--no-confirm-b] [--final] [--plan]
-                [--no-coot] [--coot PATH] [--phenix-root PATH]
+                [--no-confirm-b] [--final] [--plan] [--phenix-root PATH]
 ```
 
 For 7CU_Ag, from the dataset folder:
@@ -74,7 +73,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--output` | `AutoFDP` beside the MTZ | folder in which a new `run_NNN` is made |
 | `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable. Every metal site is still refined in the f″ round |
 | `--wavelength` | MTZ header | X-ray wavelength (Å), for an MTZ whose header has none; a disagreement with the header is recorded |
-| `--cif` | none | restraint dictionary to give ReadySet (and phenix.refine) for a residue; repeatable; also given to Coot. ReadySet makes dictionaries for other unknown residues, and NASolve's curated ones are added automatically |
+| `--cif` | none | restraint dictionary to give ReadySet (and phenix.refine) for a residue; repeatable. ReadySet makes dictionaries for other unknown residues, and NASolve's curated ones are added automatically |
 | `--element` | element in the model | treat a site as another element, e.g. `B:101=HG` |
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17`; repeatable. f′ stays the Henke value |
@@ -88,8 +87,6 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--no-confirm-b` | confirm on | skip the B-confirmation round |
 | `--final` | off | after convergence, refine XYZ, B, occupancy and f″ together (Adv. Mater. ending) |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
-| `--no-coot` | open Coot | do not open the last f″ round's model and maps in Coot |
-| `--coot` | configured Coot | Coot executable or installation |
 | `--phenix-root` | configured Phenix | Phenix installation |
 
 ## What one run does
@@ -283,10 +280,11 @@ adjusted). The last round's model is copied to
 `final_model.pdb` in both cases; its occupancies are the measured ones only for
 converged sites.
 
-The last round's model and map coefficients open in Coot (2mFo-DFc and mFo-DFc
-with `--auto`, and ANOM/PHANOM at 3σ when present), unless `--no-coot`. Coot's
-files go to `run_NNN/CootGUI/`. A Coot problem never fails the run; the model
-and map paths are printed instead. The command prints round_001's table, one
+AutoFDP does not open Coot (since 2026-11-13; before, the last round's model
+and maps opened): with every strategy off except the anomalous scatterers, the
+round's 2mFo-DFc, mFo-DFc and anomalous maps are not diagnostic. `--coot` was
+removed; `--no-coot` is still accepted and does nothing. The command prints
+round_001's table, one
 line per adjustment or restore round (site, occupancy before → after,
 method, f″ against theory, and why a site was restored), and a final table with each site's start and final occupancy and the
 reason it stopped.
@@ -379,8 +377,6 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
   Planned, in addition: mFo-DFc and anomalous map σ at each site and the
   identity check.
 - `autofdp.log`: the same in human-readable form;
-- `CootGUI/`: Coot's log, backups and map script (the last round's model and
-  maps are opened);
 - planned: `fdp_table.tsv`, one row per site per round, for plotting.
 
 PDB files do not store f″; the refined values are in `report.json`.
@@ -412,7 +408,8 @@ PDB files do not store f″; the refined values are in `report.json`.
 - changes the given model or MTZ, or atoms other than the sites in its copy;
 - changes an element without `--element`;
 - places or deletes sites;
-- writes outside its own run folder, or overwrites an earlier run.
+- writes outside its own run folder, or overwrites an earlier run;
+- opens Coot (the f″-only maps are not diagnostic).
 
 ## Questions for the lab before implementation
 

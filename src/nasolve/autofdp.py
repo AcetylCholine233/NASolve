@@ -697,7 +697,7 @@ class ReadySetResult:
     """AutoFDP's ReadySet step: restraint dictionaries for the f'' round."""
 
     model: Path                       # the model phenix.refine gets (B from step 1 kept)
-    dictionaries: tuple[Path, ...]    # restraint CIFs for phenix.refine (and Coot)
+    dictionaries: tuple[Path, ...]    # restraint CIFs for phenix.refine
     generated: Path | None            # ReadySet's <model>.ligands.cif
     input_dictionaries: Path | None   # curated + --cif dictionaries given to ReadySet
     curated_codes: tuple[str, ...]    # NASolve-curated residues found in the model

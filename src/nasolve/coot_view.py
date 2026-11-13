@@ -1048,42 +1048,6 @@ def launch_coot_view(
     )
 
 
-def launch_coot_files(
-    model: Path,
-    map_coefficients: Path,
-    coot_executable: Path,
-    *,
-    working_directory: Path,
-    source: str,
-    dictionaries: Sequence[Path] = (),
-    environment: Mapping[str, str] | None = None,
-    launcher: Callable[..., object] = subprocess.Popen,
-) -> CootViewResult:
-    """Open a model and its map coefficients, outside any NASolve run.
-
-    Coot's working files (log, backups, map script) go to
-    ``working_directory``. As for run views, Coot opens the 2mFo-DFc and
-    mFo-DFc maps with ``--auto`` and the ANOM/PHANOM anomalous map at 3 sigma
-    when the file has it.
-    """
-    model = _required_file(model.expanduser().resolve(), "model")
-    map_path = _required_file(map_coefficients.expanduser().resolve(), "map coefficients")
-    root = working_directory.expanduser().resolve()
-    profile = ViewProfile(
-        stage="files",
-        model_path=model,
-        map_path=map_path,
-        extra_model_paths=(),
-        dictionary_paths=tuple(
-            _required_file(path.expanduser().resolve(), "dictionary") for path in dictionaries
-        ),
-        source=source,
-        map_source=f"map coefficients {map_path.name}",
-        anomalous_map_paths=(map_path,),
-    )
-    return _launch_profile(root.parent, profile, root, root, coot_executable, environment, launcher)
-
-
 def _launch_profile(
     run: Path,
     profile: ViewProfile,
@@ -1204,7 +1168,6 @@ def _launch_profile(
 __all__ = [
     "CootViewError",
     "CootViewResult",
-    "launch_coot_files",
     "MetalMerge",
     "ViewProfile",
     "find_last_run",

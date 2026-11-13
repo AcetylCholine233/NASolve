@@ -92,8 +92,7 @@ entries are reconstructed from repository history.
     3), with parameters from AutoRefine's writers and a `--dry_run` check
     first. AutoFDP prints each refined f'' against theory (deviation, within
     `--tolerance`, default 1 e-), checks that coordinates, occupancy and B did
-    not move, and opens the round's model and maps in Coot (`--no-coot`,
-    `--coot`). `--theory ELEMENT=FDP` replaces an element's theoretical f''.
+    not move. `--theory ELEMENT=FDP` replaces an element's theoretical f''.
     `--cif` adds dictionaries for ReadySet and phenix.refine. Schema:
     `report.json` gains `readyset` and `steps.readyset`.
   - Step 3 (occupancy adjustment): the calibrated sites one at a time, the one
@@ -107,9 +106,8 @@ entries are reconstructed from repository history.
     cycles and dictionaries; f'' from 0). A site stops when it is within
     `--tolerance`, after `--max-iterations` adjustments (now default 5, per
     site; 0 runs round_001 only), or at full occupancy / the floor with f''
-    still on the wrong side. The last round's model is `final_model.pdb` and
-    opens in Coot with its maps; the command prints every adjustment and a
-    final table. Status `AUTOFDP_CONVERGED` (exit 0) when every calibrated
+    still on the wrong side. The last round's model is `final_model.pdb`;
+    the command prints every adjustment and a final table. Status `AUTOFDP_CONVERGED` (exit 0) when every calibrated
     site is within tolerance, `AUTOFDP_REVIEW` (exit 2) with per-site reasons
     otherwise, `AUTOFDP_FAILED` (exit 1) when a round fails. Schema (additive,
     still 2): each `rounds` entry gains `input_model`, `adjusted_site`,
@@ -141,8 +139,14 @@ entries are reconstructed from repository history.
     `phenix.mtz.dump` and `phenix.python`) and writes nothing.
   - Not implemented yet: the identity check, B confirmation, the final round
     and the map-based choice between B and occupancy (documented stubs in
-    `nasolve.autofdp`); `--element` is refused. phenix.refine, phenix.mtz.dump, phenix.python and Coot are
-    simulated in tests; not yet run on real data.
+    `nasolve.autofdp`); `--element` is refused. phenix.refine, phenix.mtz.dump
+    and phenix.python are simulated in tests; first run on real data
+    2026-11-13 (PdUHgPdU, Phenix 2.2.1).
+  - No Coot: AutoFDP no longer opens the last round's model and maps in Coot
+    (it did up to a70def8 on `ginkgo`), because the maps of an f''-only
+    round are not diagnostic. `--coot` is removed; `--no-coot` is still
+    accepted and does nothing; no `CootGUI/` folder is written. The
+    AutoFDP-only `coot_view.launch_coot_files` is removed.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals
