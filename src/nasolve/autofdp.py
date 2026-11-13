@@ -20,11 +20,16 @@ Implemented:
   phenix.refine round on ReadySet's model with every strategy off except
   ``group_anomalous`` (f' fixed at theory, f'' refined from 0), and each
   refined f'' compared with its theoretical value.
+- Step 3 (occupancy adjustment): the site furthest from theory first, one
+  site at a time, its occupancy changed (``propose_occupancy``: lower when
+  f'' is below theory, higher when above) and the same f''-only round run
+  again, until its f'' is within the tolerance or it has had
+  ``max_iterations`` adjustments; then the next site.
 
-``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 and 2.
-Everything after that (occupancy adjustment, identity check, B confirmation,
-final round) is a documented stub that raises NotImplementedError. The full
-contract, defaults and open questions are in docs/autofdp.md.
+``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 to 3.
+The identity check, B confirmation and final round are documented stubs that
+raise NotImplementedError. The full contract, defaults and open questions are
+in docs/autofdp.md.
 
 Method (supplements of the mmDNA papers, after Liu & Hendrickson 2013):
 hold coordinates, B and occupancy; fix f' at its theoretical value for the
@@ -53,10 +58,15 @@ WORKFLOW = "autofdp"
 SCHEMA_VERSION = 2
 
 STATUS_PREPARED = "AUTOFDP_PREPARED"           # step 1 written, round not yet run
-STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"    # exit 0; one f''-only round
-STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0 (later steps)
-STATUS_REVIEW = "AUTOFDP_REVIEW"                # exit 2 (later steps)
+STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"    # one f''-only round finished
+STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0: every site within tolerance
+STATUS_REVIEW = "AUTOFDP_REVIEW"                # exit 2: a site did not converge
 STATUS_FAILED = "AUTOFDP_FAILED"                # exit 1
+
+#: One occupancy adjustment changes a site's occupancy at most this many fold.
+OCCUPANCY_MAX_RATIO = 4.0
+#: Default number of occupancy adjustments per site (``--max-iterations``).
+DEFAULT_MAX_ITERATIONS = 5
 
 NOT_IMPLEMENTED_MESSAGE = (
     "this AutoFDP step is specified but not implemented yet; see docs/autofdp.md "
@@ -88,7 +98,7 @@ class AutoFDPSettings:
     candidates: tuple[str, ...] = ("AG", "HG")        # plus the model's elements
     theory: Mapping[str, float] = field(default_factory=dict)   # ELEMENT -> f''
     tolerance: float = 1.0                            # e-
-    max_iterations: int = 8
+    max_iterations: int = DEFAULT_MAX_ITERATIONS     # occupancy adjustments per site
     cycles: int = 3
     b_start: str = "surrounding"                      # surrounding | model | number
     b_step: float = 20.0                              # A^2
@@ -633,6 +643,12 @@ def _site_key(site: str, atom_name: str, alternate: str | None) -> tuple[str, ..
     return (chain if chain != "_" else "", resseq, icode, atom_name, alternate or "")
 
 
+def _record_key(line: str) -> tuple[str, ...]:
+    """(chain, resseq, icode, name, altloc) of an ATOM/HETATM line."""
+    return (line[21:22].strip(), line[22:26].strip(), line[26:27].strip(),
+            line[12:16].strip(), line[16:17].strip())
+
+
 def _coordinate_records(path: Path) -> dict[tuple[str, ...], tuple[float, ...]]:
     """(chain, resseq, icode, name, altloc) -> (x, y, z, occupancy, B)."""
     records: dict[tuple[str, ...], tuple[float, ...]] = {}
@@ -641,8 +657,7 @@ def _coordinate_records(path: Path) -> dict[tuple[str, ...], tuple[float, ...]]:
             break
         if not line.startswith(("ATOM  ", "HETATM")):
             continue
-        key = (line[21:22].strip(), line[22:26].strip(), line[26:27].strip(),
-               line[12:16].strip(), line[16:17].strip())
+        key = _record_key(line)
         try:
             records[key] = tuple(float(line[a:b]) for a, b in
                                  ((30, 38), (38, 46), (46, 54), (54, 60), (60, 66)))
@@ -863,6 +878,7 @@ class FdpSiteResult:
     theory_source: str
     deviation: float | None       # refined - theory
     within_tolerance: bool | None
+    alternate: str | None = None  # altloc of the site atom, if any
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1089,7 @@ def fdp_round(
             theory_source=str(theory[element]["source"]),
             deviation=deviation,
             within_tolerance=None if deviation is None else abs(deviation) <= tolerance,
+            alternate=alternate,
         ))
 
     if returncode != 0 or model_path is None:
@@ -1111,6 +1128,178 @@ def fdp_round(
 
 
 @dataclass(frozen=True)
+class OccupancyStep:
+    """The next occupancy proposed for one site (``propose_occupancy``)."""
+
+    occupancy: float | None   # None: the site is already at the bound it must pass
+    method: str               # "proportional", "secant" or "none"
+    bound: str | None = None  # "floor" or "ceiling" when the step stopped there
+    note: str = ""
+
+
+def propose_occupancy(
+    history: Sequence[tuple[float, float | None]],
+    theory: float,
+    *,
+    floor: float = 0.05,
+    ceiling: float = 1.0,
+    max_ratio: float = OCCUPANCY_MAX_RATIO,
+) -> OccupancyStep:
+    """The next occupancy of one site, from its (occupancy, refined f'') rounds.
+
+    The anomalous signal fixes occupancy x f'', so the refined f'' rises when
+    the modelled occupancy q falls. f'' below ``theory`` means the site holds
+    less metal than modelled: lower q. Above: raise q.
+
+    - First step for the site (no earlier round with another occupancy):
+      proportional, q' = q x f''ref / f''th, the occupancy at which q x f''
+      would stay the same.
+    - Later steps: a secant on 1/q through the site's last two rounds with
+      different occupancy, fitting f'' = a + S/q and solving for f'' = theory
+      (exact when f'' is inversely proportional to q up to an offset). Used
+      only when f'' rose as q fell (S > 0) and the fit reaches theory at a
+      positive occupancy; otherwise proportional again.
+    - One step changes q at most ``max_ratio``-fold and at least 0.01 (the PDB
+      occupancy column), always in the direction above, and q' is rounded to
+      0.01 (half up; towards q when the step limit applies) within
+      [``floor``, ``ceiling``].
+    - A site already at the floor (or ceiling) that must go further gets
+      ``occupancy=None``: "f'' below theory at the occupancy floor" (or "f''
+      above theory at full occupancy").
+    """
+    if not history:
+        raise AutoFDPError("No f'' round for this site yet")
+    occupancy, refined = history[-1]
+    if refined is None or not math.isfinite(refined):
+        raise AutoFDPError("The last round gave no refined f'' for this site")
+    if not (math.isfinite(theory) and theory > 0):
+        raise AutoFDPError("The theoretical f'' must be a positive number")
+    if not (math.isfinite(floor) and 0 < floor < ceiling <= 1.0):
+        raise AutoFDPError("The occupancy floor must be above 0 and below the ceiling (at most 1)")
+    if not (math.isfinite(max_ratio) and max_ratio > 1):
+        raise AutoFDPError("The step limit must be more than 1-fold")
+    if refined == theory:
+        return OccupancyStep(occupancy, "none", note="f'' equals theory")
+    lower = refined < theory
+    current = round(occupancy * 100)
+    lowest = math.ceil(floor * 100 - 1e-6)
+    highest = math.floor(ceiling * 100 + 1e-6)
+    if lower and current <= lowest:
+        return OccupancyStep(None, "none", "floor", "f'' below theory at the occupancy floor")
+    if not lower and current >= highest:
+        reason = "f'' above theory at full occupancy" if highest == 100 else (
+            "f'' above theory at the occupancy ceiling")
+        return OccupancyStep(None, "none", "ceiling", reason)
+
+    notes: list[str] = []
+    method = "proportional"
+    target = occupancy * refined / theory if refined > 0 else 0.0
+    earlier = next(
+        (point for point in reversed(history[:-1])
+         if point[1] is not None and math.isfinite(point[1]) and abs(point[0] - occupancy) >= 0.005),
+        None,
+    )
+    if earlier is not None:
+        earlier_occupancy, earlier_refined = earlier
+        slope = (refined - earlier_refined) / (1 / occupancy - 1 / earlier_occupancy)
+        if slope <= 0:
+            notes.append("secant not used: f'' did not rise as occupancy fell")
+        else:
+            inverse = 1 / occupancy + (theory - refined) / slope
+            if inverse <= 0:
+                notes.append("secant not used: the fit reaches theory at no occupancy")
+            else:
+                target, method = 1 / inverse, "secant"
+    low, high = occupancy / max_ratio, occupancy * max_ratio
+    limited = not low <= target <= high
+    if limited:
+        target = min(max(target, low), high)
+        notes.append(f"step limited to {max_ratio:g}-fold")
+        # Round towards the current occupancy so the step stays within the limit.
+        proposed = math.ceil(target * 100 - 1e-6) if lower else math.floor(target * 100 + 1e-6)
+    else:
+        proposed = math.floor(target * 100 + 0.5)
+    proposed = min(proposed, current - 1) if lower else max(proposed, current + 1)
+    bound = None
+    if proposed < lowest:
+        proposed, bound = lowest, "floor"
+        notes.append("stopped at the occupancy floor")
+    elif proposed > highest:
+        proposed, bound = highest, "ceiling"
+        notes.append("stopped at full occupancy" if highest == 100 else "stopped at the ceiling")
+    return OccupancyStep(proposed / 100, method, bound, "; ".join(notes))
+
+
+def _set_occupancy(line: str, value: float) -> str:
+    """Replace the occupancy columns (55-60) and keep the rest of the line."""
+    if not 0 <= value <= 1:
+        raise AutoFDPError(f"Occupancy {value} is outside 0-1")
+    body = line.rstrip("\r\n")
+    ending = line[len(body):]
+    body = body.ljust(60)
+    return body[:54] + f"{value:6.2f}" + body[60:] + ending
+
+
+def write_site_occupancy(
+    source: Path,
+    destination: Path,
+    site: str,
+    atom_name: str,
+    alternate: str | None,
+    occupancy: float,
+) -> None:
+    """Copy ``source`` with one atom's occupancy changed; nothing else."""
+    key = _site_key(site, atom_name, alternate)
+    lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
+    matches = []
+    for index, line in enumerate(lines):
+        if line.startswith("ENDMDL"):
+            break
+        if line.startswith(("ATOM  ", "HETATM")) and _record_key(line) == key:
+            matches.append(index)
+    if len(matches) != 1:
+        raise AutoFDPError(
+            f"{site} {atom_name} matches {len(matches)} atoms of {source.name}; expected 1"
+        )
+    lines[matches[0]] = _set_occupancy(lines[matches[0]], occupancy)
+    destination.write_text("".join(lines), encoding="utf-8", newline="")
+
+
+@dataclass(frozen=True)
+class OccupancyAdjustment:
+    """One step 3 change: the occupancy one site had in round ``round``."""
+
+    round: int
+    selection: str
+    site: str
+    atom_name: str
+    occupancy_before: float
+    occupancy_after: float
+    method: str
+    bound: str | None
+    note: str
+
+
+@dataclass(frozen=True)
+class SiteOutcome:
+    """Where one calibrated site ended up after step 3."""
+
+    selection: str
+    site: str
+    atom_name: str
+    element: str
+    occupancy_start: float | None
+    occupancy_final: float | None
+    adjustments: int
+    f_double_prime_refined: float | None   # in the last round
+    f_double_prime_theory: float
+    deviation: float | None
+    converged: bool
+    reason: str
+    history: tuple[tuple[int, float | None, float | None], ...]   # (round, occupancy, f'')
+
+
+@dataclass(frozen=True)
 class AutoFDPPlan:
     """Everything checked before anything is written (the preflight)."""
 
@@ -1129,12 +1318,16 @@ class AutoFDPResult:
     plan: AutoFDPPlan
     run_directory: Path
     b_start: BStart
-    round: FdpRoundResult
+    round: FdpRoundResult                              # the last round run
     readyset: ReadySetResult
     report_path: Path
     log_path: Path
     status: str
     message: str
+    rounds: tuple[FdpRoundResult, ...] = ()            # every round, round_001 first
+    adjustments: tuple[OccupancyAdjustment, ...] = ()  # step 3, in order
+    outcomes: tuple[SiteOutcome, ...] = ()             # each calibrated site at the end
+    final_model: Path | None = None                    # the last round's model
 
 
 def plan_autofdp(
@@ -1218,11 +1411,27 @@ def _file_record(path: Path, run_directory: Path) -> dict[str, object]:
     }
 
 
+def _site_lines(round_result: FdpRoundResult) -> list[str]:
+    lines = []
+    for site in round_result.sites:
+        refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
+        deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
+        occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+        lines.append(
+            f"{site.site} {site.atom_name} ({site.element}): occupancy {occupancy}; "
+            f"f' {site.f_prime:.2f} fixed; f'' {refined} vs theory "
+            f"{site.f_double_prime_theory:.2f} ({site.theory_source}); deviation {deviation}"
+        )
+    return lines
+
+
 def _log_lines(
     plan: AutoFDPPlan,
     b_start: BStart,
-    round_result: FdpRoundResult | None,
+    rounds: Sequence[FdpRoundResult],
     readyset: "ReadySetResult | None" = None,
+    adjustments: Sequence[OccupancyAdjustment] = (),
+    outcomes: Sequence[SiteOutcome] = (),
 ) -> list[str]:
     reflections = plan.reflections
     lines = [
@@ -1257,19 +1466,129 @@ def _log_lines(
             "Refinement dictionaries: "
             + (", ".join(path.name for path in readyset.dictionaries) or "none"),
         ])
-    if round_result is not None:
-        lines.extend(["", f"Step 2 (f''-only round): {round_result.status}: {round_result.message}",
-                      f"R-work {round_result.r_work}, R-free {round_result.r_free}"])
-        for site in round_result.sites:
-            refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
-            deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
-            lines.append(
-                f"{site.site} {site.atom_name} ({site.element}): f' {site.f_prime:.2f} fixed; "
-                f"f'' {refined} vs theory {site.f_double_prime_theory:.2f} "
-                f"({site.theory_source}); deviation {deviation}"
+    if rounds:
+        first = rounds[0]
+        lines.extend(["", f"Step 2 (f''-only round, round_001): {first.status}: {first.message}",
+                      f"R-work {first.r_work}, R-free {first.r_free}"])
+        lines.extend(_site_lines(first))
+        lines.extend(f"Warning: {warning}" for warning in first.warnings)
+    if len(rounds) > 1 or outcomes:
+        lines.extend(["", "Step 3 (occupancy adjustment; same f''-only round each time)"])
+        changed = {adjustment.round: adjustment for adjustment in adjustments}
+        for number, result in enumerate(rounds[1:], start=2):
+            adjustment = changed.get(number)
+            what = "" if adjustment is None else (
+                f"{adjustment.site} {adjustment.atom_name} occupancy "
+                f"{adjustment.occupancy_before:.2f} -> {adjustment.occupancy_after:.2f} "
+                f"({adjustment.method}{'; ' + adjustment.note if adjustment.note else ''}); "
             )
-        lines.extend(f"Warning: {warning}" for warning in round_result.warnings)
+            lines.append(f"round_{number:03d}: {what}{result.status}; "
+                         f"R-work {result.r_work}, R-free {result.r_free}")
+            lines.extend("  " + line for line in _site_lines(result))
+            lines.extend(f"  Warning: {warning}" for warning in result.warnings)
+            if result.status != STATUS_ROUND_DONE:
+                lines.append(f"  {result.message}")
+        for outcome in outcomes:
+            start = "-" if outcome.occupancy_start is None else f"{outcome.occupancy_start:.2f}"
+            final = "-" if outcome.occupancy_final is None else f"{outcome.occupancy_final:.2f}"
+            refined = ("none" if outcome.f_double_prime_refined is None
+                       else f"{outcome.f_double_prime_refined:.2f}")
+            lines.append(
+                f"{outcome.site} {outcome.atom_name} ({outcome.element}): occupancy {start} -> "
+                f"{final}; f'' {refined} vs theory {outcome.f_double_prime_theory:.2f}; "
+                f"{outcome.reason}"
+            )
     return lines
+
+
+def _round_entry(
+    number: int,
+    round_result: FdpRoundResult,
+    input_model: Path,
+    run_directory: Path,
+    theory: Mapping[str, Mapping[str, object]],
+    cycles: int,
+    adjustment: OccupancyAdjustment | None = None,
+) -> dict[str, object]:
+    return {
+        "round": number,
+        "directory": f"round_{number:03d}",
+        "strategy": ["group_anomalous"],
+        "input_model": _file_record(input_model, run_directory),
+        "adjusted_site": None if adjustment is None else adjustment.selection,
+        "occupancy_before": None if adjustment is None else adjustment.occupancy_before,
+        "occupancy_after": None if adjustment is None else adjustment.occupancy_after,
+        "method": None if adjustment is None else adjustment.method,
+        "note": None if adjustment is None else adjustment.note,
+        "starting_groups": {
+            site.selection: {"f_prime": float(theory[site.element]["f_prime"]),
+                             "f_double_prime": 0.0}
+            for site in round_result.sites
+        },
+        "cycles": cycles,
+        "returncode": round_result.returncode,
+        "r_work": round_result.r_work,
+        "r_free": round_result.r_free,
+        "held_parameter_changes": round_result.held_parameter_changes,
+        "refined_model": (
+            _file_record(round_result.model_path, run_directory) if round_result.model_path else None
+        ),
+        "map_coefficients": (
+            _file_record(round_result.map_coefficients, run_directory)
+            if round_result.map_coefficients else None
+        ),
+        "sites": [asdict(site) for site in round_result.sites],
+        "warnings": list(round_result.warnings),
+        "status": round_result.status,
+        "message": round_result.message,
+    }
+
+
+def _site_outcomes(
+    rounds: Sequence[FdpRoundResult],
+    adjustments: Sequence[OccupancyAdjustment],
+    stopped: Mapping[str, str],
+    tolerance: float,
+) -> list[SiteOutcome]:
+    """Each calibrated site in the last round, with its history and why it stopped."""
+    last = rounds[-1]
+    outcomes = []
+    for site in last.sites:
+        if not site.calibrated:
+            continue
+        history = []
+        for number, result in enumerate(rounds, start=1):
+            match = next((item for item in result.sites if item.selection == site.selection), None)
+            if match is not None:
+                history.append((number, match.occupancy, match.f_double_prime_refined))
+        count = sum(1 for adjustment in adjustments if adjustment.selection == site.selection)
+        converged = bool(site.within_tolerance)
+        if converged:
+            reason = (f"within +/-{tolerance:g} e- of theory"
+                      + (f" after {count} adjustment(s)" if count else " without adjustment"))
+        elif site.selection in stopped and not stopped[site.selection].startswith("within"):
+            reason = stopped[site.selection]
+        elif site.selection in stopped:
+            reason = (f"was within +/-{tolerance:g} e-, then moved to "
+                      f"{site.deviation:+.2f} while other sites were adjusted")
+        else:
+            reason = "not adjusted"
+        outcomes.append(SiteOutcome(
+            selection=site.selection,
+            site=site.site,
+            atom_name=site.atom_name,
+            element=site.element,
+            occupancy_start=history[0][1] if history else None,
+            occupancy_final=site.occupancy,
+            adjustments=count,
+            f_double_prime_refined=site.f_double_prime_refined,
+            f_double_prime_theory=site.f_double_prime_theory,
+            deviation=site.deviation,
+            converged=converged,
+            reason=reason,
+            history=tuple(history),
+        ))
+    return outcomes
 
 
 def execute_autofdp(
@@ -1282,20 +1601,43 @@ def execute_autofdp(
     sites: Sequence[str] = (),
     cycles: int = 3,
     tolerance: float = 1.0,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    occupancy_floor: float = 0.05,
     environment: Mapping[str, str] | None = None,
     processor_count: int | None = None,
 ) -> AutoFDPResult:
-    """Run steps 1 and 2 in a new ``run_NNN`` folder of ``plan.output_root``.
+    """Run steps 1 to 3 in a new ``run_NNN`` folder of ``plan.output_root``.
 
     Step 1 writes ``source_model.pdb`` and ``start_model.pdb``. Step 2 runs
     ReadySet on the start model (``ReadySet/``, no hydrogens) for the restraint
     dictionaries, then the f''-only round on ReadySet's model in
-    ``round_001``. ``report.json`` (workflow ``autofdp``,
-    schema 2) and ``autofdp.log`` record the inputs (paths and checksums),
-    what was read from the MTZ, the theory, the B changes and the round.
-    Nothing outside the new folder is written. The later steps (occupancy
-    adjustment onward) are not implemented.
+    ``round_001``.
+
+    Step 3 adjusts occupancy, one calibrated site at a time: the site whose
+    refined f'' is furthest from theory (outside ``tolerance``) first. Its
+    occupancy is changed (``propose_occupancy``; lower when f'' is below
+    theory, higher when above, within [``occupancy_floor``, 1]) in a copy of
+    the previous round's model (``round_NNN/input_model.pdb``; nothing else
+    changes), and the same f''-only round is run again on it. This repeats
+    until the site is within ``tolerance``, has had ``max_iterations``
+    adjustments, or is at the occupancy bound it would have to pass; then the
+    next site, ranked again by the latest round. Every round refines every
+    site's f'' from 0 with the same parameters. ``max_iterations=0`` runs
+    round_001 only.
+
+    Status ``AUTOFDP_CONVERGED`` when every calibrated site is within
+    ``tolerance`` in the last round (written as ``final_model.pdb``),
+    ``AUTOFDP_REVIEW`` when one is not, ``AUTOFDP_FAILED`` when a round
+    fails. ``report.json`` (workflow ``autofdp``, schema 2) and
+    ``autofdp.log`` record the inputs (paths and checksums), what was read
+    from the MTZ, the theory, the B changes, every round and the occupancy
+    history of every site. Nothing outside the new folder is written. The
+    identity check, B confirmation and final round are not implemented.
     """
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 0:
+        raise AutoFDPError("--max-iterations must be a whole number of at least 0")
+    if not (math.isfinite(occupancy_floor) and 0 < occupancy_floor < 1):
+        raise AutoFDPError("--occupancy-floor must be above 0 and below 1")
     run_directory = _next_run_directory(plan.output_root)
     written = prepare_start_model(
         plan.model, sites=sites, b_start=b_start, output_directory=run_directory
@@ -1323,6 +1665,7 @@ def execute_autofdp(
         },
         "settings": {
             "sites": list(sites), "b_start": b_start, "cycles": cycles, "tolerance": tolerance,
+            "max_iterations": max_iterations, "occupancy_floor": occupancy_floor,
         },
         "theory": {element: dict(values) for element, values in plan.theory.items()},
         "b_start": {
@@ -1332,7 +1675,7 @@ def execute_autofdp(
             "warnings": list(written.warnings),
         },
         "rounds": [],
-        "steps": {"b_start": "done", "fdp_rounds": "running", "occupancy_adjustment": "not implemented"},
+        "steps": {"b_start": "done", "fdp_rounds": "running", "occupancy_adjustment": "pending"},
     }
     report_path = run_directory / "report.json"
     _write_json(report_path, report)
@@ -1363,11 +1706,26 @@ def execute_autofdp(
         }
         report["steps"]["readyset"] = "done"
         _write_json(report_path, report)
-        round_result = fdp_round(
-            readyset.model,
+    except AutoFDPError as exc:
+        report.update(status=STATUS_FAILED, message=str(exc))
+        report["steps"]["readyset"] = "failed"
+        report["steps"]["fdp_rounds"] = "failed before phenix.refine ran"
+        report["steps"]["occupancy_adjustment"] = "not run"
+        _write_json(report_path, report)
+        log_path.write_text("\n".join(_log_lines(plan, written, (), readyset)
+                                      + ["", f"Failed: {exc}"]) + "\n", encoding="utf-8")
+        raise
+
+    rounds: list[FdpRoundResult] = []
+    inputs: list[Path] = []
+    adjustments: list[OccupancyAdjustment] = []
+
+    def refine(number: int, model: Path, adjustment: OccupancyAdjustment | None) -> FdpRoundResult:
+        result = fdp_round(
+            model,
             reflections,
             refine_executable,
-            run_directory / "round_001",
+            run_directory / f"round_{number:03d}",
             phenix_version=phenix_version,
             theory=plan.theory,
             calibrated=plan.calibrated,
@@ -1377,59 +1735,172 @@ def execute_autofdp(
             environment=environment,
             processor_count=processor_count,
         )
+        rounds.append(result)
+        inputs.append(model)
+        report["rounds"].append(_round_entry(
+            number, result, model, run_directory, plan.theory, cycles, adjustment
+        ))
+        report["steps"]["fdp_rounds"] = f"{len(rounds)} run"
+        report.update(status=result.status, message=f"round_{number:03d}: {result.message}")
+        _write_json(report_path, report)
+        return result
+
+    try:
+        first = refine(1, readyset.model, None)
     except AutoFDPError as exc:
         report.update(status=STATUS_FAILED, message=str(exc))
-        if readyset is None:
-            report["steps"]["readyset"] = "failed"
         report["steps"]["fdp_rounds"] = "failed before phenix.refine ran"
+        report["steps"]["occupancy_adjustment"] = "not run"
         _write_json(report_path, report)
-        log_path.write_text("\n".join(_log_lines(plan, written, None, readyset)
+        log_path.write_text("\n".join(_log_lines(plan, written, (), readyset)
                                       + ["", f"Failed: {exc}"]) + "\n", encoding="utf-8")
         raise
-    entry = {
-        "round": 1,
-        "directory": "round_001",
-        "strategy": ["group_anomalous"],
-        "starting_groups": {
-            selection: {"f_prime": float(plan.theory[element]["f_prime"]), "f_double_prime": 0.0}
-            for selection, element in (
-                (site.selection, site.element) for site in round_result.sites
+
+    # Step 3: one site at a time, the one furthest from theory first.
+    failure = None if first.status == STATUS_ROUND_DONE else first.message
+    history: dict[str, list[tuple[float, float | None]]] = {}
+    for site in first.sites:
+        history[site.selection] = [(site.occupancy, site.f_double_prime_refined)]
+    stopped: dict[str, str] = {}    # selection -> why its adjustment ended
+    used: dict[str, int] = {}
+    active: str | None = None
+    while failure is None:
+        latest = {site.selection: site for site in rounds[-1].sites}
+        if active is not None:
+            site = latest[active]
+            if site.within_tolerance:
+                stopped[active] = f"within +/-{tolerance:g} e- of theory"
+                active = None
+            elif used[active] >= max_iterations:
+                stopped[active] = (
+                    f"still {site.deviation:+.2f} e- from theory after "
+                    f"{max_iterations} adjustment(s) (--max-iterations)"
+                )
+                active = None
+        if active is None:
+            pending = [
+                site for site in rounds[-1].sites
+                if site.calibrated and site.selection not in stopped and not site.within_tolerance
+            ]
+            if not pending:
+                break
+            if max_iterations == 0:
+                for site in pending:
+                    stopped[site.selection] = "not adjusted (--max-iterations 0)"
+                break
+            active = max(pending, key=lambda item: abs(item.deviation)).selection
+            used[active] = 0
+        site = latest[active]
+        if site.occupancy is None:
+            failure = f"{site.site} {site.atom_name} has no readable occupancy"
+            break
+        step = propose_occupancy(
+            history[active], site.f_double_prime_theory, floor=occupancy_floor
+        )
+        if step.occupancy is None:
+            stopped[active] = step.note
+            active = None
+            continue
+        number = len(rounds) + 1
+        directory = run_directory / f"round_{number:03d}"
+        directory.mkdir()
+        model = directory / "input_model.pdb"
+        write_site_occupancy(
+            inputs[-1], model, site.site, site.atom_name, site.alternate, step.occupancy
+        )
+        adjustment = OccupancyAdjustment(
+            round=number,
+            selection=active,
+            site=site.site,
+            atom_name=site.atom_name,
+            occupancy_before=site.occupancy,
+            occupancy_after=step.occupancy,
+            method=step.method,
+            bound=step.bound,
+            note=step.note,
+        )
+        adjustments.append(adjustment)
+        used[active] += 1
+        try:
+            result = refine(number, model, adjustment)
+        except AutoFDPError as exc:
+            failure = str(exc)
+            break
+        if result.status != STATUS_ROUND_DONE:
+            failure = f"round_{number:03d}: {result.message}"
+            break
+        for item in result.sites:
+            history[item.selection].append((item.occupancy, item.f_double_prime_refined))
+
+    finished = [result for result in rounds if result.status == STATUS_ROUND_DONE]
+    outcomes = _site_outcomes(finished, adjustments, stopped, tolerance) if finished else []
+    final_model: Path | None = None
+    if failure is not None:
+        status, message = STATUS_FAILED, failure
+        report["steps"]["occupancy_adjustment"] = "failed" if adjustments else "not run"
+    else:
+        final_model = run_directory / "final_model.pdb"
+        shutil.copyfile(inputs[-1], final_model)
+        report["final_model"] = _file_record(final_model, run_directory)
+        open_sites = [outcome for outcome in outcomes if not outcome.converged]
+        if not open_sites:
+            status = STATUS_CONVERGED
+            message = (
+                f"every site within +/-{tolerance:g} e- of theory after "
+                f"{len(adjustments)} occupancy adjustment(s) in {len(rounds)} f'' round(s)"
             )
-        },
-        "cycles": cycles,
-        "returncode": round_result.returncode,
-        "r_work": round_result.r_work,
-        "r_free": round_result.r_free,
-        "held_parameter_changes": round_result.held_parameter_changes,
-        "refined_model": (
-            _file_record(round_result.model_path, run_directory) if round_result.model_path else None
+            report["steps"]["occupancy_adjustment"] = "done"
+        else:
+            status = STATUS_REVIEW
+            message = "; ".join(
+                f"{outcome.site} {outcome.atom_name}: {outcome.reason}" for outcome in open_sites
+            )
+            report["steps"]["occupancy_adjustment"] = "review"
+    report["occupancy"] = {
+        "method": (
+            "one site at a time, furthest from theory first; proportional first step "
+            "(q x f''/theory), then a secant on 1/q through the site's last two "
+            "occupancies; at most 4-fold and at least 0.01 per step"
         ),
-        "map_coefficients": (
-            _file_record(round_result.map_coefficients, run_directory)
-            if round_result.map_coefficients else None
-        ),
-        "sites": [asdict(site) for site in round_result.sites],
-        "warnings": list(round_result.warnings),
-        "status": round_result.status,
-        "message": round_result.message,
+        "max_iterations": max_iterations,
+        "floor": occupancy_floor,
+        "ceiling": 1.0,
+        "max_ratio": OCCUPANCY_MAX_RATIO,
+        "adjustments": [asdict(adjustment) for adjustment in adjustments],
+        "sites": [
+            {
+                **{key: value for key, value in asdict(outcome).items() if key != "history"},
+                "history": [
+                    {"round": number, "occupancy": occupancy, "f_double_prime": refined,
+                     "deviation": (None if refined is None
+                                   else round(refined - outcome.f_double_prime_theory, 3))}
+                    for number, occupancy, refined in outcome.history
+                ],
+            }
+            for outcome in outcomes
+        ],
     }
-    report["rounds"] = [entry]
-    report.update(status=round_result.status, message=round_result.message)
-    report["steps"]["fdp_rounds"] = "1 run"
+    report.update(status=status, message=message)
     _write_json(report_path, report)
     log_path.write_text(
-        "\n".join(_log_lines(plan, written, round_result, readyset)) + "\n", encoding="utf-8"
+        "\n".join(_log_lines(plan, written, rounds, readyset, adjustments, outcomes)
+                  + ["", f"{status}: {message}"]) + "\n",
+        encoding="utf-8",
     )
     return AutoFDPResult(
         plan=plan,
         run_directory=run_directory,
         b_start=written,
-        round=round_result,
+        round=rounds[-1],
         readyset=readyset,
         report_path=report_path,
         log_path=log_path,
-        status=round_result.status,
-        message=round_result.message,
+        status=status,
+        message=message,
+        rounds=tuple(rounds),
+        adjustments=tuple(adjustments),
+        outcomes=tuple(outcomes),
+        final_model=final_model,
     )
 
 
@@ -1441,21 +1912,6 @@ def map_value_at_site(
     environment: Mapping[str, str] | None = None,
 ) -> float:
     """Value of a map (mFo-DFc or anomalous) at a point, in sigma units."""
-    raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
-
-
-def decide_site_update(site: SiteState, previous: SiteState | None,
-                       settings: AutoFDPSettings) -> SiteState:
-    """Apply the docs/autofdp.md step-3 rules to one site.
-
-    Converged if |refined - theory| <= tolerance. Otherwise proposed
-    occupancy q' = q * refined / theory; adjust B by ``b_step`` instead when
-    the mFo-DFc value at the site contradicts the occupancy change; cap at
-    1.0 (flag "f'' above theory at full occupancy"); below
-    ``occupancy_floor`` send to identity review; flag "unresponsive" when f''
-    barely changed after an occupancy change. Returns the site with its next
-    occupancy, B and decision.
-    """
     raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
 
 
@@ -1520,6 +1976,7 @@ __all__ = [
     "AutoFDPPlan",
     "AutoFDPResult",
     "AutoFDPSettings",
+    "DEFAULT_MAX_ITERATIONS",
     "BStart",
     "BStartSite",
     "FdpRoundResult",
@@ -1527,9 +1984,13 @@ __all__ = [
     "Neighbour",
     "NeighbourB",
     "NOT_IMPLEMENTED_MESSAGE",
+    "OCCUPANCY_MAX_RATIO",
+    "OccupancyAdjustment",
+    "OccupancyStep",
     "ReadySetResult",
     "ReflectionInputs",
     "SiteState",
+    "SiteOutcome",
     "STATUS_CONVERGED",
     "STATUS_FAILED",
     "STATUS_PREPARED",
@@ -1538,7 +1999,6 @@ __all__ = [
     "WORKFLOW",
     "checked_model",
     "confirm_b_round",
-    "decide_site_update",
     "execute_autofdp",
     "fdp_round",
     "final_round",
@@ -1549,8 +2009,10 @@ __all__ = [
     "parse_theory_overrides",
     "plan_autofdp",
     "prepare_start_model",
+    "propose_occupancy",
     "read_reflections",
     "run_readyset",
     "surrounding_b",
     "theoretical_scattering",
+    "write_site_occupancy",
 ]

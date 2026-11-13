@@ -1,5 +1,7 @@
 """AutoFDP from a model and an MTZ: preflight, step 1 (B start) and step 2
-(one f''-only round). No NASolve run, report or checkpoint is involved.
+(one f''-only round). No NASolve run, report or checkpoint is involved. Step 3
+(occupancy adjustment) is in test_autofdp_occupancy.py; here the stand-in f''
+does not depend on occupancy.
 
 phenix.refine, phenix.mtz.dump, phenix.python and Coot are simulated. The
 stand-in phenix.refine reads the anomalous groups NASolve wrote into its
@@ -19,7 +21,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nasolve.autofdp import (
+    STATUS_CONVERGED,
     STATUS_FAILED,
+    STATUS_REVIEW,
     STATUS_ROUND_DONE,
     AutoFDPError,
     execute_autofdp,
@@ -242,7 +246,11 @@ class FdpRoundTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             original = model.read_bytes()
             result = _execute(_plan(root, model, mtz), root)
-            self.assertEqual(result.status, STATUS_ROUND_DONE, result.message)
+            # Within tolerance in round_001: converged without adjustment.
+            self.assertEqual(result.status, STATUS_CONVERGED, result.message)
+            self.assertEqual(result.rounds, (result.round,))
+            self.assertEqual(result.round.status, STATUS_ROUND_DONE)
+            self.assertEqual(result.adjustments, ())
             run = mtz.parent.resolve() / "AutoFDP" / "run_001"
             self.assertEqual(result.run_directory, run)
             self.assertEqual(model.read_bytes(), original)   # the given model is never changed
@@ -290,7 +298,13 @@ class FdpRoundTests(unittest.TestCase):
 
             report = json.loads(result.report_path.read_text())
             self.assertEqual((report["workflow"], report["schema_version"]), ("autofdp", 2))
-            self.assertEqual(report["status"], STATUS_ROUND_DONE)
+            self.assertEqual(report["status"], STATUS_CONVERGED)
+            self.assertEqual(report["steps"]["occupancy_adjustment"], "done")
+            self.assertEqual(report["occupancy"]["sites"][0]["reason"],
+                             "within +/-1 e- of theory without adjustment")
+            self.assertEqual(report["final_model"]["relative_path"], "final_model.pdb")
+            self.assertEqual((run / "final_model.pdb").read_bytes(),
+                             (run / "readyset_model.pdb").read_bytes())
             # Inputs are anchored to the dataset folder (portable); the
             # absolute path is provenance only.
             self.assertEqual(
@@ -313,6 +327,9 @@ class FdpRoundTests(unittest.TestCase):
             entry = report["rounds"][0]
             self.assertEqual(entry["directory"], "round_001")
             self.assertEqual(entry["strategy"], ["group_anomalous"])
+            self.assertEqual(entry["input_model"]["relative_path"], "readyset_model.pdb")
+            self.assertIsNone(entry["adjusted_site"])
+            self.assertEqual(entry["status"], STATUS_ROUND_DONE)
             self.assertEqual(entry["starting_groups"][SILVER], {"f_prime": -0.12, "f_double_prime": 0.0})
             self.assertEqual(entry["sites"][0]["deviation"], 0.57)
             self.assertEqual(entry["held_parameter_changes"]["max_b_change"], 0.0)
@@ -331,11 +348,16 @@ class FdpRoundTests(unittest.TestCase):
                          "Step 2", "deviation +0.57"):
                 self.assertIn(text, log)
 
-            again = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, {SILVER: 5.0}))
+            # --max-iterations 0: round_001 only; a site outside tolerance is for review.
+            again = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, {SILVER: 5.0}),
+                             max_iterations=0)
             self.assertEqual(again.run_directory.name, "run_002")
+            self.assertEqual(len(again.rounds), 1)
             self.assertAlmostEqual(again.round.sites[0].deviation, 2.97)
             self.assertFalse(again.round.sites[0].within_tolerance)
-            self.assertIn("1 of 1 site(s) more than 1 e- from theory", again.message)
+            self.assertIn("1 of 1 site(s) more than 1 e- from theory", again.round.message)
+            self.assertEqual(again.status, STATUS_REVIEW)
+            self.assertEqual(again.message, "B:101 AG: not adjusted (--max-iterations 0)")
 
     def test_record_resolves_after_the_dataset_folder_moves(self):
         from nasolve.run_context import resolve_artifact_path
@@ -367,7 +389,7 @@ class FdpRoundTests(unittest.TestCase):
             result = _execute(plan, root, refine=make_fdp_refine(root, {SILVER: 5.0}),
                               tolerance=0.4, cycles=2)
             self.assertEqual(result.run_directory, (root / "elsewhere" / "run_001").resolve())
-            site = result.round.sites[0]
+            site = result.rounds[0].sites[0]
             self.assertEqual((site.f_double_prime_theory, site.theory_source), (4.5, "user (--theory)"))
             self.assertAlmostEqual(site.deviation, 0.5)
             self.assertFalse(site.within_tolerance)
@@ -404,6 +426,9 @@ class FdpRoundTests(unittest.TestCase):
             self.assertIsNone(result.round.sites[0].deviation)
             report = json.loads(result.report_path.read_text())
             self.assertEqual((report["status"], report["rounds"][0]["status"]), (STATUS_FAILED, STATUS_FAILED))
+            self.assertEqual(report["steps"]["occupancy_adjustment"], "not run")
+            self.assertNotIn("final_model", report)
+            self.assertIsNone(result.final_model)
 
             changed = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, change_b=True))
             self.assertIn("Held parameters changed", changed.round.warnings[0])
@@ -454,7 +479,7 @@ class ReadySetStepTests(unittest.TestCase):
             root = Path(directory)
             model, mtz = make_inputs(root)
             result = _execute(_plan(root, model, mtz), root, ready_set=make_ready_set(root, mode="noop"))
-            self.assertEqual(result.status, STATUS_ROUND_DONE)
+            self.assertEqual(result.status, STATUS_CONVERGED)
             self.assertEqual(result.readyset.mode, "no unknown residues")
             self.assertIsNone(result.readyset.generated)
             self.assertEqual((result.run_directory / "readyset_model.pdb").read_bytes(),
@@ -479,10 +504,10 @@ class ReadySetStepTests(unittest.TestCase):
 
 
 class AutoFDPCommandTests(unittest.TestCase):
-    def _main(self, root: Path, arguments: list[str], launch=None, dump=None):
+    def _main(self, root: Path, arguments: list[str], launch=None, dump=None, refine=None):
         installation = PhenixInstallation(
             root=None, setup_script=None, version=PHENIX_21,
-            executables={"phenix.refine": make_fdp_refine(root),
+            executables={"phenix.refine": refine or make_fdp_refine(root),
                          "phenix.ready_set": make_ready_set(root),
                          "phenix.mtz.dump": dump or make_mtz_dump(root, wavelength=1.00743)},
             environment=ENV, source="test",
@@ -518,12 +543,14 @@ class AutoFDPCommandTests(unittest.TestCase):
                 "B:101 AG (AG), occupancy 0.90: B 379.99 -> 50.00",
                 "f''-only round (round_001, 3 cycles",
                 "Theory: AG cctbx-henke",
-                "AUTOFDP_FDP_ROUND_DONE",
-                "Opened Coot (PID 4321) with refined_001.pdb and refined_001_map_coeffs.mtz",
+                "AUTOFDP_CONVERGED",
+                "every site already within +/-1 e- of theory; no occupancy changed",
+                "Model with the final occupancies: ",
+                "Opened Coot (PID 4321) with round_001/refined_001.pdb and refined_001_map_coeffs.mtz",
                 "ReadySet (no hydrogens): updated model; atoms, coordinates and B unchanged",
                 "curated dictionaries given: DU",
                 "restraints for phenix.refine: ReadySet/DU.cif",
-                "Occupancy adjustment and the later AutoFDP steps are not implemented yet",
+                "Not implemented yet: the identity check, B confirmation",
             ):
                 self.assertIn(text, out)
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG"))
@@ -566,6 +593,7 @@ class AutoFDPCommandTests(unittest.TestCase):
             self.assertIn("B 379.99 -> 50.00", out)
             self.assertIn("Then: ReadySet on the start model (no hydrogens)", out)
             self.assertIn("one f''-only phenix.refine round of 3 cycles", out)
+            self.assertIn("then up to 5 occupancy adjustment(s) per site", out)
             self.assertFalse((root / "readyset_args.json").exists())
             self.assertIn("Plan only", out)
             launched.assert_not_called()
@@ -582,6 +610,9 @@ class AutoFDPCommandTests(unittest.TestCase):
                 ([str(model), str(mtz), "--cycles", "0"], 1, "--cycles must be at least 1"),
                 ([str(model), str(mtz), "--cif", str(root / "none.cif")], 1, "No restraint file"),
                 ([str(model), str(mtz), "--element", "B:101=HG"], 2, "--element is not implemented yet"),
+                ([str(model), str(mtz), "--max-iterations", "-1"], 1, "--max-iterations must be 0 or more"),
+                ([str(model), str(mtz), "--occupancy-floor", "1"], 1,
+                 "--occupancy-floor must be above 0 and below 1"),
             )
             for arguments, expected, message in cases:
                 with self.subTest(arguments=arguments[2:]):

@@ -1,17 +1,23 @@
 # AutoFDP: occupancy from f″ refinement
 
-**Status: steps 1 and 2 implemented, later steps specified only (2026-11-13).**
+**Status: steps 1 to 3 implemented, later steps specified only (2026-11-13).**
 `nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
 file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
 (B start) copies the model and sets each metal's B to the mean B of its
 neighbouring nucleotides. Step 2 (f″ round) runs ReadySet on that copy (no
 hydrogens) for the restraint dictionaries, then one phenix.refine round with
-every strategy off except the anomalous scatterers, opens the result and its
-maps in Coot, and prints each refined f″ against its theoretical value. Occupancy adjustment and the steps after it (3-6) are
-documented stubs in `src/nasolve/autofdp.py` that raise `NotImplementedError`;
-options that belong to them are accepted but have no effect yet, and
-`--element` is refused. The defaults marked *(to confirm)* follow my reading of
-the papers below and have not yet been checked by the lab.
+every strategy off except the anomalous scatterers, and compares each refined
+f″ with its theoretical value. Step 3 (occupancy adjustment) takes the sites
+one at a time, the one furthest from theory first, lowers the occupancy when
+f″ is below theory or raises it when above, and runs the same round again,
+until f″ is within the tolerance or the site has had `--max-iterations`
+adjustments (default 5). The last round's model and maps open in Coot. The
+identity check, B confirmation and final round (steps 4-6) are documented stubs
+in `src/nasolve/autofdp.py` that raise `NotImplementedError`; options that
+belong to them are accepted but have no effect yet, and `--element` is refused.
+The defaults marked *(to confirm)* follow my reading of the papers below and
+have not yet been checked by the lab. Everything here has been tested with
+simulated Phenix programs only, not yet on real data.
 
 ## Purpose
 
@@ -73,16 +79,16 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17`; repeatable. f′ stays the Henke value |
 | `--tolerance` | 1.0 e⁻ | a site matches theory when \|refined f″ − theory\| ≤ tolerance |
-| `--max-iterations` | 8 *(to confirm)* | f″ rounds before giving up |
+| `--max-iterations` | 5 | occupancy adjustments (one f″ round each) per site before the site goes to review; 0 runs round_001 only |
 | `--cycles` | 3 | phenix.refine macrocycles per f″ round |
 | `--b-start` | `surrounding` | site B at the start: mean of the neighbouring nucleotides, the model's own (`model`), or a number |
 | `--b-step` | 20 Å² *(to confirm)* | B change when the map says to adjust B instead of occupancy |
-| `--occupancy-floor` | 0.05 *(to confirm)* | below this, the site is sent to identity review |
+| `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the B-confirmation round |
 | `--final` | off | after convergence, refine XYZ, B, occupancy and f″ together (Adv. Mater. ending) |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
-| `--no-coot` | open Coot | do not open the f″ round's model and maps in Coot |
+| `--no-coot` | open Coot | do not open the last f″ round's model and maps in Coot |
 | `--coot` | configured Coot | Coot executable or installation |
 | `--phenix-root` | configured Phenix | Phenix installation |
 
@@ -205,47 +211,77 @@ After the round, for each group:
 - a check that coordinates, occupancy and B did not change (largest change
   recorded; a warning above 0.01 Å, 0.01 or 0.1 Å²).
 
-The round's model and map coefficients open in Coot (2mFo-DFc and mFo-DFc with
-`--auto`, and ANOM/PHANOM at 3σ when present), unless `--no-coot`. Coot's
-files go to `run_NNN/CootGUI/`. A Coot problem never fails the run; the model
-and map paths are printed instead.
-
-Status `AUTOFDP_FDP_ROUND_DONE` when phenix.refine reported a refined f″ for
-every group, otherwise `AUTOFDP_FAILED`.
+A round's status is `AUTOFDP_FDP_ROUND_DONE` when phenix.refine reported a
+refined f″ for every group, otherwise `AUTOFDP_FAILED` (and the run stops).
 
 Not yet implemented in this step: the mFo-DFc and anomalous map values at each
 site (`map_value_at_site`).
 
-### 3. Decision for each site
+### 3. Occupancy adjustment (implemented)
 
 Let *q* be the occupancy, *f″ref* the refined value and *f″th* the theory.
+The anomalous signal fixes *q × f″*, so *f″ref* rises when the modelled *q*
+falls. *f″ref* below theory means the site holds less metal than modelled:
+lower *q*. Above theory: raise *q*.
 
-- **Converged**: \|f″ref − f″th\| ≤ tolerance. The site is held from now on.
-- **Otherwise**, the proposed occupancy is *q′ = q × f″ref / f″th* *(to
-  confirm: the papers adjust occupancy by hand, in the direction given by the
-  sign of the difference)*. Then:
-  - Raising occupancy (*q′ > q*) when mFo-DFc at the site is already a
-    significant hole (≤ −`--map-sigma`): lower B by `--b-step` instead.
-  - Lowering occupancy (*q′ < q*) when mFo-DFc is already a significant peak
-    (≥ +`--map-sigma`): raise B by `--b-step` instead.
-  - *q′ > 1.0*: occupancy is set to 1.0 and the site is flagged "f″ above
-    theory at full occupancy". Next round, B is lowered, if the map allows it.
-    If f″ is still too high, the site goes to identity review (a heavier-f″
-    element may fit better).
-  - *q′ < `--occupancy-floor`*: identity review (a lighter-f″ element may fit
-    better). For example, in the JACS paper an "Hg" site that stayed short of
-    10.17 below occupancy 0.10 turned out to be Ag.
-  - f″ that barely changes (by less than 0.2 × tolerance *(to confirm)*) after
-    an occupancy change: flagged "unresponsive". The JACS paper took this as a
-    sign of two metals or a wrong model.
-- AutoFDP writes a model with the new occupancy/B values and runs the next f″
-  round (`round_002`, ...) in the same run folder, for the sites that are not
-  yet converged.
-- After `--max-iterations` rounds, sites that have not converged go to review.
+**Order.** One site at a time. After round_001, the calibrated site (every
+metal site, or those given with `--site`) whose \|f″ref − f″th\| is largest,
+among those outside `--tolerance`, is adjusted until it is within the
+tolerance, has had `--max-iterations` adjustments (default 5), or is at the
+occupancy bound it would have to pass. Then the next site, ranked again by the
+latest round. Sites already within the tolerance are not touched. Metal sites
+left out with `--site` are refined in every round but never adjusted.
 
-Sites are updated together in each round. Sites closer than 3.5 Å to each other
-(for example the N3 and O4 metals of a bimetallic pair) have correlated f″
-values, and they are reported as a coupled pair.
+**Each adjustment** (`propose_occupancy`):
+
+- First step for a site: proportional, *q′ = q × f″ref / f″th*, the
+  occupancy at which *q × f″* would stay the same.
+- Later steps: a secant on 1/*q* through the site's last two rounds with
+  different occupancy. It fits *f″ = a + S/q* and solves for *f″ = f″th*,
+  which is exact when *f″* is inversely proportional to *q* up to an offset,
+  so it corrects the proportional step when the offset is not zero. It is
+  used only when *f″* rose as *q* fell (*S* > 0) and the fit reaches theory at
+  a positive occupancy; otherwise the step is proportional again (recorded in
+  the step's note). Rounds in which only another site changed are skipped.
+- One step changes *q* at most 4-fold and at least 0.01 (the PDB occupancy
+  column), always in the direction above. *q′* is rounded to 0.01 (half up;
+  towards *q* when the 4-fold limit applies) and kept within
+  [`--occupancy-floor`, 1.0].
+- A site already at 1.0 whose *f″* is still above theory stops with "f″ above
+  theory at full occupancy" (a heavier-f″ element, or B too high, may fit
+  better). A site at the floor whose *f″* is still below theory stops with
+  "f″ below theory at the occupancy floor" (for example, in the JACS paper an
+  "Hg" site that stayed short of 10.17 below occupancy 0.10 turned out to be
+  Ag). Both go to review.
+
+**Each round** after an adjustment (`round_002`, `round_003`, ...) is the same
+f″-only round as round_001: the same `autofdp.params` (only
+`group_anomalous`; f′ fixed at theory and f″ refined from 0 for every site),
+the same `--cycles` and ReadySet dictionaries. Its model,
+`round_NNN/input_model.pdb`, is the previous round's model with only that
+site's occupancy changed; B stays as set in step 1.
+
+**The end.** `AUTOFDP_CONVERGED` when every calibrated site is within the
+tolerance in the last round; `AUTOFDP_REVIEW` when one is not (at a bound, out
+of adjustments, not adjusted with `--max-iterations 0`, or moved out of the
+tolerance while another site was adjusted). The last round's model is copied to
+`final_model.pdb` in both cases; its occupancies are the measured ones only for
+converged sites.
+
+The last round's model and map coefficients open in Coot (2mFo-DFc and mFo-DFc
+with `--auto`, and ANOM/PHANOM at 3σ when present), unless `--no-coot`. Coot's
+files go to `run_NNN/CootGUI/`. A Coot problem never fails the run; the model
+and map paths are printed instead. The command prints round_001's table, one
+line per adjustment round (site, occupancy before → after, method, f″ against
+theory), and a final table with each site's start and final occupancy and the
+reason it stopped.
+
+Not implemented in this step: the mFo-DFc check that would change B instead of
+occupancy (`--b-step`, `--map-sigma`), and the "unresponsive" flag. Sites
+closer than 3.5 Å to each other (for example the N3 and O4 metals of a
+bimetallic pair) have correlated f″ values; they are adjusted one after the
+other like any other sites, and a site that leaves the tolerance while its
+neighbour is adjusted is reported for review, not adjusted again.
 
 ### 4. Identity check
 
@@ -292,6 +328,10 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
 - `round_001/`: `autofdp.params`, `command.json`, `phenix.refine.preflight.log`,
   `phenix.refine.log`, and phenix.refine's outputs (`refined_001.pdb`,
   `refined_001_map_coeffs.mtz`, ...);
+- `round_002/`, ...: the same, plus `input_model.pdb` (the model with the
+  adjusted occupancy) for each step-3 round;
+- `final_model.pdb`: the last round's model, with the adjusted occupancies
+  (not written when a round failed);
 - `report.json`, with `workflow: "autofdp"` and schema 2:
   - `inputs`: the model, the MTZ and any `--cif` files, each as a portable
     reference (anchored to the dataset folder when the run is in
@@ -306,16 +346,26 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
   - `readyset`: the command, mode, log, model, generated and input
     dictionaries, curated residues, the dictionaries passed to phenix.refine,
     and the model comparison;
-  - `rounds`: per round, the folder, strategy, starting groups, cycles, R-work
-    and R-free, the held-parameter check, the refined model and map
-    coefficients, and per site the occupancy, B, fixed f′, refined f″, theory,
-    deviation and whether it is within tolerance;
-  - `status`, `message` and `steps`.
+  - `rounds`: per round, the folder, the input model, the adjusted site with
+    its occupancy before and after and the method (proportional or secant, and
+    a note), strategy, starting groups, cycles, R-work and R-free, the
+    held-parameter check, the refined model and map coefficients, and per site
+    the occupancy, B, fixed f′, refined f″, theory, deviation and whether it
+    is within tolerance;
+  - `occupancy`: the method and limits (`max_iterations`, `floor`, `ceiling`,
+    `max_ratio`), every adjustment in order, and per calibrated site the start
+    and final occupancy, number of adjustments, final f″ and deviation,
+    whether it converged, the reason, and its history (round, occupancy, f″,
+    deviation);
+  - `final_model`, `settings` (with `max_iterations` and `occupancy_floor`),
+    `status`, `message` and `steps` (`occupancy_adjustment`: `done`, `review`,
+    `failed` or `not run`).
 
-  Planned, in addition: mFo-DFc and anomalous map σ at each site, the decision
-  per round, the identity check, and the recommended model.
+  Planned, in addition: mFo-DFc and anomalous map σ at each site and the
+  identity check.
 - `autofdp.log`: the same in human-readable form;
-- `CootGUI/`: Coot's log, backups and map script;
+- `CootGUI/`: Coot's log, backups and map script (the last round's model and
+  maps are opened);
 - planned: `fdp_table.tsv`, one row per site per round, for plotting.
 
 PDB files do not store f″; the refined values are in `report.json`.
@@ -324,11 +374,11 @@ PDB files do not store f″; the refined values are in `report.json`.
 
 | Status | Exit | When |
 |---|---|---|
-| `AUTOFDP_PREPARED` | - | in `report.json` between step 1 and the end of the round |
-| `AUTOFDP_FDP_ROUND_DONE` | 0 | step 2 done: one f″ round with a refined f″ for every group (until occupancy adjustment exists) |
-| `AUTOFDP_CONVERGED` | 0 | every site within tolerance and B confirmation passed |
-| `AUTOFDP_REVIEW` | 2 | any site not converged, hit an occupancy bound, unresponsive, coupled, ambiguous in identity, or with B drift; per-site reasons are in the report |
-| `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″; the run folder is kept |
+| `AUTOFDP_PREPARED` | - | in `report.json` between step 1 and the end of round_001 |
+| `AUTOFDP_FDP_ROUND_DONE` | - | status of each finished round, and of `report.json` between rounds |
+| `AUTOFDP_CONVERGED` | 0 | every calibrated site within tolerance in the last round (later: and B confirmation passed) |
+| `AUTOFDP_REVIEW` | 2 | a calibrated site not within tolerance: at an occupancy bound, out of adjustments, not adjusted (`--max-iterations 0`), or moved while another site was adjusted (later also: ambiguous in identity, B drift); per-site reasons are in the report |
+| `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″ in any round; the run folder is kept |
 | preflight error | 1 | before any folder is written |
 
 ## Interaction with other commands
@@ -352,7 +402,10 @@ PDB files do not store f″; the refined values are in `report.json`.
 ## Questions for the lab before implementation
 
 1. Is occupancy adjusted proportionally (*q × f″ref / f″th*) or by hand in
-   steps?
+   steps? *(Decided for now, 2026-11-13: lower when f″ is below theory, higher
+   when above, one site at a time from the largest deviation, at most 5
+   adjustments per site; the step rule (proportional, then secant on 1/q) was
+   left to me.)*
 2. Is f″ restarted from 0 in every round, or from the previous value?
 3. "B roughly the same as its neighbours" is implemented as the atom-weighted
    mean B of the bridged pair (with the fallbacks above). Should it be all
@@ -367,7 +420,7 @@ PDB files do not store f″; the refined values are in `report.json`.
    1.00743 Å; the papers quote Ag 2.06 and Hg 10.17 at 12300 eV. Tabulated
    values ignore white-line effects at an absorption edge (the JACS supplement
    measured Au f″ 11 against about 10 at the Au L-III edge), hence `--theory`.
-7. Are the occupancy floor (0.05), the iteration limit (8) and the B-drift
-   limit (25%) reasonable?
+7. Are the occupancy floor (0.05), the iteration limit (5 per site) and the
+   B-drift limit (25%) reasonable?
 8. Should coupled sites (bimetallic pairs) be calibrated together, or one at a
    time with the other held?

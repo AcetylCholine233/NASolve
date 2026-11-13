@@ -46,8 +46,9 @@ NASolve documentation is organized by role, not chronology.
   renamed-real-W Scout v2 shadow validation and the remaining live-wiring gates.
 - [`autofdp.md`](autofdp.md) — `nasolve autofdp MODEL.pdb DATA.mtz`,
   occupancy and identity of metal sites from f'' refinement, from a model and
-  an MTZ alone (steps 1-2 implemented: B start and one f''-only round compared
-  with theory; later steps specified, open questions for the lab listed).
+  an MTZ alone (steps 1-3 implemented: B start, an f''-only round compared
+  with theory, and occupancy adjusted site by site until f'' matches; later
+  steps specified, open questions for the lab listed).
 - [`campaign-model-roadmap.md`](campaign-model-roadmap.md) — forward-looking
   model/sequence/processing architecture and the current Campaign Doctor
   implementation boundary.

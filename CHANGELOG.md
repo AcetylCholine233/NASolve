@@ -64,7 +64,7 @@ entries are reconstructed from repository history.
 
 ### Added
 
-- `nasolve autofdp MODEL.pdb DATA.mtz` (steps 1-2 of the f'' occupancy
+- `nasolve autofdp MODEL.pdb DATA.mtz` (steps 1-3 of the f'' occupancy
   calibration specified in `docs/autofdp.md`, after the mmDNA supplements:
   Adv. Mater. 2023, JACS 2023, Small 2025, Sci. Adv. 2026). It needs only a
   starting model and an MTZ; it reads no run report, AutoRefine round or
@@ -96,17 +96,41 @@ entries are reconstructed from repository history.
     `--coot`). `--theory ELEMENT=FDP` replaces an element's theoretical f''.
     `--cif` adds dictionaries for ReadySet and phenix.refine. Schema:
     `report.json` gains `readyset` and `steps.readyset`.
+  - Step 3 (occupancy adjustment): the calibrated sites one at a time, the one
+    furthest from theory first. Occupancy goes down when the refined f'' is
+    below theory and up when above (`propose_occupancy`: proportional first
+    step q x f''/theory, then a secant on 1/q through the site's last two
+    occupancies; at most 4-fold and at least 0.01 per step, within
+    `--occupancy-floor`, default 0.05, and 1.0), written into a copy of the
+    previous round's model (`round_NNN/input_model.pdb`, only that occupancy
+    changed), and the same f''-only round runs again (same parameters,
+    cycles and dictionaries; f'' from 0). A site stops when it is within
+    `--tolerance`, after `--max-iterations` adjustments (now default 5, per
+    site; 0 runs round_001 only), or at full occupancy / the floor with f''
+    still on the wrong side. The last round's model is `final_model.pdb` and
+    opens in Coot with its maps; the command prints every adjustment and a
+    final table. Status `AUTOFDP_CONVERGED` (exit 0) when every calibrated
+    site is within tolerance, `AUTOFDP_REVIEW` (exit 2) with per-site reasons
+    otherwise, `AUTOFDP_FAILED` (exit 1) when a round fails. Schema (additive,
+    still 2): each `rounds` entry gains `input_model`, `adjusted_site`,
+    `occupancy_before`/`after`, `method` and `note`, and each site its
+    `alternate`; `report.json` gains `occupancy` (method, limits, every
+    adjustment, per-site outcome and history), `final_model`, and
+    `settings.max_iterations`/`occupancy_floor`; `steps.occupancy_adjustment`
+    is now `done`, `review`, `failed` or `not run`. The `decide_site_update`
+    stub is replaced by `propose_occupancy`.
   - Output: a new `run_NNN` in `AutoFDP/` beside the MTZ (`--output` for
     another folder). Schema: `report.json` (`workflow: "autofdp"`, schema 2)
     with portable, checksummed references to the inputs (dataset anchor) and
-    outputs (run anchor), what was read from the MTZ, the theory, the B start
-    and `rounds`; status `AUTOFDP_FDP_ROUND_DONE` or `AUTOFDP_FAILED`.
+    outputs (run anchor), what was read from the MTZ, the theory, the B start,
+    `rounds` and `occupancy`; each round's status is `AUTOFDP_FDP_ROUND_DONE`
+    or `AUTOFDP_FAILED`.
     `AutoFDP` joins `AutoMR` and `AutoSolMetal` as a dataset-level run series
     for path anchoring. `--plan` does the preflight (running only
     `phenix.mtz.dump` and `phenix.python`) and writes nothing.
-  - Not implemented yet: occupancy adjustment, identity check, B confirmation
-    and the final round (documented stubs in `nasolve.autofdp`); `--element`
-    is refused. phenix.refine, phenix.mtz.dump, phenix.python and Coot are
+  - Not implemented yet: the identity check, B confirmation, the final round
+    and the map-based choice between B and occupancy (documented stubs in
+    `nasolve.autofdp`); `--element` is refused. phenix.refine, phenix.mtz.dump, phenix.python and Coot are
     simulated in tests; not yet run on real data.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial

@@ -1,7 +1,8 @@
 """`nasolve autofdp` is specified in docs/autofdp.md. Step 1 (B start) is
 implemented and tested in test_autofdp_bstart.py; the preflight and step 2
-(one f''-only round from a model and an MTZ) in test_autofdp_round.py. The
-later steps must stay documented stubs until they are implemented.
+(one f''-only round from a model and an MTZ) in test_autofdp_round.py; step 3
+(occupancy adjustment) in test_autofdp_occupancy.py. The later steps must stay
+documented stubs until they are implemented.
 """
 
 import inspect
@@ -22,12 +23,11 @@ class AutoFDPSpecificationTests(unittest.TestCase):
                        "--coot", "--phenix-root"):
             self.assertIn(option, help_text)
         flowing = " ".join(help_text.split())  # argparse wraps lines
-        self.assertIn("Only steps 1 and 2 are implemented", flowing)
+        self.assertIn("Steps 1 to 3 are implemented", flowing)
         self.assertIn("NOT IMPLEMENTED YET", flowing)
 
     def test_engine_functions_are_documented_stubs(self):
-        names = ["map_value_at_site", "decide_site_update", "identity_check",
-                 "confirm_b_round", "final_round"]
+        names = ["map_value_at_site", "identity_check", "confirm_b_round", "final_round"]
         for name in names:
             function = getattr(autofdp, name)
             with self.subTest(function=name):
@@ -48,6 +48,8 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         settings = autofdp.AutoFDPSettings()
         self.assertEqual(settings.tolerance, 1.0)
         self.assertEqual(settings.cycles, 3)
+        self.assertEqual(settings.max_iterations, 5)
+        self.assertEqual(settings.occupancy_floor, 0.05)
         self.assertEqual(settings.b_start, "surrounding")
         self.assertTrue(settings.confirm_b)
         self.assertFalse(settings.final)

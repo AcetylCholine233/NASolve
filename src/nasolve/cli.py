@@ -271,21 +271,24 @@ def build_parser() -> argparse.ArgumentParser:
     autofdp = subparsers.add_parser(
         "autofdp",
         help="measure metal occupancy by f'' refinement from a model and an MTZ "
-             "(steps 1-2 of the plan implemented)",
+             "(steps 1-3 of the plan implemented)",
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
             "within the tolerance of theory. Needs only a starting model (PDB) and "
             "an MTZ with anomalous data and Free-R flags; labels, flags and "
-            "wavelength are read from the MTZ, the metal sites from the model. Only "
-            "steps 1 and 2 are implemented: copy the model and set each metal's B to "
-            "the mean B of its neighbouring nucleotides (step 1), then run ReadySet "
-            "(no hydrogens) for the restraint dictionaries and one "
-            "phenix.refine round with every strategy off except the anomalous "
-            "scatterers (f' fixed at theory, f'' refined from 0), open the result "
-            "and its maps in Coot, and print each refined f'' against theory "
-            "(step 2). Occupancy adjustment and the later steps are NOT IMPLEMENTED "
-            "YET. See docs/autofdp.md."
+            "wavelength are read from the MTZ, the metal sites from the model. Steps "
+            "1 to 3 are implemented: copy the model and set each metal's B to the "
+            "mean B of its neighbouring nucleotides (step 1); run ReadySet (no "
+            "hydrogens) for the restraint dictionaries and one phenix.refine round "
+            "with every strategy off except the anomalous scatterers (f' fixed at "
+            "theory, f'' refined from 0) (step 2); then, one site at a time and the "
+            "one furthest from theory first, lower the occupancy if f'' is below "
+            "theory or raise it if above, and run the same round again, until f'' is "
+            "within the tolerance or the site has had --max-iterations adjustments "
+            "(step 3). The last round's model and maps open in Coot. The identity "
+            "check, B confirmation and final round are NOT IMPLEMENTED YET. See "
+            "docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -333,12 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="refined f'' within E electrons of theory counts as matching (default: 1.0)",
     )
     autofdp.add_argument(
-        "--max-iterations", type=int, default=8, metavar="N",
-        help="(later step, not used yet) f'' rounds before review (default: 8)",
+        "--max-iterations", type=int, default=5, metavar="N",
+        help="occupancy adjustments (one f'' round each) per metal site before the "
+             "site goes to review (default: 5; 0 runs the first round only)",
     )
     autofdp.add_argument(
         "--cycles", type=int, default=3, metavar="N",
-        help="phenix.refine macrocycles in the f'' round (default: 3)",
+        help="phenix.refine macrocycles in each f'' round (default: 3)",
     )
     autofdp.add_argument(
         "--b-start", default="surrounding", metavar="surrounding|model|VALUE",
@@ -350,7 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--occupancy-floor", type=float, default=0.05, metavar="Q",
-        help="(later step, not used yet) below this occupancy the site goes to identity review (default: 0.05)",
+        help="lowest occupancy AutoFDP sets; a site whose f'' is still below theory "
+             "there goes to review (default: 0.05)",
     )
     autofdp.add_argument(
         "--map-sigma", type=float, default=3.0, metavar="S",
@@ -371,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--no-coot", action="store_true",
-        help="do not open the f'' round's model and maps in Coot",
+        help="do not open the last f'' round's model and maps in Coot",
     )
     autofdp.add_argument(
         "--coot", type=Path, metavar="PATH",
@@ -1676,28 +1681,8 @@ def _print_autofdp_plan(plan) -> None:
         print(f"Warning: {warning}")
 
 
-def _print_fdp_round(result) -> None:
-    """Print AutoFDP step 2: refined f'' of every site against theory."""
-    round_result = result.round
-    status_color = "32" if result.status == "AUTOFDP_FDP_ROUND_DONE" else "31"
-    readyset = result.readyset
-    print(f"\nReadySet (no hydrogens): {readyset.mode}; atoms, coordinates and B unchanged")
-    if readyset.curated_codes:
-        print("  curated dictionaries given: " + ", ".join(readyset.curated_codes))
-    print(
-        "  restraints for phenix.refine: "
-        + (", ".join(_relative_to(path, result.run_directory) for path in readyset.dictionaries)
-           or "none needed")
-    )
-    print(
-        f"\nAutoFDP step 2: f''-only round ({_relative_to(round_result.directory, result.run_directory)}, "
-        f"{round_result.cycles} cycles; only the anomalous scatterers refined, f' fixed at "
-        "theory, f'' from 0)"
-    )
-    print(
-        f"R-work {_format_metric(round_result.r_work)}, "
-        f"R-free {_format_metric(round_result.r_free)}"
-    )
+def _print_fdp_table(round_result) -> None:
+    """Every site of one f'' round: occupancy, B, f', refined f'' and theory."""
     tolerance = round_result.tolerance
     print(
         f"\n{'Site':<14}{'Occ':>6}{'B':>9}{'f-prime':>9}{'fdp':>9}"
@@ -1718,22 +1703,103 @@ def _print_fdp_round(result) -> None:
             f"{label:<14}{occupancy:>6}{b_factor:>9}{site.f_prime:>9.2f}{refined:>9}"
             f"{site.f_double_prime_theory:>9.2f}{deviation:>11}{verdict}"
         )
-    sources = sorted({f"{site.element} {site.theory_source}" for site in round_result.sites})
+
+
+def _print_fdp_round(result, max_iterations: int) -> None:
+    """Print AutoFDP steps 2 and 3: every round's f'' against theory."""
+    from .autofdp import STATUS_CONVERGED, STATUS_ROUND_DONE
+
+    rounds = result.rounds or (result.round,)
+    first = rounds[0]
+    status_color = {STATUS_CONVERGED: "32", "AUTOFDP_REVIEW": "33"}.get(result.status, "31")
+    readyset = result.readyset
+    print(f"\nReadySet (no hydrogens): {readyset.mode}; atoms, coordinates and B unchanged")
+    if readyset.curated_codes:
+        print("  curated dictionaries given: " + ", ".join(readyset.curated_codes))
+    print(
+        "  restraints for phenix.refine: "
+        + (", ".join(_relative_to(path, result.run_directory) for path in readyset.dictionaries)
+           or "none needed")
+    )
+    print(
+        f"\nAutoFDP step 2: f''-only round ({_relative_to(first.directory, result.run_directory)}, "
+        f"{first.cycles} cycles; only the anomalous scatterers refined, f' fixed at "
+        "theory, f'' from 0)"
+    )
+    print(f"R-work {_format_metric(first.r_work)}, R-free {_format_metric(first.r_free)}")
+    _print_fdp_table(first)
+    sources = sorted({f"{site.element} {site.theory_source}" for site in first.sites})
     print("Theory: " + "; ".join(sources))
-    others = [site for site in round_result.sites if not site.calibrated]
+    others = [site for site in first.sites if not site.calibrated]
     if others:
         print(
-            "Also refined (metal sites left out with --site; B not set): "
+            "Also refined (metal sites left out with --site; B and occupancy not set): "
             + ", ".join(f"{site.site} {site.atom_name}" for site in others)
         )
-    for warning in round_result.warnings:
+    for warning in first.warnings:
         print(f"Warning: {warning}")
+
+    tolerance = first.tolerance
+    if first.status == STATUS_ROUND_DONE:
+        print(
+            "\nAutoFDP step 3: occupancy adjustment (one site at a time, furthest from theory "
+            f"first; up to {max_iterations} adjustment(s) per site; same f''-only round each time)"
+        )
+        changed = {adjustment.round: adjustment for adjustment in result.adjustments}
+        for number, round_result in enumerate(rounds[1:], start=2):
+            adjustment = changed.get(number)
+            site = next((item for item in round_result.sites
+                         if adjustment and item.selection == adjustment.selection), None)
+            line = f"  round_{number:03d}"
+            if adjustment is not None:
+                line += (
+                    f"  {adjustment.site} {adjustment.atom_name}  occupancy "
+                    f"{adjustment.occupancy_before:.2f} -> {adjustment.occupancy_after:.2f} "
+                    f"({adjustment.method})"
+                )
+            if site is not None and site.f_double_prime_refined is not None:
+                verdict = "within" if site.within_tolerance else "outside"
+                line += (
+                    f"  f'' {site.f_double_prime_refined:.2f} vs {site.f_double_prime_theory:.2f} "
+                    f"({site.deviation:+.2f}, {verdict} +/-{tolerance:g})"
+                )
+            print(line)
+            if adjustment is not None and adjustment.note:
+                print(f"      {adjustment.note}")
+            if round_result.status != STATUS_ROUND_DONE:
+                print(f"      {round_result.message}")
+            for warning in round_result.warnings:
+                print(f"      Warning: {warning}")
+        if not result.adjustments:
+            if all(outcome.converged for outcome in result.outcomes):
+                print(f"  every site already within +/-{tolerance:g} e- of theory; "
+                      "no occupancy changed")
+            for outcome in result.outcomes:
+                if not outcome.converged:
+                    print(f"  {outcome.site} {outcome.atom_name}: {outcome.reason}")
+        elif result.outcomes:
+            last = rounds[-1] if rounds[-1].status == STATUS_ROUND_DONE else rounds[-2]
+            print(f"\nResult ({_relative_to(last.directory, result.run_directory)})")
+            print(f"{'Site':<14}{'Occupancy':>14}{'fdp':>9}{'theory':>9}{'deviation':>11}")
+            for outcome in result.outcomes:
+                start = "-" if outcome.occupancy_start is None else f"{outcome.occupancy_start:.2f}"
+                final = "-" if outcome.occupancy_final is None else f"{outcome.occupancy_final:.2f}"
+                refined = ("none" if outcome.f_double_prime_refined is None
+                           else f"{outcome.f_double_prime_refined:.2f}")
+                deviation = "n/a" if outcome.deviation is None else f"{outcome.deviation:+.2f}"
+                label = f"{outcome.site} {outcome.atom_name}"
+                print(
+                    f"{label:<14}{start + ' -> ' + final:>14}{refined:>9}"
+                    f"{outcome.f_double_prime_theory:>9.2f}{deviation:>11}  {outcome.reason}"
+                )
     print(f"\n{_color(result.status, status_color)}: {result.message}")
+    if result.final_model is not None:
+        print(f"Model with the final occupancies: {result.final_model}")
     print(f"Run folder: {result.run_directory}")
 
 
 def _open_fdp_view(args: argparse.Namespace, result) -> None:
-    """Open the f'' round's model and maps; a Coot problem never fails the run."""
+    """Open the last f'' round's model and maps; a Coot problem never fails the run."""
     round_result = result.round
     if round_result.model_path is None or round_result.map_coefficients is None:
         return
@@ -1751,7 +1817,8 @@ def _open_fdp_view(args: argparse.Namespace, result) -> None:
             round_result.map_coefficients,
             coot.executable,
             working_directory=result.run_directory / "CootGUI",
-            source=f"AutoFDP f''-only round ({result.run_directory.name})",
+            source=(f"AutoFDP f''-only round {round_result.directory.name} "
+                    f"({result.run_directory.name})"),
             dictionaries=result.readyset.dictionaries,
         )
     except (ConfigError, CootDiscoveryError, CootViewError) as exc:
@@ -1759,15 +1826,17 @@ def _open_fdp_view(args: argparse.Namespace, result) -> None:
         print(f"Model: {round_result.model_path}")
         print(f"Maps: {round_result.map_coefficients}")
         return
-    print(f"Opened Coot (PID {view.pid}) with {view.model_path.name} and {view.map_path.name}")
+    print(f"Opened Coot (PID {view.pid}) with {round_result.directory.name}/{view.model_path.name} "
+          f"and {view.map_path.name}")
     print("Anomalous map: Coot also opens ANOM/PHANOM at 3 sigma when present")
     print(f"Coot log: {view.log_path}")
 
 
 def _autofdp(args: argparse.Namespace) -> int:
-    """AutoFDP steps 1 and 2 from a model and an MTZ."""
+    """AutoFDP steps 1 to 3 from a model and an MTZ."""
     from .autofdp import (
-        STATUS_ROUND_DONE,
+        STATUS_CONVERGED,
+        STATUS_REVIEW,
         AutoFDPError,
         execute_autofdp,
         parse_b_start,
@@ -1786,6 +1855,10 @@ def _autofdp(args: argparse.Namespace) -> int:
             raise AutoFDPError("--cycles must be at least 1")
         if not math.isfinite(args.tolerance) or args.tolerance <= 0:
             raise AutoFDPError("--tolerance must be a positive number of electrons")
+        if args.max_iterations < 0:
+            raise AutoFDPError("--max-iterations must be 0 or more")
+        if not (math.isfinite(args.occupancy_floor) and 0 < args.occupancy_floor < 1):
+            raise AutoFDPError("--occupancy-floor must be above 0 and below 1")
         if args.coot is not None and args.no_coot:
             raise AutoFDPError("--coot and --no-coot cannot be combined")
         config = load_config()
@@ -1812,23 +1885,31 @@ def _autofdp(args: argparse.Namespace) -> int:
                 "\nThen: ReadySet on the start model (no hydrogens) for the restraint "
                 f"dictionaries, and one f''-only phenix.refine round of {args.cycles} cycles "
                 "(every strategy off except the anomalous scatterers; f' fixed at theory, "
-                f"f'' from 0), in a new run folder of {plan.output_root}"
+                f"f'' from 0), in a new run folder of {plan.output_root}; then up to "
+                f"{args.max_iterations} occupancy adjustment(s) per site outside "
+                f"+/-{args.tolerance:g} e- of theory, one site at a time (furthest first), "
+                f"with the same round after each (occupancy floor {args.occupancy_floor:g})"
             )
             print("Plan only: no refinement was run and nothing was written.")
             return 0
-        print(f"\nAutoFDP f'' round started ({args.cycles} cycles)")
+        print(f"\nAutoFDP f'' rounds started ({args.cycles} cycles each)")
         result = execute_autofdp(
             plan, refine, ready_set,
             phenix_version=phenix.version, b_start=b_start, sites=tuple(args.site),
-            cycles=args.cycles, tolerance=args.tolerance, environment=phenix.environment,
+            cycles=args.cycles, tolerance=args.tolerance,
+            max_iterations=args.max_iterations, occupancy_floor=args.occupancy_floor,
+            environment=phenix.environment,
         )
     except (AutoFDPError, ConfigError, PhenixDiscoveryError) as exc:
         print(f"AutoFDP error: {exc}", file=sys.stderr)
         return 1
-    _print_fdp_round(result)
+    _print_fdp_round(result, args.max_iterations)
     _open_fdp_view(args, result)
-    print("Occupancy adjustment and the later AutoFDP steps are not implemented yet.")
-    return 0 if result.status == STATUS_ROUND_DONE else 1
+    print("Not implemented yet: the identity check, B confirmation and the final "
+          "all-parameter round.")
+    if result.status == STATUS_CONVERGED:
+        return 0
+    return 2 if result.status == STATUS_REVIEW else 1
 
 
 def main(argv: list[str] | None = None) -> int:
