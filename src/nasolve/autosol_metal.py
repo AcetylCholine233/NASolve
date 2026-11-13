@@ -104,6 +104,10 @@ class MetalSearchResult:
     phaser_map: Path
     heavy_atom_model: Path | None
     sites: tuple[dict[str, object], ...]
+    # AutoSol's partial model: the Phaser model, or a copy in the metal-search
+    # folder with the AutoMR-requested residues built in.
+    partial_model: Path | None = None
+    mutations: tuple[dict[str, object], ...] = ()
 
 
 def parse_metals(values: Sequence[str]) -> tuple[str, ...]:
@@ -377,6 +381,8 @@ def execute_metal_search(
     partial_model_rmsd: float = DEFAULT_PARTIAL_MODEL_RMSD,
     allow_mr_review: bool = False,
     sequence_file: Path | None = None,
+    build_requested_residues: bool = True,
+    coot_executable: Path | None = None,
     environment: Mapping[str, str] | None = None,
     processor_count: int | None = None,
 ) -> MetalSearchResult:
@@ -387,6 +393,15 @@ def execute_metal_search(
     or else the nucleotide chains of the Phaser model itself, which hold every
     strand in the asymmetric unit (needed for frames without ``seq_base.txt``,
     such as 3GBI).
+
+    Before AutoSol, the residues the AutoMR run asks for (its standard pair,
+    explicit mutations or sequences) are built into a copy of the Phaser model,
+    exactly as PostMR builds them (headless Coot, then the parent's
+    coordinates restored), unless ``build_requested_residues`` is False. That
+    copy is AutoSol's partial model, so heavy atoms that belong to the bases,
+    such as the iodines of 5-iodo-dC and 5-iodo-dU, are part of the model
+    instead of being found as metal sites. Coot is required only when there
+    is something to build.
     """
     elements = parse_metals(metals)
     if not math.isfinite(partial_model_rmsd) or partial_model_rmsd <= 0:
@@ -406,6 +421,29 @@ def execute_metal_search(
     input_dump = _run_mtz_dump(reflections, mtz_dump_executable, environment)
     wavelength, wavelength_source = resolve_wavelength(input_dump, reflections, summary)
     labels = anomalous_labels(input_dump)
+    mutation_plan = None
+    if build_requested_residues and report.get("post_mr_plan") is not None:
+        from .postmr import PostMRPreparationError, plan_model_mutations
+
+        try:
+            planned = plan_model_mutations(report, phaser_model, run)
+        except PostMRPreparationError as exc:
+            raise AutoSolPreparationError(
+                f"Cannot build the AutoMR residues into the Phaser model: {exc}. "
+                "Use --original-model to search with the Phaser model as it is."
+            ) from exc
+        if planned.coot_actions:
+            mutation_plan = planned
+            if coot_executable is None:
+                changes = ", ".join(
+                    f"{action.site} {action.before}->{action.after}"
+                    for action in planned.coot_actions
+                )
+                raise AutoSolPreparationError(
+                    f"The AutoMR run asks for {changes}; the metal search builds these "
+                    "into the Phaser model with Coot first, but no Coot is configured. "
+                    "Run 'nasolve configure coot PATH', or use --original-model."
+                )
     sequence_warnings: list[str] = []
     if sequence_file is not None:
         sequence_source = _checked_sequence_file(sequence_file)
@@ -418,6 +456,8 @@ def execute_metal_search(
         elif generated_sequence is not None:
             sequence_origin = "post_mr_plan.sequences"
         else:
+            # Same chains and lengths as the partial model built below:
+            # curated residues count as their parent.
             chains, sequence_warnings = model_sequences(phaser_model)
             if not chains:
                 raise AutoSolPreparationError(
@@ -433,6 +473,45 @@ def execute_metal_search(
 
     output = _next_metal_run(run)
     log_path = output / "autosol.console.log"
+    partial_model = phaser_model
+    partial_record: dict[str, object] = {
+        "source": "Phaser model as it is",
+        "mutations": [],
+    }
+    build_error: str | None = None
+    if not build_requested_residues:
+        partial_record["source"] = "Phaser model as it is (--original-model)"
+    if mutation_plan is not None:
+        from .postmr import PostMRPreparationError, apply_model_mutations
+
+        model_dir = output / "PartialModel"
+        coot_dir = model_dir / "Coot"
+        coot_dir.mkdir(parents=True)
+        original = model_dir / "mr_solution.pdb"
+        shutil.copyfile(phaser_model, original)
+        partial_record = {
+            "source": "Phaser model with the AutoMR residues built in (Coot, as in PostMR)",
+            "mutations": [
+                {"site": action.site, "before": action.before, "after": action.after,
+                 "method": action.method}
+                for action in mutation_plan.actions if action.method != "none"
+            ],
+        }
+        try:
+            built, coot_log, restoration = apply_model_mutations(
+                original, mutation_plan, model_dir, coot_dir, coot_executable, environment,
+                output_name="partial_model.pdb",
+            )
+        except PostMRPreparationError as exc:
+            build_error = str(exc)
+            coot_log = coot_dir / "coot.log"
+            partial_record["coot_log"] = (
+                _reference(coot_log, output) if coot_log.is_file() else None
+            )
+        else:
+            partial_model = built
+            partial_record["coot_log"] = _reference(coot_log, output) if coot_log else None
+            partial_record["coordinate_restoration"] = restoration
     sequence_path = output / "sequence_input.txt"
     if sequence_source is not None:
         shutil.copyfile(sequence_source, sequence_path)
@@ -448,7 +527,7 @@ def execute_metal_search(
         "autosol.labels=" + " ".join(labels),
         f"autosol.atom_type={elements[0]}",
         f"autosol.lambda={wavelength:.8g}",
-        f"autosol.phasing.input_partpdb_file={phaser_model}",
+        f"autosol.phasing.input_partpdb_file={partial_model}",
         f"autosol.phasing.partpdb_rms={partial_model_rmsd:g}",
     ]
     if len(elements) > 1:
@@ -479,10 +558,14 @@ def execute_metal_search(
         "inputs": {
             "reflections": _reference(reflections, output),
             "phaser_model": _reference(phaser_model, output),
+            "partial_model": _reference(partial_model, output),
             "phaser_map": _reference(phaser_map, output),
             "sequence": _reference(sequence_path, output),
         },
         "command": command,
+        "partial_model": partial_record,
+        # The AutoMR run's own files are never changed; a built partial model
+        # lives in this metal-search folder.
         "model_changed": False,
     }
 
@@ -502,8 +585,16 @@ def execute_metal_search(
             report_path=report_path, log_path=log_path, metals=elements,
             partial_model_rmsd=partial_model_rmsd, phaser_model=phaser_model,
             phaser_map=phaser_map, heavy_atom_model=heavy_atom_model, sites=tuple(sites),
+            partial_model=partial_model,
+            mutations=tuple(partial_record.get("mutations", [])),  # type: ignore[arg-type]
         )
 
+    if build_error is not None:
+        return finish(
+            FAILED,
+            f"Coot could not build the AutoMR residues into the Phaser model: {build_error}",
+            None, [], {"return_code": None},
+        )
     try:
         completed = subprocess.run(
             command, cwd=output,
@@ -571,7 +662,7 @@ def execute_metal_search(
             heavy_atom_model, [], extra,
         )
 
-    atoms = _model_atoms(phaser_model)
+    atoms = _model_atoms(partial_model)
     try:
         *cell, space_group = _unit_cell(phaser_model)
     except AutoSolPreparationError:
@@ -581,7 +672,7 @@ def execute_metal_search(
     for index, site in enumerate(found, start=1):
         nearest, symmetry_note = (
             _nearest_residues(site["coordinates"], atoms, cell, space_group)  # type: ignore[arg-type]
-            if atoms else ([], "the Phaser model has no atoms")
+            if atoms else ([], "the partial model has no atoms")
         )
         sites.append({
             "index": index,
@@ -598,7 +689,7 @@ def execute_metal_search(
     )
     return finish(
         FOUND,
-        f"AutoSol found {counts} site(s); inspect them in Coot against the Phaser model and map",
+        f"AutoSol found {counts} site(s); inspect them in Coot against the partial model and map",
         heavy_atom_model, sites, extra,
     )
 

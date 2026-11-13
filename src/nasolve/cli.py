@@ -237,10 +237,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow the metal search on a Phaser result that needs review (TFZ 7-8)",
     )
     autosol.add_argument(
+        "--original-model", action="store_true",
+        help="metal search: use the Phaser model as it is, without first building the "
+             "residues the AutoMR run asks for (default: build them with Coot, as PostMR does)",
+    )
+    autosol.add_argument(
         "--no-coot", action="store_true",
         help="do not open Coot when the metal search finds sites",
     )
-    autosol.add_argument("--coot", help="one-run Coot executable override")
+    autosol.add_argument(
+        "--coot", help="one-run Coot executable override (also used to build the "
+                       "AutoMR residues before the metal search)",
+    )
     autorefine = subparsers.add_parser(
         "autorefine", help="run one quiet, checkpointed Phenix refinement round"
     )
@@ -987,6 +995,17 @@ def _autosol_metal(args: argparse.Namespace) -> int:
             )
         if mtz_dump_executable is None:
             raise AutoSolPreparationError("The metal search requires phenix.mtz.dump")
+        # Coot builds the AutoMR-requested residues before AutoSol. A missing
+        # Coot is reported by the search only when there is something to build.
+        coot_executable = None
+        if not args.original_model:
+            try:
+                coot = discover_coot(config, explicit=args.coot)
+                remember_coot(config, coot)
+                save_config(config)
+                coot_executable = coot.executable
+            except (ConfigError, CootDiscoveryError):
+                coot_executable = None
         result = execute_metal_search(
             run,
             autosol_executable,
@@ -997,6 +1016,8 @@ def _autosol_metal(args: argparse.Namespace) -> int:
             ),
             allow_mr_review=args.allow_mr_review,
             sequence_file=args.sequence,
+            build_requested_residues=not args.original_model,
+            coot_executable=coot_executable,
             environment=phenix.environment,
         )
     except (AutoSolPreparationError, ConfigError, PhenixDiscoveryError) as exc:
@@ -1005,6 +1026,17 @@ def _autosol_metal(args: argparse.Namespace) -> int:
     print(f"{result.status}: {result.message}")
     print(f"Metals searched: {', '.join(result.metals)}")
     print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
+    try:
+        record = json.loads(result.report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    partial = record.get("partial_model") if isinstance(record.get("partial_model"), dict) else {}
+    if partial.get("source"):
+        print(f"Partial model: {partial['source']}")
+    for change in result.mutations:
+        print(f"  {change['site']} {change['before']} -> {change['after']}")
+    if result.partial_model is not None and result.partial_model != result.phaser_model:
+        print(f"  built model: {result.partial_model}")
     try:
         record = json.loads(result.report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1047,7 +1079,12 @@ def _autosol_metal(args: argparse.Namespace) -> int:
         print(f"Coot view error: {exc}", file=sys.stderr)
         print(later)
         return 0
-    print(f"Opened Coot (PID {view.pid}) with the Phaser model, AutoSol sites and Phaser map")
+    print(
+        f"Opened Coot (PID {view.pid}) with the "
+        + ("Phaser model" if result.partial_model in (None, result.phaser_model)
+           else "partial model (AutoMR residues built in)")
+        + ", AutoSol sites and Phaser map"
+    )
     print(f"Coot log: {view.log_path}")
     _print_metal_merge_hint(view.metal_merge)
     return 0
@@ -1056,10 +1093,11 @@ def _autosol_metal(args: argparse.Namespace) -> int:
 def _autosol(args: argparse.Namespace) -> int:
     if args.metal:
         return _autosol_metal(args)
-    if args.rmsd is not None or args.allow_mr_review or args.no_coot or args.sequence:
+    if (args.rmsd is not None or args.allow_mr_review or args.no_coot or args.sequence
+            or args.original_model):
         print(
-            "AutoSol error: --rmsd, --allow-mr-review, --sequence and --no-coot apply "
-            "only to the metal search; add --metal ELEMENT",
+            "AutoSol error: --rmsd, --allow-mr-review, --sequence, --original-model and "
+            "--no-coot apply only to the metal search; add --metal ELEMENT",
             file=sys.stderr,
         )
         return 2

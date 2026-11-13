@@ -128,7 +128,14 @@ RUN=/absolute/path/to/dataset/AutoMR/run_001
 
 This runs `phenix.autosol` with the original Phaser model as the partial model
 (`autosol.phasing.partpdb_rms`, default 1.0 A; change it with `--rmsd`), lets
-AutoSol choose the number of sites, and does no model building. AutoSol's
+AutoSol choose the number of sites, and does no model building. When the AutoMR
+run asks for residues (a pair such as `iC:iU`, explicit mutations or
+sequences), they are first built into a copy of the Phaser model exactly as
+PostMR builds them (headless Coot), and that copy is AutoSol's partial model.
+Heavy atoms that belong to the bases, such as the iodines of 5-iodo-dC and
+5-iodo-dU, are then part of the model instead of being found as metal sites.
+This needs Coot; `--original-model` searches with the Phaser model as it is.
+The AutoMR run's own files are not changed. AutoSol's
 sequence is the frame `seq_base.txt` that AutoMR froze into the run (only the W
 catalogue has one); otherwise the nucleotide chains of the Phaser model are
 used (for example with the 3GBI frame), or give a file with `--sequence FILE`.

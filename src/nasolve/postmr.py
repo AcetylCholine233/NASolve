@@ -1405,6 +1405,142 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+@dataclass(frozen=True)
+class ModelMutationPlan:
+    """The residues to change in a model, checked before anything is written."""
+
+    actions: tuple[MutationAction, ...]
+    ligand_sources: Mapping[str, Path]  # curated dictionary of each overlap target
+
+    @property
+    def coot_actions(self) -> tuple[MutationAction, ...]:
+        return tuple(
+            action for action in self.actions
+            if action.method in {"coot-mutate-base", "coot-parent-overlap"}
+        )
+
+
+def plan_model_mutations(
+    report: Mapping[str, object],
+    source_model: Path,
+    run: Path,
+    *,
+    data_root: Path | None = None,
+) -> ModelMutationPlan:
+    """Plan the AutoMR-requested residues for ``source_model`` and check their
+    dictionaries (the first half of PostMR's mutation step; writes nothing).
+
+    The targets come from the frozen post-MR plan: a standard pair, explicit
+    mutations, sequences or a sequence family.
+    """
+    try:
+        family = load_frozen_sequence_family(report, run)
+    except SequenceReferenceError as exc:
+        raise PostMRPreparationError(str(exc)) from exc
+    actions = (
+        build_mutation_plan(report, source_model, run_directory=run)
+        if family is not None else build_mutation_plan(report, source_model)
+    )
+    ligand_sources: dict[str, Path] = {}
+    for code in sorted({
+        action.after for action in actions if action.method == "coot-parent-overlap"
+    }):
+        try:
+            ligand_definition(code)
+            dictionary = ligand_dictionary(code, data_root).resolve()
+            validate_ligand_dictionary(code, dictionary)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+        ligand_sources[code] = dictionary
+    return ModelMutationPlan(actions, ligand_sources)
+
+
+def apply_model_mutations(
+    original: Path,
+    plan: ModelMutationPlan,
+    model_dir: Path,
+    coot_dir: Path,
+    coot_executable: Path | None,
+    environment: Mapping[str, str] | None,
+    *,
+    output_name: str = "after_coot.pdb",
+) -> tuple[Path, Path | None, dict[str, object]]:
+    """Build the planned residues into ``original`` (the second half of
+    PostMR's mutation step).
+
+    Headless Coot mutates standard bases and overlaps curated residues on
+    their parent; the parent's shared atoms and the canonical backbones are
+    then restored to the input coordinates. Intermediate models go to
+    ``model_dir`` and Coot's script and log to ``coot_dir``. Returns the
+    built model (``model_dir/output_name``), the Coot log and the coordinate
+    restoration record. Without Coot actions the model is copied unchanged.
+    """
+    coot_actions = plan.coot_actions
+    after_coot = model_dir / output_name
+    coot_log: Path | None = None
+    coordinate_restoration: dict[str, object] = {}
+    if not coot_actions:
+        shutil.copyfile(original, after_coot)
+        return after_coot, coot_log, coordinate_restoration
+    if coot_executable is None:
+        sites = ", ".join(action.site for action in coot_actions)
+        raise PostMRPreparationError(
+            f"Coot is required for supported mutation site(s) {sites}"
+        )
+    overlap_actions = tuple(
+        action for action in coot_actions if action.method == "coot-parent-overlap"
+    )
+    canonical_actions = tuple(
+        action for action in coot_actions if action.method == "coot-mutate-base"
+    )
+    raw_after_coot = model_dir / "after_coot_raw.pdb"
+    parent_models = {
+        action.site: coot_dir
+        / f"parent_{action.site.replace(':', '_')}_{action.parent_code}.pdb"
+        for action in overlap_actions
+    }
+    coot_dictionaries = {
+        action.after: plan.ligand_sources[action.after] for action in overlap_actions
+    }
+    _, coot_log = _run_coot(
+        original,
+        raw_after_coot,
+        coot_actions,
+        coot_executable,
+        coot_dir,
+        environment,
+        coot_dictionaries,
+        parent_models,
+    )
+    geometry_after_coot = model_dir / "after_coot_geometry.pdb"
+    if overlap_actions:
+        coordinate_restoration = _restore_shared_parent_coordinates(
+            raw_after_coot,
+            geometry_after_coot,
+            overlap_actions,
+            parent_models,
+            plan.ligand_sources,
+        )
+    else:
+        shutil.copyfile(raw_after_coot, geometry_after_coot)
+    if canonical_actions:
+        canonical_restoration = _restore_canonical_mutation_backbones(
+            original,
+            geometry_after_coot,
+            after_coot,
+            canonical_actions,
+        )
+        coordinate_restoration.update(canonical_restoration)
+    else:
+        shutil.copyfile(geometry_after_coot, after_coot)
+    for action in plan.actions:
+        if residue_name(after_coot, action.site) != action.after:
+            raise PostMRPreparationError(
+                f"Coot did not build {action.after} at {action.site}"
+            )
+    return after_coot, coot_log, coordinate_restoration
+
+
 def prepare_postmr(
     run_directory: Path,
     ready_set_executable: Path,
@@ -1466,22 +1602,10 @@ def prepare_postmr(
     # Plan the mutations and check every dictionary and required program
     # before PostMR/ exists, so a missing input never leaves a half-made
     # PostMR folder that blocks the next attempt.
-    actions = (
-        build_mutation_plan(report, source_model, run_directory=run)
-        if family is not None else build_mutation_plan(report, source_model)
-    )
-    target_ligand_codes = sorted({
-        action.after for action in actions if action.method == "coot-parent-overlap"
-    })
-    ligand_specs = {code: ligand_definition(code) for code in target_ligand_codes}
-    ligand_sources: dict[str, Path] = {}
-    for code in target_ligand_codes:
-        try:
-            dictionary = ligand_dictionary(code, data_root).resolve()
-            validate_ligand_dictionary(code, dictionary)
-        except (KeyError, FileNotFoundError, ValueError) as exc:
-            raise PostMRPreparationError(str(exc)) from exc
-        ligand_sources[code] = dictionary
+    mutation_plan = plan_model_mutations(report, source_model, run, data_root=data_root)
+    actions = mutation_plan.actions
+    ligand_sources: dict[str, Path] = dict(mutation_plan.ligand_sources)
+    ligand_specs = {code: ligand_definition(code) for code in sorted(ligand_sources)}
     # Curated residues already in the model keep their dictionaries too.
     replaced_sites = {action.site for action in actions if action.method != "none"}
     for line in _coordinate_records(source_model):
@@ -1526,63 +1650,9 @@ def prepare_postmr(
 
     original = model_dir / "mr_solution.pdb"
     shutil.copyfile(source_model, original)
-    overlap_actions = tuple(
-        action for action in coot_actions if action.method == "coot-parent-overlap"
+    after_coot, coot_log, coordinate_restoration = apply_model_mutations(
+        original, mutation_plan, model_dir, coot_dir, coot_executable, environment,
     )
-    canonical_actions = tuple(
-        action for action in coot_actions if action.method == "coot-mutate-base"
-    )
-    coot_log: Path | None = None
-    coordinate_restoration: dict[str, object] = {}
-    after_coot = model_dir / "after_coot.pdb"
-    if coot_actions:
-        if coot_executable is None:
-            sites = ", ".join(action.site for action in coot_actions)
-            raise PostMRPreparationError(
-                f"Coot is required for supported mutation site(s) {sites}"
-            )
-        raw_after_coot = model_dir / "after_coot_raw.pdb"
-        parent_models = {
-            action.site: coot_dir
-            / f"parent_{action.site.replace(':', '_')}_{action.parent_code}.pdb"
-            for action in overlap_actions
-        }
-        coot_dictionaries = {
-            action.after: ligand_sources[action.after] for action in overlap_actions
-        }
-        _, coot_log = _run_coot(
-            original,
-            raw_after_coot,
-            coot_actions,
-            coot_executable,
-            coot_dir,
-            environment,
-            coot_dictionaries,
-            parent_models,
-        )
-        geometry_after_coot = model_dir / "after_coot_geometry.pdb"
-        if overlap_actions:
-            coordinate_restoration = _restore_shared_parent_coordinates(
-                raw_after_coot,
-                geometry_after_coot,
-                overlap_actions,
-                parent_models,
-                ligand_sources,
-            )
-        else:
-            shutil.copyfile(raw_after_coot, geometry_after_coot)
-        if canonical_actions:
-            canonical_restoration = _restore_canonical_mutation_backbones(
-                original,
-                geometry_after_coot,
-                after_coot,
-                canonical_actions,
-            )
-            coordinate_restoration.update(canonical_restoration)
-        else:
-            shutil.copyfile(geometry_after_coot, after_coot)
-    else:
-        shutil.copyfile(original, after_coot)
 
     terminal_ready = model_dir / "terminal_phosphate_model.pdb"
     try:
@@ -1977,7 +2047,10 @@ __all__ = [
     "MutationAction",
     "PostMRPreparationError",
     "PostMRResult",
+    "ModelMutationPlan",
+    "apply_model_mutations",
     "build_mutation_plan",
+    "plan_model_mutations",
     "prepare_postmr",
     "residue_name",
     "scan_anomalous_candidates",

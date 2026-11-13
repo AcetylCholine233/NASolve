@@ -369,17 +369,24 @@ def _metal_view(
     outputs = record.get("outputs")
     if not isinstance(inputs, Mapping) or not isinstance(outputs, Mapping):
         raise CootViewError("The metal-search record is malformed")
-    model = _reported_file(inputs.get("phaser_model"), "Phaser model", anchor)
+    phaser_model = _reported_file(inputs.get("phaser_model"), "Phaser model", anchor)
+    # The model AutoSol used: the Phaser model, or (newer searches) a copy with
+    # the AutoMR-requested residues built in. The merged model is still named
+    # after the Phaser model, so PostMR finds it as before.
+    model = (
+        _reported_file(inputs.get("partial_model"), "partial model", anchor)
+        if inputs.get("partial_model") is not None else phaser_model
+    )
     map_path = _reported_file(inputs.get("phaser_map"), "Phaser map", anchor)
     heavy_atoms = _reported_file(
         outputs.get("heavy_atom_model"), "AutoSol heavy-atom model", anchor
     )
-    run = automr_run or _automr_run_for(model, record, metal_directory)
+    run = automr_run or _automr_run_for(phaser_model, record, metal_directory)
     merge = None
     if run is not None:
         merge = MetalMerge(
             output_directory=run / "Phaser",
-            merged_stem=f"{model.stem}-merged",
+            merged_stem=f"{phaser_model.stem}-merged",
             run_directory=run,
             base_model={**artifact_reference(model, run), "sha256": file_sha256(model)},
             metal_search=artifact_reference(metal_directory, run),
@@ -391,7 +398,11 @@ def _metal_view(
         map_path,
         (heavy_atoms,),
         (),
-        f"Phaser solution with AutoSol metal sites ({label})",
+        (
+            f"Phaser solution with AutoSol metal sites ({label})"
+            if model == phaser_model else
+            f"Phaser solution with the AutoMR residues built in, and AutoSol metal sites ({label})"
+        ),
         "Phaser MR map",
         metal_merge=merge,
     )

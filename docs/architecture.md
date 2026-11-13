@@ -401,6 +401,20 @@ catalogue has no `seq_base.txt`, so 3GBI runs use the Phaser model. The report
 records `sequence_source` and `sequence_warnings`. All checks complete before
 any directory is created, so a refused search leaves nothing behind.
 
+The partial model is the Phaser solution with the AutoMR-requested residues
+built in, unless `--original-model` is given. The search calls
+`postmr.plan_model_mutations` before any directory exists (targets from the
+frozen post-MR plan; curated dictionaries validated; Coot required only when
+something must be built) and `postmr.apply_model_mutations` in
+`AutoSolMetal/run_NNN/PartialModel/` (headless Coot, then parent and canonical
+backbone coordinates restored, as in PostMR), writing `partial_model.pdb`. A
+Coot failure is recorded as `METAL_AUTOSOL_FAILED` before AutoSol runs. The
+report records `inputs.partial_model` and `partial_model` (source, mutations,
+Coot log, coordinate restoration); site distances, the Coot view and the
+"Merge metal sites and save" base use the partial model, while the merged
+model keeps the Phaser name (`Phaser/mr_solution-merged.pdb`), so PostMR finds
+it and sees the residues already built.
+
 The first named metal is `autosol.atom_type`; additional metals go to
 `autosol.phasing.mad_ha_add_list`. `autosol.phasing.partpdb_rms` defaults to
 1.0 A (`--rmsd`). Sites are left unspecified and both

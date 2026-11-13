@@ -21,7 +21,7 @@ from nasolve.autosol_metal import (
 )
 from nasolve.cli import build_parser, main
 from nasolve.config import AppConfig
-from nasolve.coot_runtime import CootInstallation
+from nasolve.coot_runtime import CootDiscoveryError, CootInstallation
 from nasolve.coot_view import CootViewError, launch_coot_view, resolve_run, resolve_view_profile
 from nasolve.model_assessment import file_sha256
 from nasolve.phenix_runtime import PhenixInstallation
@@ -533,6 +533,140 @@ class SequenceSourceTests(unittest.TestCase):
             self.assertIn("A:4 XYZ left out", warnings[0])
 
 
+def with_pair(run: Path, codes=("C38", "5IU"), requested="iC:iU") -> None:
+    """Give the AutoMR fixture a W-frame standard pair, as AutoMR records it."""
+    report_path = run / "report.json"
+    report = json.loads(report_path.read_text())
+    report["frame"] = {"name": "W", "catalogue_directory": "5W6W"}
+    report["post_mr_plan"] = {
+        "standard_pair": {"requested": requested, "ligand_codes": list(codes)},
+        "mutations": {}, "sequences": {},
+    }
+    report_path.write_text(json.dumps(report))
+
+
+def fake_build(original, plan, model_dir, coot_dir, coot_executable, environment, *,
+               output_name="after_coot.pdb"):
+    """Stand-in for postmr.apply_model_mutations: writes the planned residues,
+    with the iodine of each 5-iodo base where AutoSol found the side sites."""
+    calls.append({"plan": plan, "coot": coot_executable, "output_name": output_name,
+                  "original": original})
+    lines = []
+    for serial, action in enumerate(plan.coot_actions, start=1):
+        chain, number = action.site.split(":")
+        x = -2.1 if chain == "A" else 2.2
+        lines.append(pdb_record("HETATM", serial, "C1'", action.after, chain, int(number),
+                                element="C", x=x * 3, y=0.0, z=0.0))
+        lines.append(pdb_record("HETATM", serial + 10, "I", action.after, chain, int(number),
+                                element="I", x=x, y=4.0, z=0.0))
+    built = model_dir / output_name
+    built.write_text(cryst1("P 1") + "".join(lines) + "END\n")
+    log = coot_dir / "coot.log"
+    log.write_text("NASOLVE_RESULT\n")
+    return built, log, {"restored": [action.site for action in plan.coot_actions]}
+
+
+calls: list[dict] = []
+
+
+class BuildRequestedResiduesTests(unittest.TestCase):
+    """Regression (iCiU_Ag): the metal search used the plain Phaser model, so
+    the iodines of 5-iodo-dC and 5-iodo-dU were found as two extra "Ag" sites.
+    The AutoMR-requested residues are now built in first, as in PostMR."""
+
+    def setUp(self):
+        calls.clear()
+
+    def test_requested_pair_is_built_into_the_partial_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            with_pair(run)
+            coot = root / "coot"
+            coot.write_text("#!/bin/sh\n")
+            with patch("nasolve.postmr.apply_model_mutations", side_effect=fake_build):
+                result = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root,
+                                coot_executable=coot)
+            self.assertEqual(result.status, FOUND)
+            (call,) = calls
+            self.assertEqual(call["coot"], coot)
+            self.assertEqual(call["output_name"], "partial_model.pdb")
+            self.assertEqual(
+                [(a.site, a.before, a.after, a.method) for a in call["plan"].coot_actions],
+                [("A:12", "DC", "C38", "coot-parent-overlap"),
+                 ("B:4", "DC", "5IU", "coot-parent-overlap")],
+            )
+            partial = result.output_directory / "PartialModel" / "partial_model.pdb"
+            self.assertEqual(result.partial_model, partial)
+            self.assertEqual(call["original"].read_bytes(), result.phaser_model.read_bytes())
+            record = json.loads(result.report_path.read_text())
+            self.assertIn(f"autosol.phasing.input_partpdb_file={partial}", record["command"])
+            self.assertEqual(record["partial_model"]["mutations"], [
+                {"site": "A:12", "before": "DC", "after": "C38", "method": "coot-parent-overlap"},
+                {"site": "B:4", "before": "DC", "after": "5IU", "method": "coot-parent-overlap"},
+            ])
+            self.assertIn("AutoMR residues built in", record["partial_model"]["source"])
+            self.assertEqual(record["partial_model"]["coordinate_restoration"],
+                             {"restored": ["A:12", "B:4"]})
+            self.assertEqual(record["inputs"]["partial_model"]["relative_path"],
+                             "PartialModel/partial_model.pdb")
+            self.assertFalse(record["model_changed"])
+            # Distances are measured against the built model.
+            nearest = record["sites"][0]["nearest_residues"][0]
+            self.assertIn(nearest["residue_name"], {"C38", "5IU"})
+            # The Coot view shows the built model; the merge keeps the Phaser name.
+            profile = resolve_view_profile(result.output_directory)
+            self.assertEqual(profile.model_path, partial.resolve())
+            self.assertEqual(profile.metal_merge.merged_stem, "mr_solution-merged")
+            self.assertIn("AutoMR residues built in", profile.source)
+
+    def test_coot_is_needed_only_when_there_is_something_to_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            with_pair(run)
+            with self.assertRaisesRegex(AutoSolPreparationError,
+                                        r"asks for A:12 DC->C38, B:4 DC->5IU.*no Coot"):
+                search(run, make_autosol(root, []), root)
+            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            # --original-model: the Phaser model as it is, no Coot.
+            result = search(run, make_autosol(root, []), root, build_requested_residues=False)
+            self.assertEqual(result.partial_model, result.phaser_model)
+            record = json.loads(result.report_path.read_text())
+            self.assertEqual(record["partial_model"]["source"],
+                             "Phaser model as it is (--original-model)")
+            self.assertEqual(calls, [])
+
+    def test_a_pair_that_cannot_be_built_is_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            # "IC:IU" resolves to isocytidine and 5-iodouridine (RNA), not the
+            # curated 5-iodo-dC/dU (written iC:iU).
+            with_pair(run, codes=("IC", "IU"), requested="IC:IU")
+            with self.assertRaisesRegex(AutoSolPreparationError,
+                                        r"Cannot build the AutoMR residues.*IC.*--original-model"):
+                search(run, make_autosol(root, []), root, coot_executable=root / "coot")
+            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+
+    def test_coot_failure_stops_before_autosol(self):
+        from nasolve.postmr import PostMRPreparationError
+
+        def broken(*args, **kwargs):
+            raise PostMRPreparationError("Coot mutation failed with status 1; inspect coot.log")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            with_pair(run)
+            with patch("nasolve.postmr.apply_model_mutations", side_effect=broken):
+                result = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root,
+                                coot_executable=root / "coot")
+            self.assertEqual(result.status, FAILED)
+            self.assertIn("Coot could not build the AutoMR residues", result.message)
+            self.assertFalse(result.log_path.exists())   # AutoSol never ran
+
+
 class MetalCommandTests(unittest.TestCase):
     def _phenix(self, root: Path, autosol: Path) -> PhenixInstallation:
         return PhenixInstallation(
@@ -548,7 +682,9 @@ class MetalCommandTests(unittest.TestCase):
             patch("nasolve.cli.discover_phenix", return_value=phenix),
             patch("nasolve.cli.remember_phenix"), patch("nasolve.cli.save_config"),
             patch("nasolve.cli.remember_coot"),
-            patch("nasolve.cli.discover_coot", return_value=patches.get("coot")),
+            patch("nasolve.cli.discover_coot",
+                  return_value=patches.get("coot"),
+                  side_effect=None if patches.get("coot") else CootDiscoveryError("no Coot here")),
             patch("nasolve.cli.launch_coot_view", side_effect=patches.get("launch")) as launch,
             redirect_stdout(output), redirect_stderr(errors),
         ):
@@ -607,7 +743,38 @@ class MetalCommandTests(unittest.TestCase):
                 self._phenix(root, make_autosol(root, [])),
             )
             self.assertEqual(code, 2)
-            self.assertIn("--sequence and --no-coot apply only to the metal search", err)
+            self.assertIn("--sequence, --original-model and --no-coot apply only to the "
+                          "metal search", err)
+
+    def test_original_model_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            with_pair(run)
+            code, out, err, _ = self._main(
+                ["autosol", str(run), "--metal", "AG", "--no-coot"],
+                self._phenix(root, make_autosol(root, [])),
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("no Coot is configured", err)
+            code, out, err, _ = self._main(
+                ["autosol", str(run), "--metal", "AG", "--no-coot", "--original-model"],
+                self._phenix(root, make_autosol(root, [])),
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Partial model: Phaser model as it is (--original-model)", out)
+            coot = root / "coot"
+            coot.write_text("#!/bin/sh\n")
+            with patch("nasolve.postmr.apply_model_mutations", side_effect=fake_build):
+                code, out, err, _ = self._main(
+                    ["autosol", str(run), "--metal", "AG", "--no-coot"],
+                    self._phenix(root, make_autosol(root, [])),
+                    coot=CootInstallation(coot, "1.3.3", "test"),
+                )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Partial model: Phaser model with the AutoMR residues built in", out)
+            self.assertIn("  A:12 DC -> C38", out)
+            self.assertIn("  B:4 DC -> 5IU", out)
 
     def test_not_found_and_no_coot_do_not_open_coot(self):
         with tempfile.TemporaryDirectory() as directory:

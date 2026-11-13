@@ -10,6 +10,22 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- The metal search (`nasolve autosol RUN --metal ELEMENT`) gave AutoSol the
+  plain Phaser model, so heavy atoms that belong to the requested bases were
+  found as metal sites: in iCiU_Ag the iodines of 5-iodo-dC and 5-iodo-dU
+  appeared as two extra "Ag" sites beside the real one. The residues the
+  AutoMR run asks for (standard pair, explicit mutations or sequences) are now
+  built into a copy of the Phaser model first, with PostMR's own mutation step
+  (headless Coot, coordinates restored), in
+  `AutoSolMetal/run_NNN/PartialModel/partial_model.pdb`, and that copy is
+  AutoSol's partial model. Coot is required only when something must be built;
+  `--original-model` keeps the old behaviour. PostMR's mutation step moved into
+  `postmr.plan_model_mutations` / `apply_model_mutations` without changing
+  PostMR. Schema: the metal-search report gains `inputs.partial_model` and
+  `partial_model` (source, mutations, Coot log, coordinate restoration); site
+  distances, the Coot view and the merge base use the partial model, and the
+  merged model keeps its Phaser-based name. Coot and AutoSol simulated in
+  tests; not yet run on real data.
 - The metal search (`nasolve autosol RUN --metal ELEMENT`) stopped with
   "AutoSol needs MR_frames/FRAME/seq_base.txt or complete run sequences" for
   any AutoMR run without a frozen frame sequence, such as every 3GBI-frame run
