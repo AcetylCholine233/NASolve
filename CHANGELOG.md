@@ -36,6 +36,25 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autofdp` step 2 (f'' round). After step 1, the command runs one
+  phenix.refine round from the new B start with every strategy off except
+  `group_anomalous` (no coordinate, real-space, B or occupancy refinement; f'
+  of every PostMR anomalous scatterer fixed at its cctbx Henke value for the
+  MTZ-header wavelength, f'' refined from 0; `--cycles`, default 3). The round
+  is an ordinary AutoRefine round and checkpoint (recipe `AutoFDP/fdp`, parent
+  the B start; current checkpoint unchanged). AutoFDP then prints each refined
+  f'' against theory (deviation, and whether it is within `--tolerance`,
+  default 1 e-), checks that coordinates, occupancy and B did not move, and
+  opens the round's model and maps in Coot (`--no-coot` to skip, `--coot`,
+  `--phenix-root`). `--theory ELEMENT=FDP` replaces the theoretical f'' of an
+  element for the comparison. `--from autofdp-NNN` starts from an existing B
+  start and adds another round to its record. `--plan` now also describes the
+  round and runs no Phenix program. Schema: `AutoFDP/fdp_NNN/report.json` gains
+  `rounds` (checkpoint, wavelength, theory table, starting groups, R values,
+  held-parameter check, per-site refined f'', theory and deviation) and status
+  `AUTOFDP_FDP_ROUND_DONE` or `AUTOFDP_FAILED`. Occupancy adjustment is still
+  not implemented. phenix.refine, phenix.python and Coot simulated in tests;
+  not yet run on real data.
 - `nasolve autofdp` step 1 (B start): `nasolve autofdp RUN --from refine-NNN`
   copies the AutoRefine result to `AutoFDP/fdp_NNN/source_model.pdb`, finds
   the metal HETATM sites as PostMR does, and sets each one's B to the mean B
@@ -51,7 +70,7 @@ entries are reconstructed from repository history.
   `AutoFDP/fdp_NNN/report.json` (`workflow: "autofdp"`, schema 1, status
   `AUTOFDP_PREPARED`) and an `autofdp` block on the checkpoint. Pure Python;
   no Phenix program runs in this step.
-- `nasolve autofdp` is specified but not implemented beyond step 1. It will measure metal
+- `nasolve autofdp` is specified but not implemented beyond step 2. It will measure metal
   occupancy by f'' refinement, following the mmDNA supplements (Adv. Mater.
   2023, JACS 2023, Small 2025, Sci. Adv. 2026): coordinates, B and occupancy
   held, f' fixed at theory for the MTZ-header wavelength, f'' refined alone, and

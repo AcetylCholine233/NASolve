@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import math
 import os
 import shlex
 import sys
@@ -256,14 +257,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp = subparsers.add_parser(
         "autofdp",
-        help="measure metal occupancy by f'' refinement (step 1 of the plan implemented)",
+        help="measure metal occupancy by f'' refinement (steps 1-2 of the plan implemented)",
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
-            "within the tolerance of theory. Only step 1 is implemented: copy an "
-            "AutoRefine result, set each metal's B to the mean B of its neighbouring "
-            "nucleotides, and save the copy as a new checkpoint. The f'' rounds are "
-            "NOT IMPLEMENTED YET. See docs/autofdp.md."
+            "within the tolerance of theory. Only steps 1 and 2 are implemented: "
+            "copy an AutoRefine result and set each metal's B to the mean B of its "
+            "neighbouring nucleotides (step 1, a new checkpoint), then run one "
+            "phenix.refine round with every strategy off except the anomalous "
+            "scatterers (f' fixed at theory, f'' refined from 0), open the result "
+            "and its maps in Coot, and print each refined f'' against theory "
+            "(step 2). Occupancy adjustment and the later steps are NOT IMPLEMENTED "
+            "YET. See docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -272,11 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--from", dest="from_checkpoint",
-        help="AutoRefine checkpoint ID or bookmark to start from (default: current)",
+        help="start: an AutoRefine checkpoint (step 1 runs first) or an AutoFDP B "
+             "start such as autofdp-001 (default: current)",
     )
     autofdp.add_argument(
         "--site", action="append", default=[], metavar="SITE",
-        help="metal site to calibrate, e.g. B:101; repeatable (default: every metal site)",
+        help="metal site whose B step 1 sets, e.g. B:101; repeatable (default: every metal site)",
     )
     autofdp.add_argument(
         "--element", action="append", default=[], metavar="SITE=ELEMENT",
@@ -288,11 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--theory", action="append", default=[], metavar="ELEMENT=FDP",
-        help="(later step, not used yet) override the theoretical f'' (default: cctbx Henke at the MTZ wavelength)",
+        help="theoretical f'' to compare with, e.g. HG=10.17; repeatable "
+             "(default: cctbx Henke at the MTZ wavelength)",
     )
     autofdp.add_argument(
         "--tolerance", type=float, default=1.0, metavar="E",
-        help="(later step, not used yet) converged when |refined f'' - theory| <= E electrons (default: 1.0)",
+        help="refined f'' within E electrons of theory counts as matching (default: 1.0)",
     )
     autofdp.add_argument(
         "--max-iterations", type=int, default=8, metavar="N",
@@ -300,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--cycles", type=int, default=3, metavar="N",
-        help="(later step, not used yet) phenix.refine macrocycles per f'' round (default: 3)",
+        help="phenix.refine macrocycles in the f'' round (default: 3)",
     )
     autofdp.add_argument(
         "--b-start", default="surrounding", metavar="surrounding|model|VALUE",
@@ -328,7 +335,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--plan", action="store_true",
-        help="show the metal sites and B changes without writing anything",
+        help="show the metal sites, B changes and the round to run, writing nothing "
+             "and running no Phenix program",
+    )
+    autofdp.add_argument(
+        "--no-coot", action="store_true",
+        help="do not open the f'' round's model and maps in Coot",
+    )
+    autofdp.add_argument(
+        "--coot", type=Path, metavar="PATH",
+        help="Coot executable or installation (default: the configured Coot)",
+    )
+    autofdp.add_argument(
+        "--phenix-root", type=Path, metavar="PATH",
+        help="Phenix installation (default: the configured Phenix)",
     )
     doctor = subparsers.add_parser(
         "refine-doctor",
@@ -1518,36 +1538,10 @@ def _show(args: argparse.Namespace) -> int:
     return 0
 
 
-def _autofdp(args: argparse.Namespace) -> int:
-    """AutoFDP step 1: B start from the neighbouring nucleotides."""
-    from .autofdp import AutoFDPError, parse_b_start, prepare_start_model
-
-    if args.element:
-        print("AutoFDP error: --element is not implemented yet", file=sys.stderr)
-        return 2
-    try:
-        b_start = parse_b_start(args.b_start)
-        config = load_config()
-        run = _workspace_run(args.run, config)
-        result = prepare_start_model(
-            run,
-            from_checkpoint=args.from_checkpoint,
-            sites=tuple(args.site),
-            b_start=b_start,
-            plan_only=args.plan,
-        )
-    except (AutoFDPError, ConfigError) as exc:
-        print(f"AutoFDP error: {exc}", file=sys.stderr)
-        return 1
-
-    def shown(path: Path) -> str:
-        try:
-            return str(path.relative_to(result.run_directory))
-        except ValueError:
-            return str(path)
-
+def _print_b_start(result) -> None:
+    """Print AutoFDP step 1 (B start) for a plan or a finished preparation."""
     print("AutoFDP step 1: metal B factors from neighbouring nucleotides")
-    print(f"Source: {result.source_checkpoint} ({shown(result.source_model)})")
+    print(f"Source: {result.source_checkpoint} ({_relative_to(result.source_model, result.run_directory)})")
     for site in result.sites:
         print(
             f"  {site.site} {site.atom_name} ({site.element}), occupancy "
@@ -1566,19 +1560,195 @@ def _autofdp(args: argparse.Namespace) -> int:
             print("    set from --b-start")
     for warning in result.warnings:
         print(f"Warning: {warning}")
-    if result.plan_only:
-        print("Plan only: nothing was written.")
-        return 0
-    assert result.start_model is not None and result.output_directory is not None
-    print(f"Start model: {shown(result.start_model)}")
-    print(f"Record: {shown(result.output_directory)}")
-    print(f"Checkpoint: {result.checkpoint_id} (current checkpoint unchanged)")
+    if not result.plan_only:
+        print(f"Start model: {_relative_to(result.start_model, result.run_directory)}")
+        print(f"Record: {_relative_to(result.output_directory, result.run_directory)}")
+        print(f"Checkpoint: {result.checkpoint_id} (current checkpoint unchanged)")
+
+
+def _relative_to(path: Path | None, root: Path) -> str:
+    if path is None:
+        return "none"
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _print_fdp_round(result) -> None:
+    """Print AutoFDP step 2: refined f'' of every site against theory."""
+    status_color = "32" if result.status == "AUTOFDP_FDP_ROUND_DONE" else "31"
     print(
-        f"View: nasolve show {shlex.quote(str(result.run_directory))} "
+        f"\nAutoFDP step 2: f''-only round {result.checkpoint_id} from "
+        f"{result.start_checkpoint} ({result.cycles} cycles; only the anomalous "
+        "scatterers refined, f' fixed at theory, f'' from 0)"
+    )
+    print(
+        f"AutoRefine round: {result.autorefine_status}; R-work "
+        f"{_format_metric(result.r_work)}, R-free {_format_metric(result.r_free)}"
+    )
+    if result.wavelength is not None:
+        print(f"Wavelength: {result.wavelength:g} A")
+    print(
+        f"\n{'Site':<14}{'Occ':>6}{'B':>9}{'f-prime':>9}{'fdp':>9}"
+        f"{'theory':>9}{'deviation':>11}"
+    )
+    for site in result.sites:
+        refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
+        deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
+        occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+        b_factor = "-" if site.b_factor is None else f"{site.b_factor:.2f}"
+        verdict = (
+            "" if site.within_tolerance is None
+            else f"  within +/-{result.tolerance:g}" if site.within_tolerance
+            else f"  outside +/-{result.tolerance:g}"
+        )
+        label = f"{site.site} {site.atom_name}"
+        print(
+            f"{label:<14}{occupancy:>6}{b_factor:>9}{site.f_prime:>9.2f}{refined:>9}"
+            f"{site.f_double_prime_theory:>9.2f}{deviation:>11}{verdict}"
+        )
+    sources = sorted({f"{site.element} {site.theory_source}" for site in result.sites})
+    print("Theory: " + "; ".join(sources))
+    others = [site for site in result.sites if not site.autofdp_site]
+    if others:
+        print(
+            "Also refined (anomalous scatterers whose B AutoFDP did not set): "
+            + ", ".join(f"{site.site} {site.atom_name}" for site in others)
+        )
+    for warning in result.warnings:
+        print(f"Warning: {warning}")
+    print(f"\n{_color(result.status, status_color)}: {result.message}")
+    print(f"Record: {_relative_to(result.report_path, result.run_directory)}")
+    print(f"Round: {_relative_to(result.round_directory, result.run_directory)} (current checkpoint unchanged)")
+
+
+def _open_fdp_view(args: argparse.Namespace, result) -> None:
+    """Open the f'' round's model and maps; a Coot problem never fails the run."""
+    later = (
+        f"Open in Coot with: nasolve show {shlex.quote(str(result.run_directory))} "
         f"--checkpoint {result.checkpoint_id}"
     )
-    print("The f'' refinement rounds are not implemented yet.")
-    return 0
+    if args.no_coot or result.model_path is None:
+        print(later)
+        return
+    try:
+        config = load_config()
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_view(
+            result.run_directory, coot.executable, checkpoint=result.checkpoint_id
+        )
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(later)
+        return
+    print(f"Opened Coot (PID {view.pid}) with {result.checkpoint_id}: {view.model_path.name}")
+    print(f"Map: {view.map_path}")
+    print("Anomalous map: Coot also opens ANOM/PHANOM at 3 sigma when present")
+    print(f"Coot log: {view.log_path}")
+
+
+def _autofdp(args: argparse.Namespace) -> int:
+    """AutoFDP steps 1 and 2: B start, then one f''-only round."""
+    from .autofdp import (
+        STATUS_ROUND_DONE,
+        AutoFDPError,
+        fdp_round,
+        parse_b_start,
+        parse_theory_overrides,
+        prepare_start_model,
+        resolve_fdp_start,
+    )
+
+    if args.element:
+        print("AutoFDP error: --element is not implemented yet", file=sys.stderr)
+        return 2
+    kept: str | None = None  # B start written by step 1 in this invocation
+    try:
+        b_start = parse_b_start(args.b_start)
+        theory = parse_theory_overrides(args.theory)
+        if args.cycles < 1:
+            raise AutoFDPError("--cycles must be at least 1")
+        if not math.isfinite(args.tolerance) or args.tolerance <= 0:
+            raise AutoFDPError("--tolerance must be a positive number of electrons")
+        if args.coot is not None and args.no_coot:
+            raise AutoFDPError("--coot and --no-coot cannot be combined")
+        config = load_config()
+        run = _workspace_run(args.run, config)
+        start = resolve_fdp_start(run, args.from_checkpoint)
+        if not start.needs_b_start and (args.site or b_start != "surrounding"):
+            raise AutoFDPError(
+                f"{start.checkpoint_id} already has its metal B set (step 1); --site and "
+                "--b-start apply only when starting from an AutoRefine result"
+            )
+        round_plan = (
+            f"Then: one f''-only phenix.refine round of {args.cycles} cycles (every "
+            "strategy off except the anomalous scatterers; f' fixed at theory, "
+            "f'' from 0), opened in Coot"
+            + (" unless --no-coot" if not args.no_coot else " (--no-coot: not opened)")
+        )
+        if args.plan:
+            if start.needs_b_start:
+                _print_b_start(prepare_start_model(
+                    run, from_checkpoint=start.checkpoint_id, sites=tuple(args.site),
+                    b_start=b_start, plan_only=True,
+                ))
+            else:
+                print(
+                    f"Start: {start.checkpoint_id}, an AutoFDP B start "
+                    f"({_relative_to(start.record_directory, start.run_directory)}); step 1 already done"
+                )
+            print(round_plan)
+            print("Plan only: nothing was written.")
+            return 0
+        phenix = discover_phenix(config, explicit=args.phenix_root)
+        if args.phenix_root is None:
+            remember_phenix(config, phenix)
+            save_config(config)
+        refine = phenix.executables.get("phenix.refine")
+        mtz_dump = phenix.executables.get("phenix.mtz.dump")
+        if refine is None or mtz_dump is None:
+            raise AutoFDPError("AutoFDP requires phenix.refine and phenix.mtz.dump")
+        start_checkpoint = start.checkpoint_id
+        if start.needs_b_start:
+            preparation = prepare_start_model(
+                run, from_checkpoint=start.checkpoint_id, sites=tuple(args.site),
+                b_start=b_start,
+            )
+            _print_b_start(preparation)
+            assert preparation.checkpoint_id is not None
+            start_checkpoint = kept = preparation.checkpoint_id
+
+        def progress(checkpoint_id: str, log_path: Path) -> None:
+            print(f"\nAutoFDP f'' round {checkpoint_id} started; full output: {log_path}")
+
+        result = fdp_round(
+            run,
+            refine,
+            mtz_dump,
+            phenix_version=phenix.version,
+            start_checkpoint=start_checkpoint,
+            cycles=args.cycles,
+            tolerance=args.tolerance,
+            theory_overrides=theory,
+            environment=phenix.environment,
+            progress=progress,
+        )
+    except (AutoFDPError, ConfigError, PhenixDiscoveryError) as exc:
+        print(f"AutoFDP error: {exc}", file=sys.stderr)
+        if kept is not None:
+            print(
+                f"The B start {kept} (step 1) was kept; after fixing this, rerun with "
+                f"--from {kept}",
+                file=sys.stderr,
+            )
+        return 1
+    _print_fdp_round(result)
+    _open_fdp_view(args, result)
+    print("Occupancy adjustment and the later AutoFDP steps are not implemented yet.")
+    return 0 if result.status == STATUS_ROUND_DONE else 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,6 +1,7 @@
 """`nasolve autofdp` is specified in docs/autofdp.md. Step 1 (B start) is
-implemented and tested in test_autofdp_bstart.py; the later steps must stay
-documented stubs until they are implemented.
+implemented and tested in test_autofdp_bstart.py, step 2 (one f''-only round)
+in test_autofdp_round.py; the later steps must stay documented stubs until
+they are implemented.
 """
 
 import inspect
@@ -16,15 +17,16 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         for option in ("--from", "--site", "--element", "--candidates", "--theory",
                        "--tolerance", "--max-iterations", "--cycles", "--b-start",
                        "--b-step", "--occupancy-floor", "--map-sigma",
-                       "--no-confirm-b", "--final", "--plan"):
+                       "--no-confirm-b", "--final", "--plan", "--no-coot",
+                       "--coot", "--phenix-root"):
             self.assertIn(option, help_text)
-        self.assertIn("Only step 1 is implemented", help_text)
-        self.assertIn("NOT IMPLEMENTED", help_text)
+        flowing = " ".join(help_text.split())  # argparse wraps lines
+        self.assertIn("Only steps 1 and 2 are implemented", flowing)
+        self.assertIn("NOT IMPLEMENTED YET", flowing)
 
     def test_engine_functions_are_documented_stubs(self):
-        names = ["plan_autofdp", "execute_autofdp", "theoretical_scattering", "fdp_round",
-                 "map_value_at_site", "decide_site_update", "identity_check",
-                 "confirm_b_round", "final_round"]
+        names = ["plan_autofdp", "execute_autofdp", "map_value_at_site",
+                 "decide_site_update", "identity_check", "confirm_b_round", "final_round"]
         for name in names:
             function = getattr(autofdp, name)
             with self.subTest(function=name):

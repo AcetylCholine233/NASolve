@@ -223,19 +223,20 @@ class NeighbourFallbackTests(unittest.TestCase):
 
 
 class AutoFDPCommandTests(unittest.TestCase):
-    def test_command_runs_step_one_and_prints_the_change(self):
+    def test_command_prints_the_step_one_change(self):
+        # The full command (step 1, then the f'' round and Coot) is tested in
+        # test_autofdp_round.py; --plan shows step 1 alone and writes nothing.
         with tempfile.TemporaryDirectory() as directory:
             run = make_refined_run(Path(directory))
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = main(["autofdp", str(run), "--from", "refine-001"])
+                code = main(["autofdp", str(run), "--from", "refine-001", "--plan"])
             self.assertEqual(code, 0, err.getvalue())
             text = out.getvalue()
             self.assertIn("B:101 AG (AG), occupancy 0.90: B 379.99 -> 50.00", text)
             self.assertIn("B:4 DU  mean B 40.00", text)
-            self.assertIn("Checkpoint: autofdp-001 (current checkpoint unchanged)", text)
-            self.assertIn("--checkpoint autofdp-001", text)
-            self.assertIn("not implemented yet", text)
+            self.assertIn("Plan only: nothing was written.", text)
+            self.assertFalse((run / "AutoFDP").exists())
 
     def test_command_errors(self):
         with tempfile.TemporaryDirectory() as directory:
