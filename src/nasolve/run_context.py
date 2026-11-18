@@ -19,14 +19,19 @@ REPOSITORY_ANCHOR = "repository"
 ABSOLUTE_ANCHOR = "absolute"
 
 
-# Numbered run series that live directly in a dataset directory.
+# Numbered run series that live directly in a dataset directory. AutoSolMetal
+# runs live inside an AutoMR run (AutoMR/run_NNN/AutoSolMetal/run_NNN); older
+# ones directly in the dataset (DATASET/AutoSolMetal/run_NNN).
 _DATASET_RUN_SERIES = {"AutoMR", "AutoSolMetal", "AutoFDP"}
 
 
 def dataset_directory(run_directory: Path) -> Path:
     run = run_directory.expanduser().resolve()
     if run.parent.name in _DATASET_RUN_SERIES:
-        return run.parent.parent
+        parent_run = run.parent.parent
+        if run.parent.name == "AutoSolMetal" and parent_run.parent.name == "AutoMR":
+            return parent_run.parent.parent   # AutoMR/run_NNN/AutoSolMetal/run_NNN
+        return parent_run
     return run.parent
 
 

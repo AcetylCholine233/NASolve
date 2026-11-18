@@ -138,25 +138,30 @@ This needs Coot; `--original-model` searches with the Phaser model as it is.
 The search needs an accepted Phaser result (TFZ >= 8.0; 7.0-7.99 with
 `--allow-mr-review`); `--tfz-override` searches from a lower TFZ when nothing
 else went wrong in Phaser, and records that in the search report.
-The AutoMR run's own files are not changed. AutoSol's
+The AutoMR run's own files are not changed (the search only adds its own
+folder inside the run). AutoSol's
 sequence is the frame `seq_base.txt` that AutoMR froze into the run (only the W
 catalogue has one); otherwise the nucleotide chains of the Phaser model are
 used (for example with the 3GBI frame), or give a file with `--sequence FILE`.
 The report records which source was used. Each search
-gets a new numbered folder in the dataset directory, next to `AutoMR` and the
-data:
+gets a new numbered folder inside the AutoMR run it was made from, numbered per
+run:
 
 ```text
 dataset/
 ├── AutoMR/run_001/
-├── AutoSolMetal/run_001/     # metal search made from AutoMR/run_001
+│   ├── Phaser/
+│   └── AutoSolMetal/run_001/   # first metal search made from AutoMR/run_001
 └── staraniso_alldata-unique.mtz
 ```
+
+Searches made by earlier versions are in `dataset/AutoSolMetal/run_NNN`; they
+stay there and still open.
 
 Its `report.json` names the AutoMR run it came from. If AutoSol finds a site of
 a requested metal, NASolve lists the nearest residues and opens Coot with the
 Phaser model, AutoSol's `overall_best_ha_pdb.pdb` and the Phaser map (reopen
-later with `./nasolve show dataset/AutoSolMetal/run_001` (a relative path is
+later with `./nasolve show dataset/AutoMR/run_001/AutoSolMetal/run_001` (a relative path is
 tried from the current folder, then from the active dataset), or the latest search
 that found sites with `./nasolve show "$RUN" --stage metal`; use `--no-coot` to
 skip).

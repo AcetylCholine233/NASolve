@@ -25,7 +25,7 @@ from nasolve.coot_runtime import CootDiscoveryError, CootInstallation
 from nasolve.coot_view import CootViewError, launch_coot_view, resolve_run, resolve_view_profile
 from nasolve.model_assessment import file_sha256
 from nasolve.phenix_runtime import PhenixInstallation
-from nasolve.run_context import resolve_artifact_path
+from nasolve.run_context import dataset_directory, resolve_artifact_path
 
 from .helpers import pdb_record
 from .test_autosol import make_mtz_dump as _autosol_mtz_dump
@@ -145,6 +145,12 @@ def make_run(root: Path, *, tfz: float = 12.3, space_group: str = "P 1", stage: 
     return run
 
 
+def metal_folder_made(root: Path) -> bool:
+    """Whether any search folder exists: inside the AutoMR run, or (old layout) the dataset."""
+    dataset = root / "dataset"
+    return (dataset / "AutoMR" / "run_001" / "AutoSolMetal").exists() or (dataset / "AutoSolMetal").exists()
+
+
 def search(run: Path, autosol: Path, root: Path, metals=("AG",), **kwargs):
     return execute_metal_search(
         run, autosol, make_mtz_dump(root), metals,
@@ -170,10 +176,10 @@ class MetalSearchTests(unittest.TestCase):
             result = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root)
 
             self.assertEqual(result.status, FOUND)
-            # Regression: searches were written inside the AutoMR run.
-            dataset = root / "dataset"
-            self.assertEqual(result.output_directory, dataset / "AutoSolMetal" / "run_001")
-            self.assertFalse((run / "AutoSolMetal").exists())
+            # Searches are written inside the AutoMR run they come from (user's
+            # layout, 2026-11-18), no longer in DATASET/AutoSolMetal.
+            self.assertEqual(result.output_directory, run.resolve() / "AutoSolMetal" / "run_001")
+            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
             self.assertEqual(result.run_directory, run.resolve())
             args = json.loads((result.output_directory / "received_args.json").read_text())
             self.assertIn("autosol.atom_type=Ag", args)
@@ -208,7 +214,7 @@ class MetalSearchTests(unittest.TestCase):
             listed = block["searches"][0]
             self.assertEqual(listed["status"], FOUND)
             self.assertEqual(listed["directory"],
-                             {"anchor": "dataset", "relative_path": "AutoSolMetal/run_001"})
+                             {"anchor": "run", "relative_path": "AutoSolMetal/run_001"})
             self.assertEqual(resolve_artifact_path(listed["report"], run), metal / "report.json")
 
             # The full record lives with the search, anchored to it or the dataset.
@@ -227,6 +233,55 @@ class MetalSearchTests(unittest.TestCase):
                               "relative_path": "AutoMR/run_001/Phaser/mr_solution.mtz"})
             self.assertEqual(resolve_artifact_path(ha, metal), (metal / ha["relative_path"]).resolve())
 
+    def test_dataset_of_a_search_inside_an_automr_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory).resolve() / "Y-T_Ag"
+            for path in (dataset / "AutoMR" / "run_006" / "AutoSolMetal" / "run_002",
+                         dataset / "AutoSolMetal" / "run_002"):   # new and old layouts
+                path.mkdir(parents=True)
+                self.assertEqual(dataset_directory(path), dataset)
+            self.assertEqual(dataset_directory(dataset / "AutoMR" / "run_006"), dataset)
+
+    def test_searches_from_earlier_versions_stay_usable(self):
+        """Searches made before this change live in DATASET/AutoSolMetal/run_NNN.
+        They are left there and still open; a new search goes inside the AutoMR
+        run, numbered on its own, and leaves the old one untouched."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            run = make_run(root)
+            first = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root)
+            # Re-create the old layout from this search, indexed as the old code did.
+            dataset = root / "dataset"
+            old = dataset / "AutoSolMetal" / "run_001"
+            old.parent.mkdir()
+            first.output_directory.rename(old)
+            first.output_directory.parent.rmdir()
+            report = json.loads((run / "report.json").read_text())
+            entry = report["metal_autosol"]["searches"][0]
+            entry["directory"] = {"anchor": "dataset", "relative_path": "AutoSolMetal/run_001"}
+            entry["report"] = {**entry["report"], "anchor": "dataset",
+                               "relative_path": "AutoSolMetal/run_001/report.json"}
+            (run / "report.json").write_text(json.dumps(report))
+
+            phaser_model = (run / "Phaser" / "mr_solution.pdb").resolve()
+            self.assertEqual(resolve_view_profile(old).model_path, phaser_model)
+            self.assertEqual(resolve_view_profile(run, stage="metal").extra_model_paths,
+                             resolve_view_profile(old).extra_model_paths)
+
+            files_before = {path: path.read_bytes() for path in old.rglob("*") if path.is_file()}
+            second = search(run, make_autosol(root, [("AG", (0.0, 0.0, 0.0))]), root)
+            self.assertEqual(second.output_directory, run.resolve() / "AutoSolMetal" / "run_001")
+            self.assertEqual({path: path.read_bytes() for path in old.rglob("*") if path.is_file()},
+                             files_before)
+            listed = json.loads((run / "report.json").read_text())["metal_autosol"]["searches"]
+            self.assertEqual([item["directory"] for item in listed], [
+                {"anchor": "dataset", "relative_path": "AutoSolMetal/run_001"},
+                {"anchor": "run", "relative_path": "AutoSolMetal/run_001"},
+            ])
+            # --stage metal opens the newest search with sites: the new one.
+            self.assertEqual(resolve_view_profile(run, stage="metal").extra_model_paths[0].parent.parent,
+                             second.output_directory)
+
     def test_metal_search_record_survives_moving_the_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -235,7 +290,7 @@ class MetalSearchTests(unittest.TestCase):
             moved = root / "moved" / "dataset"
             moved.parent.mkdir()
             (root / "dataset").rename(moved)
-            profile = resolve_view_profile(moved / "AutoSolMetal" / "run_001")
+            profile = resolve_view_profile(moved / "AutoMR" / "run_001" / "AutoSolMetal" / "run_001")
             self.assertEqual(profile.model_path,
                              (moved / "AutoMR" / "run_001" / "Phaser" / "mr_solution.pdb").resolve())
             self.assertEqual(
@@ -302,7 +357,7 @@ class MetalSearchTests(unittest.TestCase):
             autosol = make_autosol(root, [("AG", (0.0, 0.0, 0.0))])
             with self.assertRaisesRegex(AutoSolPreparationError, "allow-mr-review"):
                 search(run, autosol, root)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())  # refused: no trace
+            self.assertFalse(metal_folder_made(root))  # refused: no trace
             self.assertEqual(search(run, autosol, root, allow_mr_review=True).status, FOUND)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -338,7 +393,7 @@ class MetalSearchTests(unittest.TestCase):
             (run / "report.json").write_text(json.dumps(report))
             with self.assertRaisesRegex(AutoSolPreparationError, "Phaser exited with status 1"):
                 search(run, make_autosol(root), root, tfz_override=True)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
 
         # A passing TFZ needs no override: none is recorded, and the run is
         # checked exactly as without the flag.
@@ -359,7 +414,7 @@ class MetalSearchTests(unittest.TestCase):
             (root / "dataset" / "staraniso_alldata-unique.mtz").write_bytes(b"changed")
             with self.assertRaises(AutoSolPreparationError):
                 search(run, make_autosol(root), root)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
 
     def test_repeated_searches_never_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -449,6 +504,7 @@ class MetalViewTests(unittest.TestCase):
     def test_show_finds_a_metal_search_from_the_dataset_or_the_active_dataset(self):
         # Regression: "show AutoSolMetal/run_001" from outside the dataset said
         # "AutoMR report is missing" without explaining what was expected.
+        # Searches now live in AutoMR/run_NNN/AutoSolMetal/run_NNN.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             run = make_run(root)
@@ -459,14 +515,14 @@ class MetalViewTests(unittest.TestCase):
             previous = os.getcwd()
             try:
                 os.chdir(dataset)
-                self.assertEqual(resolve_run("AutoSolMetal/run_001"), result.output_directory)
+                self.assertEqual(resolve_run("AutoMR/run_001/AutoSolMetal/run_001"), result.output_directory)
                 os.chdir(elsewhere)
                 with self.assertRaisesRegex(
                     CootViewError, r"No NASolve report\.json in .*elsewhere.*AutoSolMetal/run_NNN"
                 ):
-                    resolve_run("AutoSolMetal/run_001")
+                    resolve_run("AutoMR/run_001/AutoSolMetal/run_001")
                 self.assertEqual(
-                    resolve_run("AutoSolMetal/run_001", active_dataset=dataset),
+                    resolve_run("AutoMR/run_001/AutoSolMetal/run_001", active_dataset=dataset),
                     result.output_directory,
                 )
 
@@ -483,7 +539,7 @@ class MetalViewTests(unittest.TestCase):
                     redirect_stdout(output), redirect_stderr(io.StringIO()),
                 ):
                     (root / "coot").write_text("#!/bin/sh\n")
-                    code = main(["show", "AutoSolMetal/run_001"])
+                    code = main(["show", "AutoMR/run_001/AutoSolMetal/run_001"])
                 self.assertEqual(code, 0, output.getvalue())
                 self.assertIn("Opened metal in run: " + str(result.output_directory), output.getvalue())
                 self.assertIn("Merge metal sites and save", output.getvalue())
@@ -556,7 +612,7 @@ class SequenceSourceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(AutoSolPreparationError, "give one with --sequence FILE"):
                 search(run, make_autosol(root, []), root)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
 
     def test_model_sequences(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -671,7 +727,7 @@ class BuildRequestedResiduesTests(unittest.TestCase):
             with self.assertRaisesRegex(AutoSolPreparationError,
                                         r"asks for A:12 DC->C38, B:4 DC->5IU.*no Coot"):
                 search(run, make_autosol(root, []), root)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
             # --original-model: the Phaser model as it is, no Coot.
             result = search(run, make_autosol(root, []), root, build_requested_residues=False)
             self.assertEqual(result.partial_model, result.phaser_model)
@@ -690,7 +746,7 @@ class BuildRequestedResiduesTests(unittest.TestCase):
             with self.assertRaisesRegex(AutoSolPreparationError,
                                         r"Cannot build the AutoMR residues.*IC.*--original-model"):
                 search(run, make_autosol(root, []), root, coot_executable=root / "coot")
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
 
     def test_coot_failure_stops_before_autosol(self):
         from nasolve.postmr import PostMRPreparationError
@@ -757,7 +813,7 @@ class MetalCommandTests(unittest.TestCase):
             self.assertIn("A:12 DC N3 2.10 A", out)
             self.assertIn("Opened Coot (PID 4321)", out)
             self.assertEqual(launched.call_args.kwargs["stage"], "metal")
-            metal = root / "dataset" / "AutoSolMetal" / "run_001"
+            metal = run / "AutoSolMetal" / "run_001"
             self.assertIn(f"Metal-search folder: {metal}", out)
             self.assertTrue((metal / "CootGUI" / "metal" / "launch.json").is_file())
             self.assertFalse((run / "CootGUI").exists())
@@ -851,7 +907,7 @@ class MetalCommandTests(unittest.TestCase):
             code, _, errors, _ = self._main(["autosol", str(run), "--metal", "I"], phenix)
             self.assertEqual(code, 2)
             self.assertIn("not a metal", errors)
-            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+            self.assertFalse(metal_folder_made(root))
 
 
 if __name__ == "__main__":

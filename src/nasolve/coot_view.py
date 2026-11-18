@@ -209,8 +209,9 @@ def resolve_run(
     raise CootViewError(
         "No NASolve report.json in "
         + " or ".join(str(candidate) for candidate in candidates)
-        + ". Give an AutoMR/run_NNN or AutoSolMetal/run_NNN folder; a relative path "
-        "is looked up from the current folder, then from the active dataset."
+        + ". Give an AutoMR/run_NNN or AutoMR/run_NNN/AutoSolMetal/run_NNN folder "
+        "(older metal searches: AutoSolMetal/run_NNN); a relative path is looked up "
+        "from the current folder, then from the active dataset."
     )
 
 
@@ -409,7 +410,8 @@ def _metal_view(
 
 
 def _metal_run_profile(metal_run: Path, report: Mapping[str, object]) -> ViewProfile:
-    """A ``DATASET/AutoSolMetal/run_NNN`` directory opened directly."""
+    """A metal-search directory opened directly: ``AutoMR/run_NNN/AutoSolMetal/run_NNN``
+    (or, from earlier versions, ``DATASET/AutoSolMetal/run_NNN``)."""
     if report.get("status") != "METAL_SITES_FOUND":
         raise CootViewError(
             f"This metal search did not find sites ({report.get('status')}); "

@@ -184,7 +184,7 @@ class MetalMergeTests(unittest.TestCase):
                 self.assertEqual(entry["model"]["sha256"], file_sha256(first))
                 self.assertEqual(entry["base_model"]["relative_path"], "Phaser/mr_solution.pdb")
                 self.assertEqual(entry["metal_search"],
-                                 {"anchor": "dataset", "relative_path": "AutoSolMetal/run_001"})
+                                 {"anchor": "run", "relative_path": "AutoSolMetal/run_001"})
                 self.assertEqual(entry["sites_merged"], 1)
 
                 second = namespace["nasolve_merge_metal_sites"]()

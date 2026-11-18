@@ -8,6 +8,19 @@ entries are reconstructed from repository history.
 
 ## [Unreleased]
 
+### Changed
+
+- Metal searches (`nasolve autosol RUN --metal ELEMENT`) are written inside the
+  AutoMR run they come from, `AutoMR/run_NNN/AutoSolMetal/run_NNN` (numbered
+  per AutoMR run), instead of `DATASET/AutoSolMetal/run_NNN` (user's request,
+  2026-11-18). Searches already in `DATASET/AutoSolMetal` are not moved and
+  still open, from the folder or with `--stage metal`. Schema: new index
+  entries in the AutoMR report (`metal_autosol.searches[].directory`,
+  `.report`) and the merge record's `metal_search` are run-anchored
+  (`AutoSolMetal/run_NNN`); the search's own report keeps dataset-anchored
+  references to the AutoMR run and inputs. `run_context.dataset_directory`
+  recognises `AutoMR/run_NNN/AutoSolMetal/run_NNN`. AutoSol simulated in tests.
+
 ### Fixed
 
 - PostMR stopped with "ReadySet failed with status 1" (eLBOW:

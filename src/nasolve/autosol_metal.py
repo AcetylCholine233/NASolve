@@ -16,11 +16,13 @@ Contract
   ``autosol.phasing.mad_ha_add_list``. The partial-model RMSD
   (``autosol.phasing.partpdb_rms``) defaults to 1.0 A. The number of sites is
   left to AutoSol; model building is switched off.
-* Each search writes a new numbered ``DATASET/AutoSolMetal/run_NNN``
-  directory, next to ``AutoMR`` and the input data; earlier searches are never
-  overwritten. Its ``report.json`` (``workflow = "metal_autosol"``) holds the
-  full record with artifact references anchored to that directory or the
-  dataset, SHA-256 checksums, and the source AutoMR run.
+* Each search writes a new numbered ``AutoMR/run_NNN/AutoSolMetal/run_NNN``
+  directory inside the AutoMR run it was made from (numbered per AutoMR run);
+  earlier searches are never overwritten. Searches by earlier versions, in
+  ``DATASET/AutoSolMetal/run_NNN``, stay where they are and stay usable. Its
+  ``report.json`` (``workflow = "metal_autosol"``) holds the full record with
+  artifact references anchored to that directory or the dataset, SHA-256
+  checksums, and the source AutoMR run.
 * The AutoMR run's ``stage``/``status`` are unchanged; its
   ``report.json["metal_autosol"]["searches"]`` lists the metal searches made
   from it (schema 2). Schema-1 ``attempts`` recorded inside the AutoMR run by
@@ -64,7 +66,7 @@ from .autosol import (
 )
 from .model_assessment import file_sha256
 from .phaser import TFZ_FLOOR, TFZ_THRESHOLD, TFZOverrideError, check_tfz_override
-from .run_context import artifact_reference, dataset_directory, resolve_artifact_path
+from .run_context import artifact_reference, resolve_artifact_path
 
 
 DEFAULT_PARTIAL_MODEL_RMSD = 1.0
@@ -96,7 +98,7 @@ class MetalSearchResult:
     status: str
     message: str
     run_directory: Path  # the source AutoMR run
-    output_directory: Path  # DATASET/AutoSolMetal/run_NNN
+    output_directory: Path  # AutoMR/run_NNN/AutoSolMetal/run_NNN
     report_path: Path
     log_path: Path
     metals: tuple[str, ...]
@@ -217,8 +219,8 @@ def _phaser_map(run: Path, report: Mapping[str, object]) -> Path:
 
 
 def _next_metal_run(run: Path) -> Path:
-    """A new ``DATASET/AutoSolMetal/run_NNN`` beside ``AutoMR``."""
-    root = dataset_directory(run) / METAL_DIRECTORY
+    """A new ``AutoMR/run_NNN/AutoSolMetal/run_NNN`` inside the AutoMR run."""
+    root = run / METAL_DIRECTORY
     root.mkdir(exist_ok=True)
     numbers = []
     for child in root.iterdir():
@@ -595,7 +597,8 @@ def execute_metal_search(
         },
         "command": command,
         "partial_model": partial_record,
-        # The AutoMR run's own files are never changed; a built partial model
+        # The AutoMR run's own files are never changed (the search only adds its
+        # AutoSolMetal/run_NNN folder and an index entry); a built partial model
         # lives in this metal-search folder.
         "model_changed": False,
     }

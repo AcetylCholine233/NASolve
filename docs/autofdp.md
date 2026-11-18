@@ -422,7 +422,7 @@ supplied": the output .eff loaded the GUI's `refine_85.eff`, and its
 ## Outputs
 
 Each run is a new folder, `AutoFDP/run_NNN/` beside the MTZ by default (at the
-same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
+same level as `AutoMR/` in a NASolve dataset), or inside
 `--output`:
 
 - `source_model.pdb` (unchanged copy of the given model) and

@@ -469,9 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument(
         "target", nargs="?",
         help=(
-            "AutoMR/run_NNN or AutoSolMetal/run_NNN folder (relative paths are "
-            "tried from here, then from the active dataset), 'last', or omit to "
-            "use the active workspace run"
+            "AutoMR/run_NNN or AutoMR/run_NNN/AutoSolMetal/run_NNN folder (older "
+            "searches: AutoSolMetal/run_NNN; relative paths are tried from here, "
+            "then from the active dataset), 'last', or omit to use the active "
+            "workspace run"
         ),
     )
     show.add_argument(

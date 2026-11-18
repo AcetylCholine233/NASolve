@@ -444,8 +444,11 @@ The first named metal is `autosol.atom_type`; additional metals go to
 successful exit, `autosol.eff` must confirm those settings and the requested
 `partpdb_rms`; a mismatch fails closed.
 
-Each search allocates a new `DATASET/AutoSolMetal/run_NNN`, beside `AutoMR`
-and the input data. Outcomes are
+Each search allocates a new `AutoMR/run_NNN/AutoSolMetal/run_NNN` inside the
+AutoMR run it was made from, numbered per run. Searches from earlier versions
+are in `DATASET/AutoSolMetal/run_NNN` and are not moved; their dataset-anchored
+index entries still resolve. `run_context.dataset_directory` recognises both
+layouts. Outcomes are
 `METAL_SITES_FOUND` (at least one site of a requested element in a unique
 `overall_best_ha_pdb.pdb`), `METAL_NOT_FOUND` (no such site; a normal result),
 and `METAL_AUTOSOL_FAILED` (non-zero exit, ambiguous outputs, or unapplied
@@ -682,7 +685,8 @@ pointer. Without a registry, the default prefers accepted AutoSol with a usable
 density map, then completed PostMR, then Phaser. Profiles differ:
 
 - AutoMR: Phaser model and Phaser MTZ;
-- Metal (`--stage metal` on an AutoMR run, or a `DATASET/AutoSolMetal/run_NNN`
+- Metal (`--stage metal` on an AutoMR run, or an
+  `AutoMR/run_NNN/AutoSolMetal/run_NNN` (earlier: `DATASET/AutoSolMetal/run_NNN`)
   directory opened directly): Phaser model, that search's (or the latest found
   search's) `overall_best_ha_pdb.pdb`, and the Phaser MTZ;
 - PostMR: ReadySet model and dictionaries with accepted AutoSol density when
