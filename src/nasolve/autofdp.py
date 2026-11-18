@@ -2340,7 +2340,10 @@ def write_final_inputs(
     ``final_input.eff`` is the manual .eff with only these changes: its
     refinement model and ``default_model`` are removed (AutoFDP's model is
     given on the command line), its anomalous-scatterer groups are removed,
-    ``group_anomalous`` is unselected in the strategy. Among the extra PHIL
+    ``group_anomalous`` is unselected in the strategy, and any other parameter
+    naming the replaced model file (phenix.refine loads every file a path
+    parameter names; the GUI keeps one in ``refinement.gui.migration``) is
+    removed. Among the extra PHIL
     files it loads (``data_manager.phil_files``), one pointing back at the
     .eff itself or at a job's full parameter file (phenix.refine's output
     .eff names the GUI's ``refine_NN.eff``, which has the model and the
@@ -2358,7 +2361,18 @@ def write_final_inputs(
     defaults = [item for item in items if item.kind == "assign" and item.path == "data_manager.default_model"]
     groups = [item for item in items
               if item.kind == "scope" and item.path == "refinement.refine.anomalous_scatterers"]
-    remove += defaults + groups
+    # phenix.refine also loads every existing file a path parameter names (for
+    # example the GUI's legacy refinement.gui.migration...input.pdb.file_name),
+    # so a reference to the replaced model anywhere else would load it as a
+    # second model.
+    replaced = [Path(name) for _, name in models if name]
+    references = [
+        item for item in items
+        if item.kind == "assign" and not item.path.startswith("data_manager.")
+        and phil_text.unquote(item.value)
+        and any(_same_file(phil_text.unquote(item.value), old) for old in replaced)
+    ]
+    remove += defaults + groups + references
     replace = {}
     removed_phils: list[str] = []
     copied_phils: list[dict[str, object]] = []
@@ -2379,6 +2393,8 @@ def write_final_inputs(
             other for other in other_items
             if (other.kind == "scope" and other.path in _CONTROLLED_SCOPES)
             or (other.kind == "assign" and other.path in _CONTROLLED_ASSIGNMENTS)
+            or (other.kind == "assign" and phil_text.unquote(other.value)
+                and any(_same_file(phil_text.unquote(other.value), old) for old in replaced))
         ]
         strategy_fix = {
             other: re.sub(r"\*group_anomalous\b", "group_anomalous", other_text[other.start:other.end])
@@ -2427,7 +2443,8 @@ def write_final_inputs(
         f"# (sha256 {file_sha256(final_eff.source)}). Changed: its model and its anomalous\n"
         "# scatterer groups removed (AutoFDP's model is given on the command line and\n"
         "# autofdp_final.params holds the groups, f' and f'' fixed), group_anomalous\n"
-        "# unselected in the strategy, and extra PHIL files that would set them again\n"
+        "# unselected in the strategy, other references to the replaced model removed,\n"
+        "# and extra PHIL files that would set them again\n"
         "# left out or replaced by edited copies (phil_files/). Everything else is as\n"
         "# in the original.\n"
     )
@@ -2461,6 +2478,7 @@ def write_final_inputs(
     edits = {
         "removed_models": [name for _, name in models if name],
         "removed_default_model": bool(defaults),
+        "removed_model_references": [item.path for item in references],
         "removed_anomalous_groups": list(final_eff.anomalous_groups),
         "removed_phil_files": removed_phils,
         "removed_default_phil": bool(default_phils),

@@ -166,7 +166,12 @@ entries are reconstructed from repository history.
     anomalous groups, a model, `group_anomalous` or the output name is
     replaced by an edited copy in `final_round/phil_files/`
     (`edits.removed_phil_files`, `removed_default_phil`,
-    `copied_phil_files`; `FinalEff.job_phil_files`). New line-preserving PHIL scanner
+    `copied_phil_files`; `FinalEff.job_phil_files`). Any other parameter
+    naming the replaced model file is removed as well: phenix.refine loads
+    every existing file a path parameter names, and the GUI's
+    `refinement.gui.migration.refinement.input.pdb.file_name` brought the old
+    model back as a second model (PdUHgPdU run_012;
+    `edits.removed_model_references`). New line-preserving PHIL scanner
     `nasolve.phil_text` makes these edits without touching any other line.
     Preflight: the .eff must be a phenix.refine parameter file naming a
     reflection file, and every file it names must exist; another

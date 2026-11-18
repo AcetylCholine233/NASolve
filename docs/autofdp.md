@@ -339,7 +339,11 @@ need it:
 - **Model:** AutoFDP's `final_model.pdb` (calibrated occupancies; metal B from
   step 1) instead of the model the .eff names. The .eff's refinement model and
   `default_model` are removed from the copy; a reference model (`type =
-  reference`) stays.
+  reference`) stays. Any other parameter naming the replaced model file is
+  removed too: phenix.refine loads every existing file a path parameter names,
+  and the GUI keeps the old inputs in `refinement.gui.migration.refinement.input`
+  (its `pdb.file_name` loaded the old model as a second model in PdUHgPdU
+  run_012). Its reflection-file entries name the same MTZ and stay.
 - **Anomalous scatterers:** the .eff's anomalous groups are removed. Every
   metal site AutoFDP refined gets a group with f′ at the value used in the f″
   rounds (theory) and f″ at its refined value in the last f″ round, with

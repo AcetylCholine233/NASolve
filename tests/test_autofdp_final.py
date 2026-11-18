@@ -130,7 +130,10 @@ def make_final_refine(root: Path, fdp: float = 2.6, *, final: str = "ok") -> Pat
         "    eff = next(Path(a) for a in args if a.endswith('final_input.eff')).read_text()\n"
         "    loaded = [Path(m) for m in re.findall(r'phil_files = \"(.*?)\"', eff)]\n"
         "    texts = [eff, *(path.read_text() for path in loaded)]\n"
-        "    if sum(text.count('  model {') for text in texts) > 0:\n"
+        "    given = next(Path(a) for a in args if a.endswith('.pdb')).resolve()\n"
+        "    named = {Path(v).resolve() for t in texts for v in re.findall(r'= \"([^\"]+[.]pdb)\"', t)}\n"
+        "    if sum(text.count('  model {') for text in texts) > 0 or any(\n"
+        "            path.is_file() and path != given for path in named):\n"
         "        print('Sorry: Wrong number of models of each type supplied.')\n"
         "        raise SystemExit(1)\n"
         "    if any('anomalous_scatterers' in text for text in texts[1:]):\n"
@@ -372,6 +375,14 @@ class FinalRoundTests(unittest.TestCase):
                 "  default_phil = None\n",
                 f'  phil_files = "{gui_copy}"\n  phil_files = "{anomalous_phil}"\n'
                 f'  default_phil = "{gui_copy}"\n',
+            ).replace(
+                "                      Biology/project\n",
+                "                      Biology/project\n"
+                "    migration {\n      refinement {\n        input {\n          pdb {\n"
+                f'            file_name = "{model}"\n'
+                "          }\n          xray_data {\n"
+                f'            file_name = "{mtz}"\n'
+                "          }\n        }\n      }\n    }\n",
             )
             output_eff = root / "Refine_85" / "PdUPdU-Hg_refine_085.eff"
             output_eff.parent.mkdir()
@@ -402,6 +413,11 @@ class FinalRoundTests(unittest.TestCase):
             edits = result.final.edits
             self.assertEqual(edits["removed_phil_files"], [str(gui_copy)])
             self.assertTrue(edits["removed_default_phil"])
+            # The GUI's legacy record of the old model is gone; its MTZ entry stays.
+            self.assertEqual(edits["removed_model_references"],
+                             ["refinement.gui.migration.refinement.input.pdb.file_name"])
+            self.assertNotIn(str(model), written)
+            self.assertIn(f'            file_name = "{mtz}"\n', written)
             self.assertEqual(edits["copied_phil_files"], [{
                 "original": str(anomalous_phil), "copy": str(copy),
                 "removed": ["group_anomalous in strategy", "refinement.refine.anomalous_scatterers"],
