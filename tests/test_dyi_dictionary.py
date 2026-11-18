@@ -2,8 +2,9 @@
 
 DYI is dC with the N4 amino group replaced by a 1,2,4-triazol-1-yl ring (N4 is
 the triazole N1). Its dictionary is a reviewed restraint dictionary used for
-refinement in place of ReadySet's, which ReadySet would build "from scratch"
-with every chiral centre set to "both" (DYI is not a CCD component).
+refinement in place of ReadySet's: ReadySet reads one component from NASolve's
+combined dictionary file and builds any other non-CCD residue "from scratch",
+with every chiral centre set to "both" (as it did for DE beside 1AP).
 """
 
 import json
@@ -26,6 +27,8 @@ from nasolve.ligand_profiles import AUTHORITATIVE_CODES, effective_restraints
 from nasolve.checkpoints import _initial_restraints
 from nasolve.postmr import (
     MutationAction,
+    PostMRPreparationError,
+    _check_kept_atom_names,
     _restore_shared_parent_coordinates,
     build_mutation_plan,
     prepare_postmr,
@@ -171,8 +174,8 @@ class DYIEntryTests(unittest.TestCase):
 
 class DYIPostMRTests(unittest.TestCase):
     def test_postmr_refines_with_the_reviewed_dictionary_not_readysets(self):
-        """ReadySet builds DYI from scratch (it is not in the CCD), with the sugar
-        chirality set to "both"; refinement must get the reviewed DYI.cif."""
+        """Whatever ReadySet writes for DYI (here a from-scratch dictionary with
+        the sugar chirality set to "both"), refinement gets the reviewed DYI.cif."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             original = root / "model.pdb"
@@ -232,6 +235,65 @@ class DYIPostMRTests(unittest.TestCase):
             # ReadySet's from-scratch DYI is left out; the copy folds DC's
             # alternative sugar torsions for Phenix.
             self.assertIn("_chem_comp_tor.alt_value_angle", result.dictionaries[0].read_text())
+
+
+class KeptResidueNameTests(unittest.TestCase):
+    """A DYI already in the starting model (from the user's search model) must
+    use DYI.cif's atom names. Y-T_Ag AutoMR run_005 (2026-11-18) had a DYI with
+    its own names (C1, C3, N2, N5, O1, ...); ReadySet crashed in eLBOW with
+    "AttributeError: 'AtomClass' object has no attribute 'atom_name_in_input'"."""
+
+    def _atoms(self, renames: dict[str, str]):
+        """DYI's heavy atoms (no OP3) at the dictionary's coordinates, renamed."""
+        values = component()
+        xyz = coordinates(values)
+        elements = dict(zip(values["_chem_comp_atom.atom_id"], values["_chem_comp_atom.type_symbol"]))
+        return [(renames.get(name, name), elements[name], xyz[name])
+                for name in values["_chem_comp_atom.atom_id"]
+                if elements[name] != "H" and name != "OP3"]
+
+    def _run(self, renames: dict[str, str]):
+        lines = [pdb_record("HETATM", serial, name, "DYI", "A", 12, element=element,
+                            x=point[0], y=point[1], z=point[2])
+                 for serial, (name, element, point) in enumerate(self._atoms(renames), 1)]
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        model = root / "model.pdb"
+        model.write_text("".join(lines) + "END\n")
+        run = root / "dataset" / "AutoMR" / "run_001"
+        report_path = make_postmr_report(run, model)
+        report = json.loads(report_path.read_text())
+        report["frame"] = None
+        report["post_mr_plan"] = {"sequences": {}, "standard_pair": None, "mutations": {}}
+        report_path.write_text(json.dumps(report))
+        launched = []
+
+        def readyset(command, cwd, **kwargs):
+            launched.append(command)
+            raise AssertionError("ReadySet must not run")
+
+        with patch("nasolve.postmr.subprocess.run", side_effect=readyset), \
+                self.assertRaises(PostMRPreparationError) as caught:
+            prepare_postmr(run, root / "ready_set", modified_pairs_only=True,
+                           modified_pair_builder=lambda *args: {})
+        self.assertEqual(launched, [])
+        self.assertFalse((run / "PostMR").exists())
+        return str(caught.exception)
+
+    def test_dictionary_names_pass(self):
+        atoms = {name: (element, point) for name, element, point in self._atoms({})}
+        _check_kept_atom_names("DYI", "A:12", atoms, DICTIONARY)   # no exception
+
+    def test_foreign_names_stop_before_postmr(self):
+        message = self._run({"C2": "C3", "O2": "O1", "N3": "N2", "N4T": "N5", "C5": "C1"})
+        self.assertIn("DYI at A:12 in the starting model has atom name(s) C1, C3, N2, N5, O1", message)
+        self.assertIn("run AutoMR again", message)
+
+    def test_dictionary_names_on_the_wrong_atoms_stop_before_postmr(self):
+        message = self._run({"C5": "C6", "C6": "C5"})
+        self.assertIn("is not named as in DYI.cif", message)
+        self.assertIn("C6-N1", message)
 
 
 class DYIPlacementTests(unittest.TestCase):

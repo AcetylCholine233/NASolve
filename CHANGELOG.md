@@ -10,6 +10,19 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- PostMR stopped with "ReadySet failed with status 1" (eLBOW:
+  `AttributeError: 'AtomClass' object has no attribute 'atom_name_in_input'`,
+  Phenix 2.2.1) when a curated residue already in the starting model used its
+  own atom names: Y-T_Ag AutoMR run_005, whose search model `DYI_G.pdb` has a
+  DYI with C1, C3, N2, N5, O1, ... instead of DYI.cif's C5, C2, N3, N4T, O2,
+  .... PostMR now checks every curated residue it keeps from the starting
+  model before `PostMR/` exists: each heavy-atom name must be in the
+  dictionary, and each dictionary bond between two of its atoms must be a bond
+  in the model (so names on the wrong atoms are caught too). The error names
+  the atoms and the dictionary's names. A dictionary without an atom list gets
+  only the bond check. Tested on the real `DYI_G.pdb` (refused) and on a
+  renamed copy (accepted); ReadySet itself not rerun.
+
 - The metal search (`nasolve autosol RUN --metal ELEMENT`) gave AutoSol the
   plain Phaser model, so heavy atoms that belong to the requested bases were
   found as metal sites: in iCiU_Ag the iodines of 5-iodo-dC and 5-iodo-dU
@@ -77,8 +90,9 @@ entries are reconstructed from repository history.
   coordinates satisfy its restraints (bonds within 0.011 A, angles 1.5 deg).
   PostMR places `N4` on the parent's C4-N4 line at that length. Like `1AP`,
   `DYI` is used for refinement in place of ReadySet's dictionary (ReadySet
-  builds a non-CCD residue from scratch with its sugar chirality
-  unrestrained). Not yet run in Phenix or Coot (simulated in tests).
+  reads one component from NASolve's combined dictionary file and builds any
+  other non-CCD residue from the model, without chirality restraints, as it
+  did for DE beside 1AP). Not yet run in Phenix or Coot (simulated in tests).
 - Reviewed restraint dictionaries are now declared per curated entry
   (`reviewed_restraints`, `required_planes`); `AUTHORITATIVE_CODES` is derived
   from them, and the 1AP-only checks apply to every such entry, now also

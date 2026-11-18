@@ -317,9 +317,14 @@ The parameterized monomer overrides (curated entries with
 `reviewed_restraints`: `1AP` and `DYI`; `ligand_profiles.AUTHORITATIVE_CODES`)
 use selected-site `NASnoOP3` modifications. Their dictionaries must carry
 energy types, numerical bond targets, the DNA group, the registered planes and
-signed sugar chiral centres (C1', C3', C4'), because they replace ReadySet's;
-for a non-CCD code ReadySet builds the residue from scratch with every chiral
-centre set to "both". The precedence record's policy is
+signed sugar chiral centres (C1', C3', C4'), because they replace ReadySet's.
+ReadySet (Phenix 2.2.1 eLBOW) reads one component from each supplied dictionary
+file and NASolve supplies one combined file, so another non-CCD residue is
+built from the model with every chiral centre set to "both". Curated residues
+kept from the starting model are checked against their dictionary before
+`PostMR/` is created: every heavy-atom name must exist in it, and every
+dictionary bond between two of the residue's atoms must be a bond in the model
+(0.9 A to the covalent radii plus 0.45 A); eLBOW crashes on mismatched names. The precedence record's policy is
 `reviewed-dictionaries-over-readyset-v1` (earlier runs:
 `reviewed-1ap-over-readyset-v1`). The original integration/validation
 diary is preserved under `history/1ap-phosphate-integration.md`; it is no longer

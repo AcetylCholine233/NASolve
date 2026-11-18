@@ -315,6 +315,40 @@ def _dictionary_bonds(path: Path) -> set[frozenset[str]]:
     raise ValueError(f"Dictionary has no _chem_comp_bond loop: {path}")
 
 
+def dictionary_atom_names(path: Path) -> dict[str, str]:
+    """Atom name -> element from a CIF ``_chem_comp_atom`` loop ({} if none)."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "loop_":
+            continue
+        headers: list[str] = []
+        cursor = index + 1
+        while cursor < len(lines) and lines[cursor].lstrip().startswith("_"):
+            headers.append(lines[cursor].strip())
+            cursor += 1
+        if "_chem_comp_atom.atom_id" not in headers:
+            continue
+        name_index = headers.index("_chem_comp_atom.atom_id")
+        element_index = (headers.index("_chem_comp_atom.type_symbol")
+                         if "_chem_comp_atom.type_symbol" in headers else None)
+        names: dict[str, str] = {}
+        while cursor < len(lines):
+            row = lines[cursor].strip()
+            if not row or row in {"#", "loop_"} or row.startswith(("data_", "_")):
+                break
+            fields = shlex.split(row, comments=True, posix=False)
+            if len(fields) > name_index:
+                name = fields[name_index]
+                if len(name) >= 2 and name[0] == name[-1] and name[0] in {"'", '"'}:
+                    name = name[1:-1]
+                element = (fields[element_index].upper()
+                           if element_index is not None and len(fields) > element_index else "")
+                names[name] = element
+            cursor += 1
+        return names
+    return {}
+
+
 def dictionary_ideal_bond_length(path: Path, atom_1: str, atom_2: str) -> float:
     """Return an atom-pair distance from the preferred ideal CIF coordinates."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -466,6 +500,7 @@ __all__ = [
     "CuratedLigand",
     "RingSubstituent",
     "curated_dictionary",
+    "dictionary_atom_names",
     "dictionary_ideal_bond_length",
     "ligand_data_directory",
     "validate_curated_dictionary",

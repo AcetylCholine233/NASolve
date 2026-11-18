@@ -822,9 +822,14 @@ its parent is `DC` and the triazole's N1 is named `N4` (ring atoms `N2T`, `C3T`,
 by `scripts/build_dyi_dictionary.py` from the CCP4 Monomer Library AceDRG
 entries for `DC` (every shared atom, unchanged) and `TZF`
 (4-(1,2,4-triazol-1-yl)phenol: the triazole ring), with C4-N4 1.411 +/- 0.015 A.
-Like `1AP`'s, it is used for refinement in place of ReadySet's, because
-ReadySet builds a non-CCD residue from scratch with its sugar chirality
-unrestrained. NARestraints sees `DYI` as `C34` (N4-methyl-dC), an
+Like `1AP`'s, it is used for refinement in place of ReadySet's. ReadySet
+(Phenix 2.2.1 eLBOW) reads one component from each supplied dictionary file,
+and NASolve supplies one combined file; any other residue that is not in the
+CCD gets restraints built from the model ("from scratch") with no chirality
+restraints, as `DE` did beside `1AP`. A DYI that is already in the search
+model must use these atom names: PostMR checks every curated residue it keeps
+from the starting model (names, and the dictionary's bonds) before it starts,
+because ReadySet crashes on mismatched names. NARestraints sees `DYI` as `C34` (N4-methyl-dC), an
 N4-substituted dC with the same base-atom names. If DYI pairs with a base
 without a metal between them, NARestraints restrains that pair like an
 N4-substituted dC, with an N4 hydrogen bond; the triazole N4 carries no

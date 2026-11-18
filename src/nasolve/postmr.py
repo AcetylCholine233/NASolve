@@ -20,6 +20,8 @@ from .curated_ligands import (
     ligand_definition,
     ligand_dictionary,
     validate_ligand_dictionary,
+    dictionary_atom_names,
+    _dictionary_bonds,
 )
 from .frame_postmr import frame_postmr_spec, restraint_data_directory
 from .model_assessment import file_sha256
@@ -1425,6 +1427,64 @@ class ModelMutationPlan:
         )
 
 
+def _dictionary_name(name: str) -> str:
+    """One spelling for old and new nucleotide atom names (O1P/OP1, O5*/O5')."""
+    name = name.replace("*", "'")
+    return {"O1P": "OP1", "O2P": "OP2", "O3P": "OP3"}.get(name, name)
+
+
+#: Covalent radii (A) for the bond-length check on kept curated residues.
+_COVALENT_RADII = {"C": 0.76, "N": 0.71, "O": 0.66, "P": 1.07, "S": 1.05, "SE": 1.20,
+                   "F": 0.57, "CL": 1.02, "BR": 1.20, "I": 1.39}
+
+
+def _check_kept_atom_names(
+    code: str,
+    site: str,
+    atoms: Mapping[str, tuple[str, tuple[float, float, float]]],
+    dictionary: Path,
+) -> None:
+    """Refuse a curated residue from the starting model whose heavy atoms are
+    not named as in its dictionary.
+
+    Every name must exist in the dictionary, and every dictionary bond between
+    two of the residue's atoms must be a bond in the model (names that exist
+    but sit on the wrong atoms fail here).
+    """
+    expected = {
+        _dictionary_name(name): element
+        for name, element in dictionary_atom_names(dictionary).items()
+        if element not in {"H", "D"}
+    }
+    # A dictionary without an atom list (a bond-only fragment) gets only the bond check.
+    unknown = sorted(name for name in atoms
+                     if expected and _dictionary_name(name) not in expected)
+    advice = ("Rename them in the search model (or the model PostMR starts from) "
+              "and run AutoMR again")
+    if unknown:
+        raise PostMRPreparationError(
+            f"{code} at {site} in the starting model has atom name(s) {', '.join(unknown)} "
+            f"that {dictionary.name} does not define; its atoms are "
+            f"{', '.join(sorted(expected))}. {advice}"
+        )
+    by_name = {_dictionary_name(name): value for name, value in atoms.items()}
+    misplaced = []
+    for pair in _dictionary_bonds(dictionary):
+        names = sorted(_dictionary_name(name) for name in pair)
+        if len(names) != 2 or not all(name in by_name for name in names):
+            continue
+        (first, xyz_1), (second, xyz_2) = by_name[names[0]], by_name[names[1]]
+        longest = _COVALENT_RADII.get(first, 1.0) + _COVALENT_RADII.get(second, 1.0) + 0.45
+        length = dist(xyz_1, xyz_2)
+        if not 0.9 <= length <= longest:
+            misplaced.append(f"{names[0]}-{names[1]} {length:.2f} A")
+    if misplaced:
+        raise PostMRPreparationError(
+            f"{code} at {site} in the starting model is not named as in {dictionary.name}: "
+            f"these dictionary bonds are not bonds in the model: {', '.join(misplaced)}. {advice}"
+        )
+
+
 def plan_model_mutations(
     report: Mapping[str, object],
     source_model: Path,
@@ -1629,8 +1689,11 @@ def prepare_postmr(
     actions = mutation_plan.actions
     ligand_sources: dict[str, Path] = dict(mutation_plan.ligand_sources)
     ligand_specs = {code: ligand_definition(code) for code in sorted(ligand_sources)}
-    # Curated residues already in the model keep their dictionaries too.
+    # Curated residues already in the model keep their dictionaries too, and
+    # must use the dictionary's atom names: ReadySet (eLBOW, Phenix 2.2.1)
+    # crashes with an AttributeError when they differ.
     replaced_sites = {action.site for action in actions if action.method != "none"}
+    kept_atoms: dict[tuple[str, str], dict[str, tuple[str, tuple[float, float, float]]]] = {}
     for line in _coordinate_records(source_model):
         identity = _record_identity(line)
         if (
@@ -1639,12 +1702,19 @@ def prepare_postmr(
             or f"{identity[0]}:{identity[1]}" in replaced_sites
         ):
             continue
+        atoms = kept_atoms.setdefault((identity[2], f"{identity[0]}:{identity[1]}"), {})
+        element = _atom_element(line)
+        if element not in {"H", "D"}:
+            atoms.setdefault(line[12:16].strip(), (element, _atom_coordinates(line)))
+    checked: dict[str, Path] = {}
+    for (code, site), atoms in sorted(kept_atoms.items()):
         try:
-            validate_ligand_dictionary(
-                identity[2], ligand_dictionary(identity[2], data_root).resolve()
-            )
+            if code not in checked:
+                checked[code] = ligand_dictionary(code, data_root).resolve()
+                validate_ligand_dictionary(code, checked[code])
         except (KeyError, FileNotFoundError, ValueError) as exc:
             raise PostMRPreparationError(str(exc)) from exc
+        _check_kept_atom_names(code, site, atoms, checked[code])
 
     coot_actions = tuple(
         action
