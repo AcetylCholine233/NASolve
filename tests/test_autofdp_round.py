@@ -542,7 +542,8 @@ class AutoFDPCommandTests(unittest.TestCase):
                 "ReadySet (no hydrogens): updated model; atoms, coordinates and B unchanged",
                 "curated dictionaries given: DU",
                 "restraints for phenix.refine: ReadySet/DU.cif",
-                "Not implemented yet: the identity check and B confirmation",
+                "Not implemented yet: the identity check. Partially implemented: the final "
+                "round (--final-eff), which serves as the B confirmation.",
             ):
                 self.assertIn(text, out)
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG"))

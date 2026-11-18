@@ -1,7 +1,8 @@
 # AutoFDP: occupancy from f″ refinement
 
-**Status: steps 1 to 3 and the final round (`--final-eff`) implemented;
-steps 4-5 specified only (2026-11-18).**
+**Status: steps 1 to 3 implemented; the final round (`--final-eff`, step 6)
+partially implemented, and it serves as the B confirmation (step 5); the
+identity check (step 4) specified only (2026-11-18).**
 `nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
 file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
 (B start) copies the model and sets each metal's B to the mean B of its
@@ -16,14 +17,16 @@ adjustments (default 5). Coot is not opened for these rounds: the maps of an
 f″-only round are not diagnostic. With `--final-eff MANUAL.eff`, a converged
 run ends with a final round that uses every setting of that manual
 phenix.refine run, with AutoFDP's model, the metal occupancies held and f′/f″
-fixed at the calibrated values (step 6); its result opens in Coot. The
-identity check and B confirmation (steps 4-5) are documented stubs in
-`src/nasolve/autofdp.py` that raise `NotImplementedError`; options that belong
-to them are accepted but have no effect yet, and `--element` is refused. The
-defaults marked *(to confirm)* follow my reading of the papers below and have
-not yet been checked by the lab. Steps 1-3 first ran on real data on
-2026-11-13 (PdUHgPdU, Phenix 2.2.1); the final round has been tested with
-simulated Phenix programs only.
+fixed at the calibrated values (step 6); its result opens in Coot. That
+round also serves as the B confirmation (step 5). It is partially
+implemented: how its starting parameters are given (a manual .eff for now)
+may change. The identity check (step 4) and the separate B-only round are
+documented stubs in `src/nasolve/autofdp.py` that raise
+`NotImplementedError`; options that belong to them are accepted but have no
+effect yet, and `--element` is refused. The defaults marked *(to confirm)*
+follow my reading of the papers below and have not yet been checked by the
+lab. Steps 1-3 first ran on real data on 2026-11-13 and the final round on
+2026-11-18 (PdUHgPdU, Phenix 2.2.1).
 
 ## Purpose
 
@@ -91,7 +94,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--b-step` | 20 Å² *(to confirm)* | B change when the map says to adjust B instead of occupancy |
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
-| `--no-confirm-b` | confirm on | skip the B-confirmation round |
+| `--no-confirm-b` | confirm on | skip the separate B-only round (not used: the final round serves as the B confirmation for now) |
 | `--final-eff` | none | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; when every site converges, the final round (step 6) uses all of its settings |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
 | `--no-coot` | open Coot | do not open the final round in Coot (only a final round opens Coot) |
@@ -322,13 +325,25 @@ the floor and at most 1.0.
 AutoFDP never changes an element on its own. A new run with `--element`
 renames the atom and residue in its copy of the model.
 
-### 5. B confirmation (default on)
+### 5. B confirmation (partially implemented, by the final round)
 
-Following the Adv. Mater. supplement: one round with occupancy, f′ and f″
-fixed at the converged values, refining only the B of the sites. If a site's B moves by more than 25% *(to confirm)*, the
-site goes to review.
+The final round (step 6) serves as the B confirmation (user, 2026-11-18): it
+holds the metal occupancies and f′/f″ at the calibrated values and refines B
+with the manual .eff's strategy, and the report and printout give each
+site's B before and after (`final_round.sites[].b_before`, `b_after`).
 
-### 6. Final round (`--final-eff`, implemented)
+Not implemented: the separate round of the Adv. Mater. supplement that
+refines only the sites' B (the `confirm_b_round` stub; `--no-confirm-b` has no
+effect), and the automatic check that sends a site to review when its B moves
+by more than 25% *(to confirm)*. For now the B change is for the user to
+judge.
+
+### 6. Final round (`--final-eff`, partially implemented)
+
+Partially implemented: the round works (first live run 2026-11-18, below),
+but how its starting parameters are given is provisional. A manual .eff is
+the interim way; the user is considering a better one.
+
 
 Runs only when every calibrated site converged (`AUTOFDP_CONVERGED`), in
 `run_NNN/final_round/`. It is a normal refinement with the settings of a
@@ -390,6 +405,16 @@ kept.
 The earlier plan for this step (the Adv. Mater. ending: XYZ, B, occupancy and
 f″ refined together) was replaced by the user's design (2026-11-18): a manual
 refinement's settings with occupancy and f′/f″ held.
+
+First live run (PdUHgPdU AutoFDP `run_013`, Phenix 2.2.1, 2026-11-18, with
+`--final-eff Refine_85/PdUPdU-Hg_refine_085.eff`): both Hg sites converged in
+round_001 at occupancy 1.00 (f″ 10.88 and 9.57; theory 10.19, f′ −22.17); the
+final round finished with R-work 0.171, R-free 0.260, the occupancies held at
+1.00, the f″ in phenix.refine's log equal to the values set, and B 234.9 →
+265.8 (h:1) and 264.0 (h:2). Two earlier attempts (`run_011`, `run_012`)
+failed phenix.refine's dry run with "Wrong number of models of each type
+supplied": the output .eff loaded the GUI's `refine_85.eff`, and its
+`gui.migration` record named the old model; both are handled now (above).
 
 ## Outputs
 
@@ -519,3 +544,6 @@ PDB files do not store f″; the refined values are in `report.json`.
    B-drift limit (25%) reasonable?
 8. Should coupled sites (bimetallic pairs) be calibrated together, or one at a
    time with the other held?
+9. How should the final round get its starting parameters? A manual .eff
+   (`--final-eff`) is the interim way (2026-11-18); the user is considering a
+   better one, for example once AutoFDP is part of the NASolve workflow.

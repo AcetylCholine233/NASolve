@@ -290,8 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
             "f''-only round are not diagnostic. With --final-eff, a converged run "
             "ends with a final round that uses every setting of that manual .eff, "
             "with AutoFDP's model, the metal occupancies held and f'/f'' fixed at "
-            "the calibrated values; its result opens in Coot. The identity check "
-            "and B confirmation are NOT IMPLEMENTED YET. See docs/autofdp.md."
+            "the calibrated values; its result opens in Coot. The final round is "
+            "PARTIALLY IMPLEMENTED: it also serves as the B confirmation, and how "
+            "its starting parameters are given may change. The identity check is "
+            "NOT IMPLEMENTED YET. See docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -366,7 +368,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--no-confirm-b", action="store_true",
-        help="(later step, not used yet) skip the round that refines only the sites' B at fixed occupancy and f''",
+        help="(not used: the final round, --final-eff, serves as the B confirmation "
+             "for now) skip the round that refines only the sites' B at fixed "
+             "occupancy and f''",
     )
     autofdp.add_argument(
         "--final-eff", type=Path, metavar="MANUAL.eff",
@@ -1834,7 +1838,8 @@ def _print_final_round(result) -> None:
     if final is None:
         return
     print(
-        f"\nAutoFDP final round ({_relative_to(final.directory, result.run_directory)}, "
+        f"\nAutoFDP final round and B confirmation "
+        f"({_relative_to(final.directory, result.run_directory)}, "
         f"settings of {result.plan.final_eff.source.name}; metal occupancy held, "
         "f' and f'' fixed)"
     )
@@ -1963,7 +1968,8 @@ def _autofdp(args: argparse.Namespace) -> int:
         return 1
     _print_fdp_round(result, args.max_iterations)
     _open_final_view(args, result)
-    print("Not implemented yet: the identity check and B confirmation.")
+    print("Not implemented yet: the identity check. Partially implemented: the final "
+          "round (--final-eff), which serves as the B confirmation.")
     if result.status == STATUS_CONVERGED:
         return 0
     return 2 if result.status == STATUS_REVIEW else 1

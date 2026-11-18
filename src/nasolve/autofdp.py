@@ -26,10 +26,13 @@ Implemented:
   again, until its f'' is within the tolerance or it has had
   ``max_iterations`` adjustments; then the next site.
 
-``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 to 3.
-The identity check, B confirmation and final round are documented stubs that
-raise NotImplementedError. The full contract, defaults and open questions are
-in docs/autofdp.md.
+``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 to 3
+and, with a manual .eff, the final round (``final_round``; partially
+implemented), which also serves as the B confirmation: occupancy and f'/f''
+held, B refined with the .eff's strategy. How its starting parameters are
+given (a manual .eff for now) may change. The identity check is a documented
+stub that raises NotImplementedError, as is the separate B-only round. The
+full contract, defaults and open questions are in docs/autofdp.md.
 
 Method (supplements of the mmDNA papers, after Liu & Hendrickson 2013):
 hold coordinates, B and occupancy; fix f' at its theoretical value for the
@@ -2152,7 +2155,8 @@ def confirm_b_round(
     """Refine only the sites' B with occupancy, f' and f'' fixed.
 
     Recipe ``AutoFDP/confirm-b``. A B change above 25% sends the site to
-    review.
+    review. Not used for now: the final round (``final_round``, with
+    ``--final-eff``) serves as the B confirmation (user, 2026-11-18).
     """
     raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
 
@@ -2500,6 +2504,10 @@ def final_round(
     environment: Mapping[str, str] | None = None,
 ) -> FinalRoundResult:
     """The final round after convergence, with the manual .eff's settings.
+
+    Partially implemented: it also serves as the B confirmation (occupancy
+    and f'/f'' held, B refined), and how its starting parameters are given
+    (a manual .eff for now) may change.
 
     ``model`` is AutoFDP's final model (calibrated occupancies). phenix.refine
     runs (``--dry_run`` first) with the edited copy of the .eff and the metal

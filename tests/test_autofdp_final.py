@@ -511,14 +511,15 @@ class FinalCommandTests(unittest.TestCase):
                 "(group_anomalous will be unselected)",
                 "its anomalous groups (chain B resid 101) -> replaced by the metal sites",
                 "occupancies held as in the .eff: chain A resid 12",
-                "AutoFDP final round (final_round, settings of refine_12.eff; metal occupancy held, "
-                "f' and f'' fixed)",
+                "AutoFDP final round and B confirmation (final_round, settings of refine_12.eff; "
+                "metal occupancy held, f' and f'' fixed)",
                 "R-work 0.1903, R-free 0.231",
                 f"Final model: {run / 'final_round' / 'final_001.pdb'}",
                 "Opened Coot (PID 4321) with final_round/final_001.pdb and final_001.mtz",
             ):
                 self.assertIn(text, out)
-            self.assertLess(out.index("AutoFDP final round ("), out.index("AUTOFDP_CONVERGED"))
+            self.assertLess(out.index("AutoFDP final round and B confirmation ("),
+                            out.index("AUTOFDP_CONVERGED"))
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG") and "55.00" in line)
             for value in ("0.90", "-0.12", "2.60", "50.00", "55.00"):
                 self.assertIn(value, row)

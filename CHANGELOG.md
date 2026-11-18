@@ -145,7 +145,10 @@ entries are reconstructed from repository history.
   - No Coot for the f'' rounds: AutoFDP no longer opens an f'' round's model
     and maps in Coot (it did up to a70def8 on `ginkgo`), because those maps
     are not diagnostic. Only the final round (below) opens Coot.
-  - Final round (`--final-eff MANUAL.eff`): when every calibrated site
+  - Final round (`--final-eff MANUAL.eff`; partially implemented: it also
+    serves as the B confirmation, and how its starting parameters are
+    given may change; first live run 2026-11-18, PdUHgPdU AutoFDP run_013,
+    Phenix 2.2.1, R-work 0.171, R-free 0.260): when every calibrated site
     converges, a phenix.refine round in `run_NNN/final_round/` with every
     setting of a manual refinement's .eff (for example the GUI's
     `.phenix/project_data/refine_NN.eff`), with only these changes: AutoFDP's
@@ -183,7 +186,7 @@ entries are reconstructed from repository history.
     parameters refined together) is replaced; `AutoFDPSettings.final` is now
     `final_eff`. Schema (additive, still 2): `final_round`,
     `settings.final_eff`, `steps.final_round`; new round status
-    `AUTOFDP_FINAL_DONE`. Simulated only.
+    `AUTOFDP_FINAL_DONE`. Tested with simulated Phenix programs and one live run.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals

@@ -2,7 +2,8 @@
 implemented and tested in test_autofdp_bstart.py; the preflight and step 2
 (one f''-only round from a model and an MTZ) in test_autofdp_round.py; step 3
 (occupancy adjustment) in test_autofdp_occupancy.py; the final round
-(--final-eff) in test_autofdp_final.py. The identity check and B confirmation
+(--final-eff, partially implemented; it also serves as the B confirmation)
+in test_autofdp_final.py. The identity check and the separate B-only round
 must stay documented stubs until they are implemented.
 """
 
@@ -28,6 +29,9 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         self.assertIn("Coot is not opened for these rounds: the maps of an f''-only round "
                       "are not diagnostic", flowing)
         self.assertIn("With --final-eff, a converged run ends with a final round", flowing)
+        self.assertIn("The final round is PARTIALLY IMPLEMENTED: it also serves as the B "
+                      "confirmation", flowing)
+        self.assertIn("The identity check is NOT IMPLEMENTED YET", flowing)
         self.assertIn("NOT IMPLEMENTED YET", flowing)
 
     def test_engine_functions_are_documented_stubs(self):
