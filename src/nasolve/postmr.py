@@ -1845,7 +1845,7 @@ def prepare_postmr(
             raise PostMRPreparationError(str(exc)) from exc
         ligand_specs.setdefault(code, ligand_definition(code))
         destination = restraints_dir / source.name
-        if code == "1AP":
+        if code in AUTHORITATIVE_CODES:   # CCP4 dictionaries: fold alternative torsions
             normalize_ccp4_torsion_alternates(source, destination)
         else:
             shutil.copyfile(source, destination)
@@ -2007,7 +2007,7 @@ def prepare_postmr(
         postmr_payload["refinement_restraints"] = [frozen_reference(path, run) for path in effective]
         postmr_payload["view_dictionaries"] = [frozen_reference(path, run) for path in view_dictionaries]
         postmr_payload["dictionary_precedence"] = {
-            "policy": "reviewed-1ap-over-readyset-v1",
+            "policy": "reviewed-dictionaries-over-readyset-v1",
             "authoritative_codes": sorted(set(ligand_codes) & AUTHORITATIVE_CODES),
             "sources": {path.stem: frozen_reference(path, run) for path in copied_cifs
                         if path.stem in AUTHORITATIVE_CODES},

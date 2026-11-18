@@ -42,6 +42,11 @@ class CuratedLigand:
     forbidden_bonds: tuple[tuple[str, str], ...] = ()
     atom_substitutions: tuple[AtomSubstitution, ...] = ()
     ring_substituents: tuple[RingSubstituent, ...] = ()
+    # A reviewed restraint dictionary is used for refinement as it is, in
+    # place of the one ReadySet generates (``ligand_profiles.AUTHORITATIVE_CODES``).
+    # Each group in ``required_planes`` must lie in one of its planes.
+    reviewed_restraints: bool = False
+    required_planes: tuple[tuple[str, ...], ...] = ()
 
 
 CURATED_LIGANDS: dict[str, CuratedLigand] = {
@@ -78,6 +83,8 @@ CURATED_LIGANDS: dict[str, CuratedLigand] = {
         deposition_code="1AP",
         required_bonds=(("C1'", "N9"), ("C2", "N2"), ("C6", "N6"), ("P", "O5'")),
         forbidden_bonds=(("O4'", "N1"),),
+        reviewed_restraints=True,
+        required_planes=(("N1", "C2", "N2", "N3", "C4", "C5", "C6", "N6", "N7", "C8", "N9"),),
     ),
     "S6G": CuratedLigand(
         code="S6G",
@@ -130,6 +137,33 @@ CURATED_LIGANDS: dict[str, CuratedLigand] = {
         required_bonds=(("C5", "I5"),),
         forbidden_bonds=(("C4", "I5"), ("C6", "I5")),
         ring_substituents=(RingSubstituent("I5", "C5", ("C4", "C6")),),
+    ),
+    "DYI": CuratedLigand(
+        code="DYI",
+        dictionary_filename="DYI.cif",
+        accepted_model_labels=("DYI",),
+        # NARestraints has no DYI; C34 (N4-methyl-dC) is an N4-substituted dC
+        # with the same base-atom names, so DYI is still a modified residue.
+        narestraints_label="C34",
+        description=(
+            "O4-triazolyl-dU (supplier name): 4-(1,2,4-triazol-1-yl)pyrimidin-2-one "
+            "2'-deoxynucleotide, under the laboratory label DYI (not a CCD component)"
+        ),
+        # dC bonding (N3=C4, N on C4); the triazole N1 is DYI's N4.
+        parent_code="DC",
+        required_bonds=(
+            ("C1'", "N1"), ("C4", "N4"), ("N4", "N2T"), ("N2T", "C3T"),
+            ("C3T", "N4T"), ("N4T", "C5T"), ("C5T", "N4"), ("P", "O5'"),
+        ),
+        forbidden_bonds=(("N4", "H41"), ("N4", "H42"), ("C4", "O4"), ("C4", "N2T")),
+        # N4 stays on dC's C4->N4 line, at DYI's C4-N4 length (1.41 A, not dC's
+        # 1.33 A), so the triazole Coot overlays keeps its bond to N4.
+        atom_substitutions=(AtomSubstitution("N4", "N4", "C4"),),
+        reviewed_restraints=True,
+        required_planes=(
+            ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6"),
+            ("C4", "N4", "N2T", "C3T", "N4T", "C5T"),
+        ),
     ),
 }
 
@@ -348,46 +382,69 @@ def dictionary_ideal_bond_length(path: Path, atom_1: str, atom_2: str) -> float:
     raise ValueError(f"Dictionary has no usable ideal atom coordinates: {path}")
 
 
+#: Sugar chiral centres a reviewed DNA dictionary must restrain with a sign.
+_SUGAR_CHIRAL_CENTRES = ("C1'", "C3'", "C4'")
+
+
+def _validate_reviewed_restraints(ligand: CuratedLigand, path: Path) -> None:
+    """A reviewed dictionary replaces ReadySet's, so it must be complete.
+
+    The official CCD graph alone is not a refinement restraint dictionary.
+    """
+    from .ligand_profiles import _blocks
+
+    code = ligand.code
+    values: dict[str, list[str]] = {}
+    for block in _blocks(path):
+        for key, value in block.values.items():
+            if key == "data_":
+                continue
+            if key in values:
+                raise ValueError(f"{code} dictionary has repeated category field {key}")
+            values[key] = value
+    if values.get("_chem_comp.id") != [code] or any(
+        set(values.get(key, [])) != {code}
+        for key in ("_chem_comp_atom.comp_id", "_chem_comp_bond.comp_id")
+    ):
+        raise ValueError(f"{code} dictionary has conflicting component identities")
+    names = values.get("_chem_comp_atom.atom_id", [])
+    energies = values.get("_chem_comp_atom.type_energy", [])
+    if not names or len(energies) != len(names) or any(v in ("", ".", "?") for v in energies):
+        raise ValueError(f"{code} requires complete nonbonded energy types, not a raw CCD graph")
+    if values.get("_chem_comp.group") != ["DNA"]:
+        raise ValueError(f"{code} restraint dictionary must use the reviewed DNA component group")
+    for key in ("_chem_comp_bond.value_dist", "_chem_comp_bond.value_dist_esd"):
+        raw = values.get(key, [])
+        try:
+            valid = len(raw) == len(values["_chem_comp_bond.atom_id_1"]) and bool(raw) and all(
+                isfinite(float(v)) and float(v) > 0 for v in raw)
+        except (ValueError, KeyError):
+            valid = False
+        if not valid:
+            raise ValueError(f"{code} requires finite positive numerical restraints: {key}")
+    planes: dict[str, set[str]] = {}
+    for plane_id, atom in zip(values.get("_chem_comp_plane_atom.plane_id", []),
+                              values.get("_chem_comp_plane_atom.atom_id", [])):
+        planes.setdefault(plane_id, set()).add(atom)
+    for required in ligand.required_planes:
+        if not any(set(required) <= members for members in planes.values()):
+            raise ValueError(f"{code} plane definition is incomplete: {', '.join(required)}")
+    signs = dict(zip(values.get("_chem_comp_chir.atom_id_centre", []),
+                     values.get("_chem_comp_chir.volume_sign", [])))
+    unsigned = [atom for atom in _SUGAR_CHIRAL_CENTRES
+                if signs.get(atom) not in {"positive", "negative"}]
+    if unsigned:
+        raise ValueError(f"{code} must restrain the sugar chirality at {', '.join(unsigned)}")
+
+
 def validate_curated_dictionary(code: str, path: Path) -> None:
     """Reject a packaged dictionary whose reviewed local topology changed."""
     try:
         ligand = CURATED_LIGANDS[code]
     except KeyError as exc:
         raise KeyError(f"No curated NASolve ligand is registered for {code}") from exc
-    if code == "1AP":
-        # The official CCD graph alone is not a refinement restraint dictionary.
-        from .ligand_profiles import _blocks
-        values = {}
-        for block in _blocks(path):
-            for key, value in block.values.items():
-                if key == "data_":
-                    continue
-                if key in values:
-                    raise ValueError(f"1AP dictionary has repeated category field {key}")
-                values[key] = value
-        if values.get("_chem_comp.id") != ["1AP"] or any(
-            set(values.get(key, [])) != {"1AP"}
-            for key in ("_chem_comp_atom.comp_id", "_chem_comp_bond.comp_id")
-        ):
-            raise ValueError("1AP dictionary has conflicting component identities")
-        names = values.get("_chem_comp_atom.atom_id", [])
-        energies = values.get("_chem_comp_atom.type_energy", [])
-        if not names or len(energies) != len(names) or any(v in ("", ".", "?") for v in energies):
-            raise ValueError("1AP requires complete nonbonded energy types, not a raw CCD graph")
-        if values.get("_chem_comp.group") != ["DNA"]:
-            raise ValueError("1AP restraint dictionary must use the reviewed DNA component group")
-        for key in ("_chem_comp_bond.value_dist", "_chem_comp_bond.value_dist_esd"):
-            raw = values.get(key, [])
-            try:
-                valid = len(raw) == len(values["_chem_comp_bond.atom_id_1"]) and bool(raw) and all(
-                    isfinite(float(v)) and float(v) > 0 for v in raw)
-            except (ValueError, KeyError):
-                valid = False
-            if not valid:
-                raise ValueError(f"1AP requires finite positive numerical restraints: {key}")
-        base = {"N1", "C2", "N2", "N3", "C4", "C5", "C6", "N6", "N7", "C8", "N9"}
-        if not base.issubset(set(values.get("_chem_comp_plane_atom.atom_id", []))):
-            raise ValueError("1AP base-plane definition is incomplete")
+    if ligand.reviewed_restraints:
+        _validate_reviewed_restraints(ligand, path)
     bonds = _dictionary_bonds(path)
     missing = [pair for pair in ligand.required_bonds if frozenset(pair) not in bonds]
     forbidden = [pair for pair in ligand.forbidden_bonds if frozenset(pair) in bonds]

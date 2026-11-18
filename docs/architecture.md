@@ -239,6 +239,9 @@ dictionary model only for the reviewed C-S bond length, and inherit occupancy
 and B factor from the replaced oxygen. This prevents an otherwise valid Coot
 graph overlap from placing the one new sulfur atom on the wrong side of a base.
 `C38` and `5IU` use the same guarded construction with parents `DC` and `DT`.
+`DYI` (O4-triazolyl-dU, parent `DC`) declares `N4 -> N4` along the parent
+`C4-N4` vector, at the dictionary's 1.41 A rather than dC's 1.33 A, so the
+overlaid triazole keeps its bonds to `N4`.
 Their iodine is placed along the external bisector defined by the mapped
 `C4-C5-C6` ring atoms, using the C-I distance from the dictionary's ideal
 coordinate set and the parent `C5` occupancy and B factor. The transformed Coot
@@ -310,8 +313,15 @@ geometry. Raw ReadySet output remains at `readyset.updated_model`; the new
 for the final model. Immutable earlier runs require no migration and are never
 rewritten.
 
-The first parameterized monomer override uses selected-site `NASnoOP3`
-modifications for reviewed 1AP chemistry. The original integration/validation
+The parameterized monomer overrides (curated entries with
+`reviewed_restraints`: `1AP` and `DYI`; `ligand_profiles.AUTHORITATIVE_CODES`)
+use selected-site `NASnoOP3` modifications. Their dictionaries must carry
+energy types, numerical bond targets, the DNA group, the registered planes and
+signed sugar chiral centres (C1', C3', C4'), because they replace ReadySet's;
+for a non-CCD code ReadySet builds the residue from scratch with every chiral
+centre set to "both". The precedence record's policy is
+`reviewed-dictionaries-over-readyset-v1` (earlier runs:
+`reviewed-1ap-over-readyset-v1`). The original integration/validation
 diary is preserved under `history/1ap-phosphate-integration.md`; it is no longer
 the active contract.
 New 1AP runs freeze authoritative refinement/view artifact lists with hashes,

@@ -1,7 +1,8 @@
 """Reviewed monomer profiles and per-site linked-phosphate modifications.
 
-1AP is the first reviewed profile. Do not infer new chemistry for other codes.
-Numerical dictionary restraints are preserved; models are never edited here.
+The reviewed profiles are the curated ligands with ``reviewed_restraints``
+(1AP, DYI). Do not infer new chemistry for other codes. Numerical dictionary
+restraints are preserved; models are never edited here.
 """
 from __future__ import annotations
 
@@ -20,7 +21,12 @@ from .phosphate import (PhosphateError, _atoms, audit_phosphates,
 from .run_context import artifact_reference
 from .backbone import requested_backbone_policy
 
-AUTHORITATIVE_CODES = frozenset({"1AP"})
+from .curated_ligands import CURATED_LIGANDS
+
+#: Curated ligands whose reviewed dictionary replaces ReadySet's.
+AUTHORITATIVE_CODES = frozenset(
+    code for code, ligand in CURATED_LIGANDS.items() if ligand.reviewed_restraints
+)
 MOD_ID = "NASnoOP3"
 MOD_CIF = """data_mod_NASnoOP3
 loop_

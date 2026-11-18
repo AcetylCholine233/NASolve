@@ -813,6 +813,24 @@ CCD identity `A1AAZ` for final mmCIF deposition; `1AP` is already an official
 CCD code. `C38` and `5IU` are the official DNA-linking components for iodo-dC
 and iodo-dU. Component identities are written to the PostMR report.
 
+`DYI` is the laboratory label for O4-triazolyl-dU (the suppliers' name for the
+convertible nucleoside 4-(1,2,4-triazol-1-yl)pyrimidin-2-one 2'-deoxyriboside).
+It is not a CCD component, so a deposition needs a new code. It has no alias;
+use the code itself, for example `--pair DYI:G`. Its ring has dC's bonding, so
+its parent is `DC` and the triazole's N1 is named `N4` (ring atoms `N2T`, `C3T`,
+`N4T`, `C5T`). Its packaged `DYI.cif` is a reviewed restraint dictionary built
+by `scripts/build_dyi_dictionary.py` from the CCP4 Monomer Library AceDRG
+entries for `DC` (every shared atom, unchanged) and `TZF`
+(4-(1,2,4-triazol-1-yl)phenol: the triazole ring), with C4-N4 1.411 +/- 0.015 A.
+Like `1AP`'s, it is used for refinement in place of ReadySet's, because
+ReadySet builds a non-CCD residue from scratch with its sugar chirality
+unrestrained. NARestraints sees `DYI` as `C34` (N4-methyl-dC), an
+N4-substituted dC with the same base-atom names. If DYI pairs with a base
+without a metal between them, NARestraints restrains that pair like an
+N4-substituted dC, with an N4 hydrogen bond; the triazole N4 carries no
+hydrogen, so check such restraints. Metal-bridged pairs are found by element
+and are never restrained.
+
 ## Optional sequence-family reference
 
 A fresh standalone run can explicitly select the reviewed W sequence baseline
@@ -953,7 +971,7 @@ For the W/5W6W frame, PostMR uses the fixed standard sites `A:12` and `B:4`.
 It applies ordinary DNA/RNA base changes through headless Coot. For a supported
 modified nucleotide, Coot first mutates the site to its clean canonical parent
 (`DT` for `DE`/`DF`/`5IU`/`DU`, `DA` for `1AP`, `DG` for `S6G`, or `DC` for
-`C38`), builds the component from its dictionary, overlaps it, and
+`C38`/`DYI`), builds the component from its dictionary, overlaps it, and
 replaces the parent. NASolve then restores the
 coordinates, occupancies, and B factors of every atom shared with the parent.
 This preserves the canonical sugar and phosphate exactly while retaining only
@@ -1032,6 +1050,10 @@ determine the final sulfur direction. PostMR projects `S4`, `S1`, or `S6`
 along the canonical parent's `C4-O4`, `C2-O2`, or `C6-O6` vector while keeping
 the dictionary-derived C-S bond length. The substituted atom inherits the
 parent oxygen's occupancy and B factor.
+
+For `DYI`, `N4` is placed along the parent's `C4-N4` line at DYI's C4-N4
+length (1.41 A instead of dC's 1.33 A), so the triazole that Coot overlays stays
+bonded to it; the other triazole atoms keep the overlay's positions.
 
 For `C38` and `5IU`, PostMR places iodine outward from mapped ring atom `C5`
 along the external `C4-C5-C6` bisector, using the reviewed dictionary's C-I

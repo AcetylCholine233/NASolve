@@ -746,6 +746,7 @@ def run_readyset(
     """
     from .curated_ligands import CURATED_LIGANDS, ligand_dictionary, validate_ligand_dictionary
     from .ligand_profiles import (
+        AUTHORITATIVE_CODES,
         combine_dictionary_inputs,
         effective_restraints,
         normalize_ccp4_torsion_alternates,
@@ -768,7 +769,7 @@ def run_readyset(
         except (KeyError, FileNotFoundError, ValueError) as exc:
             raise AutoFDPError(f"Curated dictionary for {code}: {exc}") from exc
         destination = directory / source.name
-        if code == "1AP":
+        if code in AUTHORITATIVE_CODES:   # CCP4 dictionaries: fold alternative torsions
             normalize_ccp4_torsion_alternates(source, destination)
         else:
             shutil.copyfile(source, destination)

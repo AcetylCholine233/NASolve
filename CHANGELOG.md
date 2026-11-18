@@ -64,6 +64,27 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- Curated ligand `DYI`: O4-triazolyl-dU (the suppliers' name for
+  4-(1,2,4-triazol-1-yl)pyrimidin-2-one 2'-deoxyriboside, a convertible
+  nucleoside), under a laboratory label; it is not a CCD component (checked
+  against the CCD in Phenix 2.2.1-6174, entries to 2026-07-10). Use the code
+  itself (`--pair DYI:G`, `A:12 = DYI`); there is no alias. Parent `DC`;
+  the triazole's N1 is `N4`, the other ring atoms `N2T`, `C3T`, `N4T`, `C5T`.
+  NARestraints sees it as `C34` (N4-methyl-dC). `DYI.cif` is a reviewed
+  restraint dictionary built by the new `scripts/build_dyi_dictionary.py` from
+  the CCP4 Monomer Library AceDRG entries `DC` (shared atoms, unchanged) and
+  `TZF` (triazole ring), commit 0af022b, with C4-N4 1.411 +/- 0.015 A; its
+  coordinates satisfy its restraints (bonds within 0.011 A, angles 1.5 deg).
+  PostMR places `N4` on the parent's C4-N4 line at that length. Like `1AP`,
+  `DYI` is used for refinement in place of ReadySet's dictionary (ReadySet
+  builds a non-CCD residue from scratch with its sugar chirality
+  unrestrained). Not yet run in Phenix or Coot (simulated in tests).
+- Reviewed restraint dictionaries are now declared per curated entry
+  (`reviewed_restraints`, `required_planes`); `AUTHORITATIVE_CODES` is derived
+  from them, and the 1AP-only checks apply to every such entry, now also
+  requiring signed sugar chiral centres. Schema: the PostMR precedence policy
+  is `reviewed-dictionaries-over-readyset-v1` (was
+  `reviewed-1ap-over-readyset-v1`; nothing reads it, and old runs keep theirs).
 - `--tfz-override` for `nasolve postmr` and `nasolve autosol RUN --metal
   ELEMENT`: continue from a Phaser result whose only problem is a TFZ below
   8.0 (`MR_REVIEW`, or `MR_FAILED` below the 7.0 floor). Phaser must have
