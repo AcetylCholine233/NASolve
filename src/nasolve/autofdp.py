@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from . import phil_text
 from .model_assessment import file_sha256
 from .run_context import artifact_reference
 
@@ -62,6 +63,7 @@ STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"    # one f''-only round finished
 STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0: every site within tolerance
 STATUS_REVIEW = "AUTOFDP_REVIEW"                # exit 2: a site did not converge
 STATUS_FAILED = "AUTOFDP_FAILED"                # exit 1
+STATUS_FINAL_DONE = "AUTOFDP_FINAL_DONE"        # a finished final round (--final-eff)
 
 #: One occupancy adjustment changes a site's occupancy at most this many fold.
 OCCUPANCY_MAX_RATIO = 4.0
@@ -105,7 +107,7 @@ class AutoFDPSettings:
     occupancy_floor: float = 0.05
     map_sigma: float = 3.0
     confirm_b: bool = True
-    final: bool = False
+    final_eff: Path | None = None                     # manual .eff for the final round
     plan_only: bool = False
 
 
@@ -1355,6 +1357,7 @@ class AutoFDPPlan:
     calibrated: tuple[str, ...]          # the sites whose B step 1 sets
     restraints: tuple[Path, ...]
     output_root: Path                    # run_NNN is created inside it
+    final_eff: "FinalEff | None" = None  # manual .eff for the final round
 
 
 @dataclass(frozen=True)
@@ -1372,6 +1375,7 @@ class AutoFDPResult:
     adjustments: tuple[OccupancyAdjustment, ...] = ()  # step 3, in order
     outcomes: tuple[SiteOutcome, ...] = ()             # each calibrated site at the end
     final_model: Path | None = None                    # the last round's model
+    final: "FinalRoundResult | None" = None            # the final round (--final-eff)
 
 
 def plan_autofdp(
@@ -1386,6 +1390,7 @@ def plan_autofdp(
     wavelength: float | None = None,
     restraints: Sequence[Path] = (),
     output_root: Path | None = None,
+    final_eff: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> AutoFDPPlan:
     """Preflight: check the inputs and return the plan, writing nothing.
@@ -1394,6 +1399,8 @@ def plan_autofdp(
     labels, Free-R flags and wavelength (``phenix.mtz.dump``), and the
     theoretical f'/f'' of every metal element (``phenix.python``). Runs no
     refinement. ``output_root`` defaults to ``AutoFDP`` beside the MTZ file.
+    ``final_eff`` (a manual phenix.refine .eff) is checked with
+    ``read_final_eff``.
     """
     model = checked_model(model)
     plan_b = prepare_start_model(model, sites=sites, b_start=b_start)
@@ -1413,6 +1420,7 @@ def plan_autofdp(
             raise AutoFDPError(f"No restraint file: {resolved}")
         files.append(resolved)
     reflections = read_reflections(mtz, mtz_dump_executable, environment, wavelength=wavelength)
+    manual = read_final_eff(final_eff, reflections.mtz) if final_eff is not None else None
     elements = {str(candidate["element"]).upper() for candidate, _ in found}
     theory = theoretical_scattering(
         sorted(elements), reflections.wavelength, refine_executable, environment, theory_overrides
@@ -1427,6 +1435,7 @@ def plan_autofdp(
         calibrated=calibrated,
         restraints=tuple(files),
         output_root=root,
+        final_eff=manual,
     )
 
 
@@ -1476,6 +1485,7 @@ def _log_lines(
     readyset: "ReadySetResult | None" = None,
     adjustments: Sequence[OccupancyAdjustment] = (),
     outcomes: Sequence[SiteOutcome] = (),
+    final_round_result: "FinalRoundResult | None" = None,
 ) -> list[str]:
     reflections = plan.reflections
     lines = [
@@ -1542,6 +1552,26 @@ def _log_lines(
                 f"{final}; f'' {refined} vs theory {outcome.f_double_prime_theory:.2f}; "
                 f"{outcome.reason}"
             )
+    if final_round_result is not None:
+        lines.extend([
+            "",
+            f"Final round ({final_round_result.directory.name}, settings of {plan.final_eff.source}): "
+            f"{final_round_result.status}: {final_round_result.message}",
+            "Changed from the .eff: model -> AutoFDP's final_model.pdb; anomalous groups -> "
+            "the metal sites with f' and f'' fixed; group_anomalous unselected; metal "
+            "occupancy held (remove_selection)",
+        ])
+        for site in final_round_result.sites:
+            occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+            after = "-" if site.occupancy_after is None else f"{site.occupancy_after:.2f}"
+            b_before = "-" if site.b_before is None else f"{site.b_before:.2f}"
+            b_after = "-" if site.b_after is None else f"{site.b_after:.2f}"
+            lines.append(
+                f"{site.site} {site.atom_name} ({site.element}): occupancy {occupancy} -> {after} "
+                f"(held); f' {site.f_prime:.2f}, f'' {site.f_double_prime:.2f} fixed; "
+                f"B {b_before} -> {b_after}"
+            )
+        lines.extend(f"Warning: {warning}" for warning in final_round_result.warnings)
     return lines
 
 
@@ -1722,6 +1752,7 @@ def execute_autofdp(
         "settings": {
             "sites": list(sites), "b_start": b_start, "cycles": cycles, "tolerance": tolerance,
             "max_iterations": max_iterations, "occupancy_floor": occupancy_floor,
+            "final_eff": str(plan.final_eff.source) if plan.final_eff else None,
         },
         "theory": {element: dict(values) for element, values in plan.theory.items()},
         "b_start": {
@@ -1731,7 +1762,8 @@ def execute_autofdp(
             "warnings": list(written.warnings),
         },
         "rounds": [],
-        "steps": {"b_start": "done", "fdp_rounds": "running", "occupancy_adjustment": "pending"},
+        "steps": {"b_start": "done", "fdp_rounds": "running", "occupancy_adjustment": "pending",
+                  "final_round": "pending" if plan.final_eff else "not requested"},
     }
     report_path = run_directory / "report.json"
     _write_json(report_path, report)
@@ -2001,10 +2033,37 @@ def execute_autofdp(
             for outcome in outcomes
         ],
     }
+    # The final round: only after convergence, with the manual .eff's settings.
+    final: FinalRoundResult | None = None
+    if plan.final_eff is not None:
+        if status != STATUS_CONVERGED:
+            report["steps"]["final_round"] = "skipped: not converged"
+        else:
+            report.update(status=status, message=message)
+            report["steps"]["final_round"] = "running"
+            _write_json(report_path, report)
+            try:
+                final = final_round(
+                    final_model, plan.final_eff, rounds[-1].sites, refine_executable,
+                    run_directory / "final_round", environment=environment,
+                )
+            except AutoFDPError as exc:
+                report["steps"]["final_round"] = "failed"
+                report["final_round"] = {"status": STATUS_FAILED, "message": str(exc)}
+                status = STATUS_FAILED
+                message = f"every site converged, but the final round could not run: {exc}"
+            else:
+                report["final_round"] = _final_entry(final, plan.final_eff, run_directory)
+                report["steps"]["final_round"] = "done" if final.status == STATUS_FINAL_DONE else "failed"
+                if final.status != STATUS_FINAL_DONE:
+                    status = STATUS_FAILED
+                    message = f"every site converged, but {final.message}"
+                else:
+                    message += f"; {final.message}"
     report.update(status=status, message=message)
     _write_json(report_path, report)
     log_path.write_text(
-        "\n".join(_log_lines(plan, written, rounds, readyset, adjustments, outcomes)
+        "\n".join(_log_lines(plan, written, rounds, readyset, adjustments, outcomes, final)
                   + ["", f"{status}: {message}"]) + "\n",
         encoding="utf-8",
     )
@@ -2022,7 +2081,34 @@ def execute_autofdp(
         adjustments=tuple(adjustments),
         outcomes=tuple(outcomes),
         final_model=final_model,
+        final=final,
     )
+
+
+def _final_entry(final: "FinalRoundResult", manual: "FinalEff", run_directory: Path) -> dict[str, object]:
+    return {
+        "eff_source": _file_record(manual.source, run_directory),
+        "eff_written": _file_record(final.eff, run_directory),
+        "parameters": _file_record(final.parameters, run_directory),
+        "command": list(final.command),
+        "edits": dict(final.edits),
+        "reflection_files": list(manual.reflection_files),
+        "restraint_files": list(manual.restraint_files),
+        "phil_files": list(manual.phil_files),
+        "returncode": final.returncode,
+        "r_work": final.r_work,
+        "r_free": final.r_free,
+        "sites": [asdict(site) for site in final.sites],
+        "refined_model": (
+            _file_record(final.model_path, run_directory) if final.model_path else None
+        ),
+        "map_coefficients": (
+            _file_record(final.map_coefficients, run_directory) if final.map_coefficients else None
+        ),
+        "warnings": list(final.warnings),
+        "status": final.status,
+        "message": final.message,
+    }
 
 
 def map_value_at_site(
@@ -2071,24 +2157,329 @@ def confirm_b_round(
     raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
 
 
-def final_round(
-    run_directory: Path,
-    checkpoint: str,
-    sites: Sequence[SiteState],
-    settings: AutoFDPSettings,
-    refine_executable: Path,
-    mtz_dump_executable: Path,
-    *,
-    phenix_version: str,
-    environment: Mapping[str, str] | None = None,
-    processor_count: int | None = None,
-) -> tuple[str, list[SiteState]]:
-    """Optional Adv. Mater. ending: XYZ, B, occupancy and f'' together.
+@dataclass(frozen=True)
+class FinalEff:
+    """A manual phenix.refine parameter file (.eff) for the final round."""
 
-    f' stays fixed at theory. Recipe ``AutoFDP/final``. Reports how far
-    occupancy and f'' move.
+    source: Path
+    text: str
+    models: tuple[str, ...]                # its x-ray model file(s): replaced
+    reflection_files: tuple[str, ...]
+    restraint_files: tuple[str, ...]
+    phil_files: tuple[str, ...]
+    strategy: tuple[str, ...]              # selected strategies, as written
+    anomalous_groups: tuple[str, ...]      # its anomalous groups: replaced
+    occupancy_exclusions: tuple[str, ...]  # its occupancies.remove_selection: kept
+    warnings: tuple[str, ...]
+
+
+def _assigned(items: Sequence[phil_text.PhilItem], path: str) -> list[str]:
+    values = []
+    for item in items:
+        if item.kind == "assign" and item.path == path:
+            value = phil_text.unquote(item.value)
+            if value is not None:
+                values.append(value)
+    return values
+
+
+def _xray_model_scopes(items: Sequence[phil_text.PhilItem]) -> list[tuple[phil_text.PhilItem, str | None]]:
+    """The eff's ``data_manager.model`` scopes for the refinement model (not
+    reference models), with the file each names."""
+    found = []
+    for scope in items:
+        if scope.kind != "scope" or scope.path != "data_manager.model":
+            continue
+        contents = phil_text.inside(items, scope)
+        types = [phil_text.starred(item.value) for item in contents
+                 if item.kind == "assign" and item.path == "data_manager.model.type"]
+        if types and types[0] and "x_ray" not in types[0]:
+            continue
+        files = _assigned(contents, "data_manager.model.file")
+        found.append((scope, files[0] if files else None))
+    return found
+
+
+def _same_file(first: str | Path, second: Path) -> bool:
+    try:
+        return Path(first).expanduser().resolve() == second.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def read_final_eff(path: Path, mtz: Path | None = None) -> FinalEff:
+    """Check a manual phenix.refine .eff for the final round (preflight).
+
+    It must be a phenix.refine parameter file (a ``refinement`` scope) that
+    names a reflection file, and every file it names must exist. A reflection
+    file other than AutoFDP's MTZ is allowed but recorded as a warning.
     """
-    raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        raise AutoFDPError(f"--final-eff: no such file: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AutoFDPError(f"--final-eff: cannot read {path}: {exc}") from exc
+    try:
+        items = phil_text.scan(text)
+    except phil_text.PhilSyntaxError as exc:
+        raise AutoFDPError(f"--final-eff: {path.name} is not a parameter file NASolve can read: {exc}") from exc
+    if not any(item.path.startswith("refinement.") for item in items):
+        raise AutoFDPError(
+            f"--final-eff: {path.name} has no refinement parameters; give the .eff of a phenix.refine run"
+        )
+    reflections = tuple(_assigned(items, "data_manager.miller_array.file"))
+    if not reflections:
+        raise AutoFDPError(f"--final-eff: {path.name} names no reflection file (data_manager.miller_array)")
+    restraints = tuple(_assigned(items, "data_manager.restraint_files"))
+    phils = tuple(_assigned(items, "data_manager.phil_files"))
+    missing = [name for name in (*reflections, *restraints, *phils)
+               if not Path(name).expanduser().is_file()]
+    if missing:
+        raise AutoFDPError("--final-eff refers to files that do not exist: " + "; ".join(missing))
+    strategies = [phil_text.starred(item.value) for item in items
+                  if item.kind == "assign" and item.path == "refinement.refine.strategy"]
+    warnings = []
+    if mtz is not None and not any(_same_file(name, mtz) for name in reflections):
+        warnings.append(
+            f"The final round refines against {', '.join(reflections)} (from the .eff); "
+            f"AutoFDP measured f'' against {mtz}"
+        )
+    return FinalEff(
+        source=path,
+        text=text,
+        models=tuple(name for _, name in _xray_model_scopes(items) if name),
+        reflection_files=reflections,
+        restraint_files=restraints,
+        phil_files=phils,
+        strategy=strategies[-1] if strategies else (),
+        anomalous_groups=tuple(_assigned(items, "refinement.refine.anomalous_scatterers.group.selection")),
+        occupancy_exclusions=tuple(_assigned(items, "refinement.refine.occupancies.remove_selection")),
+        warnings=tuple(warnings),
+    )
+
+
+@dataclass(frozen=True)
+class FinalSite:
+    """One metal site in the final round: occupancy held, f' and f'' fixed."""
+
+    selection: str
+    site: str
+    atom_name: str
+    element: str
+    occupancy: float | None          # held at the calibrated value
+    occupancy_after: float | None    # in the refined model
+    f_prime: float                   # theory (AutoFDP never refines f')
+    f_double_prime: float            # refined in the last f'' round
+    f_double_prime_reported: float | None   # as phenix.refine's log shows it
+    b_before: float | None
+    b_after: float | None
+
+
+@dataclass(frozen=True)
+class FinalRoundResult:
+    directory: Path
+    eff: Path                        # the edited copy of the manual .eff
+    parameters: Path                 # the metal sites' settings
+    command: tuple[str, ...]
+    edits: Mapping[str, object]
+    returncode: int
+    r_work: float | None
+    r_free: float | None
+    sites: tuple[FinalSite, ...]
+    warnings: tuple[str, ...]
+    status: str
+    message: str
+    log_path: Path
+    model_path: Path | None
+    map_coefficients: Path | None
+
+
+def _phil_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_final_inputs(
+    final_eff: FinalEff,
+    directory: Path,
+    sites: Sequence[FdpSiteResult],
+) -> tuple[Path, Path, dict[str, object]]:
+    """Write ``final_input.eff`` and ``autofdp_final.params`` in ``directory``.
+
+    ``final_input.eff`` is the manual .eff with only these changes: its
+    refinement model and ``default_model`` are removed (AutoFDP's model is
+    given on the command line), its anomalous-scatterer groups are removed,
+    ``group_anomalous`` is unselected in the strategy, and a ``phil_files``
+    entry pointing back at the .eff itself is dropped. ``autofdp_final.params``
+    adds, for every site, an anomalous group with f' and f'' fixed at the
+    given values (``refine = None``) and an occupancies.remove_selection
+    (occupancy held), and names the outputs ``final_001``.
+    """
+    items = phil_text.scan(final_eff.text)
+    models = _xray_model_scopes(items)
+    remove = [scope for scope, _ in models]
+    defaults = [item for item in items if item.kind == "assign" and item.path == "data_manager.default_model"]
+    groups = [item for item in items
+              if item.kind == "scope" and item.path == "refinement.refine.anomalous_scatterers"]
+    self_references = [
+        item for item in items
+        if item.kind == "assign" and item.path == "data_manager.phil_files"
+        and phil_text.unquote(item.value) and _same_file(phil_text.unquote(item.value), final_eff.source)
+    ]
+    remove += defaults + groups + self_references
+    replace = {}
+    strategy_after = list(final_eff.strategy)
+    for item in items:
+        if item.kind == "assign" and item.path == "refinement.refine.strategy" \
+                and "group_anomalous" in phil_text.starred(item.value):
+            original = final_eff.text[item.start:item.end]
+            replace[item] = re.sub(r"\*group_anomalous\b", "group_anomalous", original)
+    if "group_anomalous" in strategy_after:
+        strategy_after.remove("group_anomalous")
+    edited = phil_text.edit(final_eff.text, remove, replace)
+    header = (
+        f"# NASolve AutoFDP final round: copy of {final_eff.source}\n"
+        f"# (sha256 {file_sha256(final_eff.source)}). Changed: its model and its anomalous\n"
+        "# scatterer groups removed (AutoFDP's model is given on the command line and\n"
+        "# autofdp_final.params holds the groups, f' and f'' fixed), group_anomalous\n"
+        "# unselected in the strategy. Everything else is as in the original.\n"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    eff_path = directory / "final_input.eff"
+    eff_path.write_text(header + edited, encoding="utf-8")
+    lines = [
+        "# NASolve AutoFDP final round: metal sites with occupancy held and f'/f'' fixed",
+        "refinement {",
+        "  refine {",
+        "    occupancies {",
+        *(f"      remove_selection = {_phil_string(site.selection)}" for site in sites),
+        "    }",
+        "    anomalous_scatterers {",
+    ]
+    for site in sites:
+        lines.extend([
+            "      group {",
+            f"        selection = {_phil_string(site.selection)}",
+            f"        f_prime = {site.f_prime:.6g}",
+            f"        f_double_prime = {site.f_double_prime_refined:.6g}",
+            "        refine = None",
+            "      }",
+        ])
+    lines.extend([
+        "    }", "  }", "}",
+        "output {", '  prefix = "final"', "  serial = 1", "  overwrite = True", "}", "",
+    ])
+    parameters = directory / "autofdp_final.params"
+    parameters.write_text("\n".join(lines), encoding="utf-8")
+    edits = {
+        "removed_models": [name for _, name in models if name],
+        "removed_default_model": bool(defaults),
+        "removed_anomalous_groups": list(final_eff.anomalous_groups),
+        "removed_phil_files": [phil_text.unquote(item.value) for item in self_references],
+        "strategy_before": list(final_eff.strategy),
+        "strategy_after": strategy_after,
+        "occupancy_exclusions_kept": list(final_eff.occupancy_exclusions),
+    }
+    return eff_path, parameters, edits
+
+
+def final_round(
+    model: Path,
+    final_eff: FinalEff,
+    sites: Sequence[FdpSiteResult],
+    refine_executable: Path,
+    directory: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> FinalRoundResult:
+    """The final round after convergence, with the manual .eff's settings.
+
+    ``model`` is AutoFDP's final model (calibrated occupancies). phenix.refine
+    runs (``--dry_run`` first) with the edited copy of the .eff and the metal
+    sites' parameters (``write_final_inputs``) in ``directory``. Afterwards
+    the sites' occupancy is checked to be unchanged and the f'' that the log
+    shows is compared with the value set. Status ``AUTOFDP_FINAL_DONE`` or
+    ``AUTOFDP_FAILED``.
+    """
+    from .autorefine import _final_anomalous_values, parse_refinement_statistics
+
+    if not sites or any(site.f_double_prime_refined is None for site in sites):
+        raise AutoFDPError("The final round needs a refined f'' for every metal site")
+    eff_path, parameters, edits = write_final_inputs(final_eff, directory, sites)
+    command = [str(refine_executable.expanduser().resolve()), str(model), str(eff_path), str(parameters)]
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
+    returncode = _run_phenix_refine(command, directory, environment)
+    log_path = directory / "phenix.refine.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    model_path = _newest(directory, "final_*.pdb")
+    map_coefficients = _newest(directory, "final_*map_coeffs.mtz")
+    if map_coefficients is None and model_path is not None and model_path.with_suffix(".mtz").is_file():
+        map_coefficients = model_path.with_suffix(".mtz")
+    statistics = parse_refinement_statistics(
+        log_text, model_path.read_text(encoding="utf-8", errors="replace") if model_path else ""
+    )
+    reported = _final_anomalous_values(log_text)
+    before = _coordinate_records(model)
+    after = _coordinate_records(model_path) if model_path is not None else {}
+    warnings = list(final_eff.warnings)
+    results = []
+    for site in sites:
+        key = _site_key(site.site, site.atom_name, site.alternate)
+        start, end = before.get(key), after.get(key)
+        result = FinalSite(
+            selection=site.selection,
+            site=site.site,
+            atom_name=site.atom_name,
+            element=site.element,
+            occupancy=start[3] if start else None,
+            occupancy_after=end[3] if end else None,
+            f_prime=site.f_prime,
+            f_double_prime=float(site.f_double_prime_refined),
+            f_double_prime_reported=reported.get(site.selection),
+            b_before=start[4] if start else None,
+            b_after=end[4] if end else None,
+        )
+        results.append(result)
+        if model_path is None:
+            continue
+        if end is None:
+            warnings.append(f"{site.site} {site.atom_name} is missing from the refined model")
+        elif start and abs(end[3] - start[3]) > 0.005:
+            warnings.append(
+                f"{site.site} {site.atom_name} occupancy moved from {start[3]:.2f} to {end[3]:.2f}"
+            )
+        if result.f_double_prime_reported is None:
+            warnings.append(f"phenix.refine's log shows no f'' for {site.selection}")
+        elif abs(result.f_double_prime_reported - result.f_double_prime) > 0.01:
+            warnings.append(
+                f"phenix.refine's log shows f'' {result.f_double_prime_reported:.2f} for "
+                f"{site.site} {site.atom_name}, not the {result.f_double_prime:.2f} set"
+            )
+    if returncode != 0 or model_path is None:
+        status = STATUS_FAILED
+        message = f"phenix.refine failed in the final round (exit status {returncode}); see {log_path}"
+    else:
+        status = STATUS_FINAL_DONE
+        message = (f"final round done with {final_eff.source.name}'s settings; "
+                   f"R-work {statistics.get('r_work')}, R-free {statistics.get('r_free')}")
+    return FinalRoundResult(
+        directory=directory,
+        eff=eff_path,
+        parameters=parameters,
+        command=tuple(command),
+        edits=edits,
+        returncode=returncode,
+        r_work=statistics.get("r_work"),
+        r_free=statistics.get("r_free"),
+        sites=tuple(results),
+        warnings=tuple(warnings),
+        status=status,
+        message=message,
+        log_path=log_path,
+        model_path=model_path,
+        map_coefficients=map_coefficients,
+    )
 
 
 __all__ = [
@@ -2101,6 +2492,9 @@ __all__ = [
     "BStart",
     "BStartSite",
     "FdpRoundResult",
+    "FinalEff",
+    "FinalRoundResult",
+    "FinalSite",
     "FdpSiteResult",
     "Neighbour",
     "NeighbourB",
@@ -2114,6 +2508,7 @@ __all__ = [
     "SiteOutcome",
     "STATUS_CONVERGED",
     "STATUS_FAILED",
+    "STATUS_FINAL_DONE",
     "STATUS_PREPARED",
     "STATUS_REVIEW",
     "STATUS_ROUND_DONE",
@@ -2131,10 +2526,12 @@ __all__ = [
     "plan_autofdp",
     "prepare_start_model",
     "propose_occupancy",
+    "read_final_eff",
     "read_reflections",
     "run_readyset",
     "surrounding_b",
     "theoretical_scattering",
+    "write_final_inputs",
     "write_site_occupancy",
     "wrong_response",
     "WrongResponse",

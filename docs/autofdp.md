@@ -1,6 +1,7 @@
 # AutoFDP: occupancy from f″ refinement
 
-**Status: steps 1 to 3 implemented, later steps specified only (2026-11-13).**
+**Status: steps 1 to 3 and the final round (`--final-eff`) implemented;
+steps 4-5 specified only (2026-11-18).**
 `nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
 file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
 (B start) copies the model and sets each metal's B to the mean B of its
@@ -11,13 +12,18 @@ f″ with its theoretical value. Step 3 (occupancy adjustment) takes the sites
 one at a time, the one furthest from theory first, lowers the occupancy when
 f″ is below theory or raises it when above, and runs the same round again,
 until f″ is within the tolerance or the site has had `--max-iterations`
-adjustments (default 5). Coot is not opened: the maps of an f″-only round
-are not diagnostic. The identity check, B confirmation and final round (steps 4-6) are documented stubs
-in `src/nasolve/autofdp.py` that raise `NotImplementedError`; options that
-belong to them are accepted but have no effect yet, and `--element` is refused.
-The defaults marked *(to confirm)* follow my reading of the papers below and
-have not yet been checked by the lab. Everything here has been tested with
-simulated Phenix programs only, not yet on real data.
+adjustments (default 5). Coot is not opened for these rounds: the maps of an
+f″-only round are not diagnostic. With `--final-eff MANUAL.eff`, a converged
+run ends with a final round that uses every setting of that manual
+phenix.refine run, with AutoFDP's model, the metal occupancies held and f′/f″
+fixed at the calibrated values (step 6); its result opens in Coot. The
+identity check and B confirmation (steps 4-5) are documented stubs in
+`src/nasolve/autofdp.py` that raise `NotImplementedError`; options that belong
+to them are accepted but have no effect yet, and `--element` is refused. The
+defaults marked *(to confirm)* follow my reading of the papers below and have
+not yet been checked by the lab. Steps 1-3 first ran on real data on
+2026-11-13 (PdUHgPdU, Phenix 2.2.1); the final round has been tested with
+simulated Phenix programs only.
 
 ## Purpose
 
@@ -57,7 +63,8 @@ nasolve autofdp MODEL.pdb DATA.mtz
                 [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
                 [--cycles N] [--b-start surrounding|model|VALUE] [--b-step A2]
                 [--occupancy-floor Q] [--map-sigma S]
-                [--no-confirm-b] [--final] [--plan] [--phenix-root PATH]
+                [--no-confirm-b] [--final-eff MANUAL.eff] [--plan]
+                [--no-coot] [--coot PATH] [--phenix-root PATH]
 ```
 
 For 7CU_Ag, from the dataset folder:
@@ -85,8 +92,10 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the B-confirmation round |
-| `--final` | off | after convergence, refine XYZ, B, occupancy and f″ together (Adv. Mater. ending) |
+| `--final-eff` | none | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; when every site converges, the final round (step 6) uses all of its settings |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
+| `--no-coot` | open Coot | do not open the final round in Coot (only a final round opens Coot) |
+| `--coot` | configured Coot | Coot executable for the final round's view |
 | `--phenix-root` | configured Phenix | Phenix installation |
 
 ## What one run does
@@ -280,10 +289,10 @@ adjusted). The last round's model is copied to
 `final_model.pdb` in both cases; its occupancies are the measured ones only for
 converged sites.
 
-AutoFDP does not open Coot (since 2026-11-13; before, the last round's model
-and maps opened): with every strategy off except the anomalous scatterers, the
-round's 2mFo-DFc, mFo-DFc and anomalous maps are not diagnostic. `--coot` was
-removed; `--no-coot` is still accepted and does nothing. The command prints
+AutoFDP does not open Coot for the f″ rounds (since 2026-11-13): with every
+strategy off except the anomalous scatterers, their 2mFo-DFc, mFo-DFc and
+anomalous maps are not diagnostic. Only a final round (step 6) opens Coot. The
+command prints
 round_001's table, one
 line per adjustment or restore round (site, occupancy before → after,
 method, f″ against theory, and why a site was restored), and a final table with each site's start and final occupancy and the
@@ -319,11 +328,53 @@ Following the Adv. Mater. supplement: one round with occupancy, f′ and f″
 fixed at the converged values, refining only the B of the sites. If a site's B moves by more than 25% *(to confirm)*, the
 site goes to review.
 
-### 6. Final round (`--final`, default off)
+### 6. Final round (`--final-eff`, implemented)
 
-The Adv. Mater. ending: XYZ, B, occupancy and f″ refined together, with f′
-still fixed at theory. The JACS and Small supplements
-stop at step 5. AutoFDP reports how far occupancy and f″ move in this round.
+Runs only when every calibrated site converged (`AUTOFDP_CONVERGED`), in
+`run_NNN/final_round/`. It is a normal refinement with the settings of a
+manual phenix.refine run (`--final-eff`, for example the GUI's
+`.phenix/project_data/refine_NN.eff`), changed only where the metal sites
+need it:
+
+- **Model:** AutoFDP's `final_model.pdb` (calibrated occupancies; metal B from
+  step 1) instead of the model the .eff names. The .eff's refinement model and
+  `default_model` are removed from the copy; a reference model (`type =
+  reference`) stays.
+- **Anomalous scatterers:** the .eff's anomalous groups are removed. Every
+  metal site AutoFDP refined gets a group with f′ at the value used in the f″
+  rounds (theory) and f″ at its refined value in the last f″ round, with
+  `refine = None` (neither refined). `group_anomalous` is unselected in the
+  strategy, since nothing anomalous is refined; Phenix 2.2.1 applies the
+  groups' f′/f″ whether or not that strategy is on.
+- **Occupancy:** every metal site is added to
+  `refinement.refine.occupancies.remove_selection`, so its occupancy stays at
+  the calibrated value; the .eff's own `remove_selection` entries are kept.
+- **Outputs:** named `final_001` (`output.prefix`/`serial`), in the
+  `final_round/` folder.
+
+Everything else (reflection file and labels, restraint dictionaries, extra
+PHIL files such as NARestraints restraints, strategy, weights, cycles, maps)
+comes from the .eff unchanged. AutoFDP writes `final_input.eff` (the edited
+copy, with a header saying what changed) and `autofdp_final.params` (the metal
+sites) and runs `phenix.refine final_model.pdb final_input.eff
+autofdp_final.params`, after a `--dry_run`. The preflight checks that the .eff
+is a phenix.refine parameter file, names a reflection file, and that every
+file it names exists; a reflection file other than AutoFDP's MTZ is allowed
+but recorded as a warning. A selection in the .eff that matches no atom of
+the model (for example a stale `remove_selection`) makes phenix.refine's dry
+run fail, and the round is reported as failed.
+
+Afterwards AutoFDP checks that the metal occupancies did not move and that
+the log shows the f″ that was set, and reports R-work, R-free and each site's
+B before and after. The result (`final_001.pdb` and its map coefficients)
+opens in Coot with the .eff's restraint dictionaries, unless `--no-coot`; a
+Coot problem never fails the run. A failed final round makes the run
+`AUTOFDP_FAILED` (exit 1); the calibration results and `final_model.pdb` are
+kept.
+
+The earlier plan for this step (the Adv. Mater. ending: XYZ, B, occupancy and
+f″ refined together) was replaced by the user's design (2026-11-18): a manual
+refinement's settings with occupancy and f′/f″ held.
 
 ## Outputs
 
@@ -345,6 +396,10 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
   adjusted occupancy) for each step-3 round;
 - `final_model.pdb`: the last round's model, with the adjusted occupancies
   (not written when a round failed);
+- `final_round/` (with `--final-eff`, after convergence): `final_input.eff`,
+  `autofdp_final.params`, `command.json`, the phenix.refine logs and outputs
+  (`final_001.pdb`, `final_001.mtz`, ...);
+- `CootGUI/`: Coot's log, backups and map script for the final round's view;
 - `report.json`, with `workflow: "autofdp"` and schema 2:
   - `inputs`: the model, the MTZ and any `--cif` files, each as a portable
     reference (anchored to the dataset folder when the run is in
@@ -370,9 +425,17 @@ same level as `AutoMR/` and `AutoSolMetal/` in a NASolve dataset), or inside
     and final occupancy, number of adjustments, final f″ and deviation,
     whether it converged, the reason, and its history (round, occupancy, f″,
     deviation);
-  - `final_model`, `settings` (with `max_iterations` and `occupancy_floor`),
-    `status`, `message` and `steps` (`occupancy_adjustment`: `done`, `review`,
-    `failed` or `not run`).
+  - `final_round` (with `--final-eff`): the .eff (source and written copy,
+    with checksums), the parameters, command and edits (models and anomalous
+    groups removed, strategy before and after, occupancy exclusions kept), the
+    reflection, restraint and PHIL files it uses, R-work and R-free, per site
+    the held occupancy (before and after), fixed f′ and f″, the f″ the log
+    shows and B before and after, the refined model and map coefficients,
+    warnings, status and message;
+  - `final_model`, `settings` (with `max_iterations`, `occupancy_floor` and
+    `final_eff`), `status`, `message` and `steps` (`occupancy_adjustment`:
+    `done`, `review`, `failed` or `not run`; `final_round`: `done`, `failed`,
+    `skipped: not converged` or `not requested`).
 
   Planned, in addition: mFo-DFc and anomalous map σ at each site and the
   identity check.
@@ -387,9 +450,10 @@ PDB files do not store f″; the refined values are in `report.json`.
 |---|---|---|
 | `AUTOFDP_PREPARED` | - | in `report.json` between step 1 and the end of round_001 |
 | `AUTOFDP_FDP_ROUND_DONE` | - | status of each finished round, and of `report.json` between rounds |
+| `AUTOFDP_FINAL_DONE` | - | status of a finished final round (`report.json` `final_round.status`); the run stays `AUTOFDP_CONVERGED` |
 | `AUTOFDP_CONVERGED` | 0 | every calibrated site within tolerance in the last round (later: and B confirmation passed) |
 | `AUTOFDP_REVIEW` | 2 | a calibrated site not within tolerance: at an occupancy bound, out of adjustments, not adjusted (`--max-iterations 0`), or moved while another site was adjusted (later also: ambiguous in identity, B drift); per-site reasons are in the report |
-| `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″ in any round; the run folder is kept |
+| `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″ in any round, or the final round failed; the run folder is kept |
 | preflight error | 1 | before any folder is written |
 
 ## Interaction with other commands
@@ -409,7 +473,10 @@ PDB files do not store f″; the refined values are in `report.json`.
 - changes an element without `--element`;
 - places or deletes sites;
 - writes outside its own run folder, or overwrites an earlier run;
-- opens Coot (the f″-only maps are not diagnostic).
+- opens Coot for an f″ round (those maps are not diagnostic); only a final
+  round opens Coot;
+- changes the manual .eff it is given (`--final-eff`); it writes an edited
+  copy in its run folder.
 
 ## Questions for the lab before implementation
 
@@ -427,7 +494,8 @@ PDB files do not store f″; the refined values are in `report.json`.
    3σ, and is `--b-step` 20 Å² a fixed step, or should it scale with
    resolution?
 5. Should the run end at ±1 e⁻ (JACS, Small) or with the all-parameter
-   refinement (Adv. Mater.)?
+   refinement (Adv. Mater.)? *(Decided for now, 2026-11-18: optionally with a
+   final round from a manual .eff, occupancy and f′/f″ held.)*
 6. Which theory values should be used? cctbx Henke gives Ag 2.03 e⁻ at
    1.00743 Å; the papers quote Ag 2.06 and Hg 10.17 at 12300 eV. Tabulated
    values ignore white-line effects at an absorption edge (the JACS supplement

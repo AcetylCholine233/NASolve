@@ -503,7 +503,7 @@ class ReadySetStepTests(unittest.TestCase):
 class AutoFDPCommandTests(unittest.TestCase):
     def _main(self, root: Path, arguments: list[str], dump=None, refine=None):
         """Run ``nasolve autofdp``; the last value is a mock that fails the
-        test if AutoFDP looks for Coot (it never opens Coot)."""
+        test if AutoFDP looks for Coot (only a final round, --final-eff, may)."""
         installation = PhenixInstallation(
             root=None, setup_script=None, version=PHENIX_21,
             executables={"phenix.refine": refine or make_fdp_refine(root),
@@ -542,22 +542,23 @@ class AutoFDPCommandTests(unittest.TestCase):
                 "ReadySet (no hydrogens): updated model; atoms, coordinates and B unchanged",
                 "curated dictionaries given: DU",
                 "restraints for phenix.refine: ReadySet/DU.cif",
-                "Not implemented yet: the identity check, B confirmation",
+                "Not implemented yet: the identity check and B confirmation",
             ):
                 self.assertIn(text, out)
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG"))
             for value in ("0.90", "50.00", "-0.12", "2.60", "2.03", "+0.57", "within +/-1"):
                 self.assertIn(value, row)
-            # The maps of an f''-only round are not diagnostic: no Coot at all.
+            # The maps of an f''-only round are not diagnostic: no Coot without a
+            # final round.
             run = mtz.parent.resolve() / "AutoFDP" / "run_001"
             coot_lookup.assert_not_called()
             self.assertNotIn("Coot", out)
             self.assertFalse((run / "CootGUI").exists())
 
-            # Either order, with a theory override: a new run folder. The old
-            # --no-coot is still accepted and changes nothing.
+            # Either order, with a theory override: a new run folder. --coot
+            # without --final-eff does not open Coot either.
             code, out, err, coot_lookup = self._main(
-                root, [str(mtz), str(model), "--no-coot", "--theory", "AG=2.06"]
+                root, [str(mtz), str(model), "--coot", "/opt/coot", "--theory", "AG=2.06"]
             )
             self.assertEqual(code, 0, err)
             coot_lookup.assert_not_called()
@@ -565,10 +566,6 @@ class AutoFDPCommandTests(unittest.TestCase):
             self.assertIn(
                 "Model with the final occupancies: "
                 + str(mtz.parent.resolve() / "AutoFDP" / "run_002" / "final_model.pdb"), out)
-            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exit:
-                main(["autofdp", str(model), str(mtz), "--coot", "/opt/coot"])
-            self.assertEqual(exit.exception.code, 2)
-            self.assertIn("unrecognized arguments: --coot", err.getvalue())
 
     def test_plan_refines_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

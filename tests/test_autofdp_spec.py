@@ -1,8 +1,9 @@
 """`nasolve autofdp` is specified in docs/autofdp.md. Step 1 (B start) is
 implemented and tested in test_autofdp_bstart.py; the preflight and step 2
 (one f''-only round from a model and an MTZ) in test_autofdp_round.py; step 3
-(occupancy adjustment) in test_autofdp_occupancy.py. The later steps must stay
-documented stubs until they are implemented.
+(occupancy adjustment) in test_autofdp_occupancy.py; the final round
+(--final-eff) in test_autofdp_final.py. The identity check and B confirmation
+must stay documented stubs until they are implemented.
 """
 
 import inspect
@@ -19,18 +20,18 @@ class AutoFDPSpecificationTests(unittest.TestCase):
                        "--site", "--element", "--candidates", "--theory",
                        "--tolerance", "--max-iterations", "--cycles", "--b-start",
                        "--b-step", "--occupancy-floor", "--map-sigma",
-                       "--no-confirm-b", "--final", "--plan", "--phenix-root"):
+                       "--no-confirm-b", "--final-eff", "--plan", "--no-coot", "--coot",
+                       "--phenix-root"):
             self.assertIn(option, help_text)
-        self.assertNotIn("--coot", help_text)        # AutoFDP never opens Coot
-        self.assertNotIn("--no-coot", help_text)     # still accepted, not shown
         flowing = " ".join(help_text.split())  # argparse wraps lines
         self.assertIn("Steps 1 to 3 are implemented", flowing)
-        self.assertIn("Coot is not opened: the maps of an f''-only round are not diagnostic",
-                      flowing)
+        self.assertIn("Coot is not opened for these rounds: the maps of an f''-only round "
+                      "are not diagnostic", flowing)
+        self.assertIn("With --final-eff, a converged run ends with a final round", flowing)
         self.assertIn("NOT IMPLEMENTED YET", flowing)
 
     def test_engine_functions_are_documented_stubs(self):
-        names = ["map_value_at_site", "identity_check", "confirm_b_round", "final_round"]
+        names = ["map_value_at_site", "identity_check", "confirm_b_round"]
         for name in names:
             function = getattr(autofdp, name)
             with self.subTest(function=name):
@@ -55,7 +56,7 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         self.assertEqual(settings.occupancy_floor, 0.05)
         self.assertEqual(settings.b_start, "surrounding")
         self.assertTrue(settings.confirm_b)
-        self.assertFalse(settings.final)
+        self.assertIsNone(settings.final_eff)
 
 
 if __name__ == "__main__":

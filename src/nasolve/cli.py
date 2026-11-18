@@ -35,7 +35,7 @@ from .coot_runtime import (
     remember_coot,
 )
 from .coot_view import (
-    CootViewError, launch_coot_view, resolve_run, resolve_view_profile,
+    CootViewError, launch_coot_files, launch_coot_view, resolve_run, resolve_view_profile,
 )
 from .backbone import BackboneError, requested_backbone_policy, write_backbone_review
 from .phenix_runtime import (
@@ -270,8 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp = subparsers.add_parser(
         "autofdp",
-        help="measure metal occupancy by f'' refinement from a model and an MTZ "
-             "(steps 1-3 of the plan implemented)",
+        help="measure metal occupancy by f'' refinement from a model and an MTZ, "
+             "optionally ending with a final round from a manual .eff",
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
@@ -286,9 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
             "one furthest from theory first, lower the occupancy if f'' is below "
             "theory or raise it if above, and run the same round again, until f'' is "
             "within the tolerance or the site has had --max-iterations adjustments "
-            "(step 3). Coot is not opened: the maps of an f''-only round are not "
-            "diagnostic. The identity check, B confirmation and final round are NOT "
-            "IMPLEMENTED YET. See docs/autofdp.md."
+            "(step 3). Coot is not opened for these rounds: the maps of an "
+            "f''-only round are not diagnostic. With --final-eff, a converged run "
+            "ends with a final round that uses every setting of that manual .eff, "
+            "with AutoFDP's model, the metal occupancies held and f'/f'' fixed at "
+            "the calibrated values; its result opens in Coot. The identity check "
+            "and B confirmation are NOT IMPLEMENTED YET. See docs/autofdp.md."
         ),
     )
     autofdp.add_argument(
@@ -366,8 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="(later step, not used yet) skip the round that refines only the sites' B at fixed occupancy and f''",
     )
     autofdp.add_argument(
-        "--final", action="store_true",
-        help="(later step, not used yet) after convergence, refine XYZ, B, occupancy and f'' together (f' stays fixed)",
+        "--final-eff", type=Path, metavar="MANUAL.eff",
+        help="parameters of a manual phenix.refine run (e.g. the GUI's "
+             ".phenix/project_data/refine_NN.eff). When every site converges, a "
+             "final round uses all of its settings with AutoFDP's model, the metal "
+             "sites' occupancy held and f'/f'' fixed at the calibrated values, and "
+             "opens the result in Coot",
     )
     autofdp.add_argument(
         "--plan", action="store_true",
@@ -375,8 +382,13 @@ def build_parser() -> argparse.ArgumentParser:
              "wavelength, theory, B changes) without refining or writing anything",
     )
     autofdp.add_argument(
-        "--no-coot", action="store_true", help=argparse.SUPPRESS,
-    )  # accepted for old commands; AutoFDP never opens Coot
+        "--no-coot", action="store_true",
+        help="do not open the final round in Coot (only a final round opens Coot)",
+    )
+    autofdp.add_argument(
+        "--coot", type=Path, metavar="PATH",
+        help="Coot executable for the final round's view (default: the configured Coot)",
+    )
     autofdp.add_argument(
         "--phenix-root", type=Path, metavar="PATH",
         help="Phenix installation (default: the configured Phenix)",
@@ -1674,6 +1686,24 @@ def _print_autofdp_plan(plan) -> None:
             print("    set from --b-start")
     for warning in plan.b_start.warnings:
         print(f"Warning: {warning}")
+    manual = plan.final_eff
+    if manual is not None:
+        print(f"\nFinal round settings (--final-eff): {manual.source}")
+        print("  model: " + (", ".join(manual.models) or "none named")
+              + " -> replaced by AutoFDP's final_model.pdb")
+        print("  reflections: " + ", ".join(manual.reflection_files))
+        if manual.restraint_files:
+            print("  restraints: " + ", ".join(manual.restraint_files))
+        print(f"  extra parameter files: {len(manual.phil_files)}")
+        print("  strategy: " + (" ".join(manual.strategy) or "as phenix.refine's default")
+              + ("  (group_anomalous will be unselected)" if "group_anomalous" in manual.strategy else ""))
+        if manual.anomalous_groups:
+            print("  its anomalous groups (" + "; ".join(manual.anomalous_groups)
+                  + ") -> replaced by the metal sites, f' and f'' fixed")
+        if manual.occupancy_exclusions:
+            print("  occupancies held as in the .eff: " + "; ".join(manual.occupancy_exclusions))
+        for warning in manual.warnings:
+            print(f"  Warning: {warning}")
 
 
 def _print_fdp_table(round_result) -> None:
@@ -1787,14 +1817,72 @@ def _print_fdp_round(result, max_iterations: int) -> None:
                     f"{label:<14}{start + ' -> ' + final:>14}{refined:>9}"
                     f"{outcome.f_double_prime_theory:>9.2f}{deviation:>11}  {outcome.reason}"
                 )
+    if result.plan.final_eff is not None and result.final is None and first.status == STATUS_ROUND_DONE:
+        print("\nAutoFDP final round: not run, because not every site converged")
+    _print_final_round(result)
     print(f"\n{_color(result.status, status_color)}: {result.message}")
     if result.final_model is not None:
         print(f"Model with the final occupancies: {result.final_model}")
     print(f"Run folder: {result.run_directory}")
 
 
+def _print_final_round(result) -> None:
+    """The final round: metal sites held, R values, warnings."""
+    final = result.final
+    if final is None:
+        return
+    print(
+        f"\nAutoFDP final round ({_relative_to(final.directory, result.run_directory)}, "
+        f"settings of {result.plan.final_eff.source.name}; metal occupancy held, "
+        "f' and f'' fixed)"
+    )
+    print(f"R-work {_format_metric(final.r_work)}, R-free {_format_metric(final.r_free)}")
+    print(f"\n{'Site':<14}{'Occ':>6}{'f-prime':>9}{'fdp':>9}{'B before':>10}{'B after':>9}")
+    for site in final.sites:
+        occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+        before = "-" if site.b_before is None else f"{site.b_before:.2f}"
+        after = "-" if site.b_after is None else f"{site.b_after:.2f}"
+        label = f"{site.site} {site.atom_name}"
+        print(f"{label:<14}{occupancy:>6}{site.f_prime:>9.2f}{site.f_double_prime:>9.2f}"
+              f"{before:>10}{after:>9}")
+    for warning in final.warnings:
+        print(f"Warning: {warning}")
+    if final.model_path is not None:
+        print(f"Final model: {final.model_path}")
+
+
+def _open_final_view(args: argparse.Namespace, result) -> None:
+    """Open the final round's model and maps; a Coot problem never fails the run."""
+    final = result.final
+    if final is None or final.model_path is None or final.map_coefficients is None:
+        return
+    if args.no_coot:
+        print(f"Maps: {final.map_coefficients}")
+        return
+    try:
+        config = load_config()
+        coot = discover_coot(config, explicit=args.coot)
+        remember_coot(config, coot)
+        save_config(config)
+        view = launch_coot_files(
+            final.model_path,
+            final.map_coefficients,
+            coot.executable,
+            working_directory=result.run_directory / "CootGUI",
+            source=f"AutoFDP final round ({result.run_directory.name})",
+            dictionaries=[Path(name) for name in result.plan.final_eff.restraint_files],
+        )
+    except (ConfigError, CootDiscoveryError, CootViewError) as exc:
+        print(f"Coot view error: {exc}", file=sys.stderr)
+        print(f"Maps: {final.map_coefficients}")
+        return
+    print(f"Opened Coot (PID {view.pid}) with {final.directory.name}/{view.model_path.name} "
+          f"and {view.map_path.name}")
+    print(f"Coot log: {view.log_path}")
+
+
 def _autofdp(args: argparse.Namespace) -> int:
-    """AutoFDP steps 1 to 3 from a model and an MTZ."""
+    """AutoFDP steps 1 to 3 from a model and an MTZ, and the optional final round."""
     from .autofdp import (
         STATUS_CONVERGED,
         STATUS_REVIEW,
@@ -1820,6 +1908,8 @@ def _autofdp(args: argparse.Namespace) -> int:
             raise AutoFDPError("--max-iterations must be 0 or more")
         if not (math.isfinite(args.occupancy_floor) and 0 < args.occupancy_floor < 1):
             raise AutoFDPError("--occupancy-floor must be above 0 and below 1")
+        if args.coot is not None and args.no_coot:
+            raise AutoFDPError("--coot and --no-coot cannot be combined")
         config = load_config()
         phenix = discover_phenix(config, explicit=args.phenix_root)
         if args.phenix_root is None:
@@ -1836,7 +1926,8 @@ def _autofdp(args: argparse.Namespace) -> int:
             model, mtz, refine, mtz_dump,
             sites=tuple(args.site), b_start=b_start, theory_overrides=theory,
             wavelength=args.wavelength, restraints=tuple(args.cif),
-            output_root=args.output, environment=phenix.environment,
+            output_root=args.output, final_eff=args.final_eff,
+            environment=phenix.environment,
         )
         _print_autofdp_plan(plan)
         if args.plan:
@@ -1849,6 +1940,12 @@ def _autofdp(args: argparse.Namespace) -> int:
                 f"+/-{args.tolerance:g} e- of theory, one site at a time (furthest first), "
                 f"with the same round after each (occupancy floor {args.occupancy_floor:g})"
             )
+            if plan.final_eff is not None:
+                print(
+                    "If every site converges: a final round with the settings of "
+                    f"{plan.final_eff.source.name}, AutoFDP's final model, the metal "
+                    "occupancies held and f'/f'' fixed at the calibrated values"
+                )
             print("Plan only: no refinement was run and nothing was written.")
             return 0
         print(f"\nAutoFDP f'' rounds started ({args.cycles} cycles each)")
@@ -1863,8 +1960,8 @@ def _autofdp(args: argparse.Namespace) -> int:
         print(f"AutoFDP error: {exc}", file=sys.stderr)
         return 1
     _print_fdp_round(result, args.max_iterations)
-    print("Not implemented yet: the identity check, B confirmation and the final "
-          "all-parameter round.")
+    _open_final_view(args, result)
+    print("Not implemented yet: the identity check and B confirmation.")
     if result.status == STATUS_CONVERGED:
         return 0
     return 2 if result.status == STATUS_REVIEW else 1

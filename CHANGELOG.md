@@ -142,11 +142,35 @@ entries are reconstructed from repository history.
     `nasolve.autofdp`); `--element` is refused. phenix.refine, phenix.mtz.dump
     and phenix.python are simulated in tests; first run on real data
     2026-11-13 (PdUHgPdU, Phenix 2.2.1).
-  - No Coot: AutoFDP no longer opens the last round's model and maps in Coot
-    (it did up to a70def8 on `ginkgo`), because the maps of an f''-only
-    round are not diagnostic. `--coot` is removed; `--no-coot` is still
-    accepted and does nothing; no `CootGUI/` folder is written. The
-    AutoFDP-only `coot_view.launch_coot_files` is removed.
+  - No Coot for the f'' rounds: AutoFDP no longer opens an f'' round's model
+    and maps in Coot (it did up to a70def8 on `ginkgo`), because those maps
+    are not diagnostic. Only the final round (below) opens Coot.
+  - Final round (`--final-eff MANUAL.eff`): when every calibrated site
+    converges, a phenix.refine round in `run_NNN/final_round/` with every
+    setting of a manual refinement's .eff (for example the GUI's
+    `.phenix/project_data/refine_NN.eff`), with only these changes: AutoFDP's
+    `final_model.pdb` instead of the .eff's model (a reference model stays);
+    the .eff's anomalous groups replaced by one group per metal site with f'
+    at theory and f'' at its last refined value, `refine = None`, and
+    `group_anomalous` unselected (Phenix 2.2.1 applies group f'/f'' without
+    that strategy); every metal site added to
+    `occupancies.remove_selection` (occupancy held; the .eff's own
+    exclusions kept); outputs named `final_001`. The edited copy
+    (`final_input.eff`, with a header) and the metal settings
+    (`autofdp_final.params`) are written beside the outputs; the .eff
+    itself is never changed. New line-preserving PHIL scanner
+    `nasolve.phil_text` makes these edits without touching any other line.
+    Preflight: the .eff must be a phenix.refine parameter file naming a
+    reflection file, and every file it names must exist; another
+    reflection file than AutoFDP's MTZ is a warning. Afterwards the held
+    occupancies and the f'' shown in the log are checked. The result opens
+    in Coot (`--no-coot`, `--coot` apply to it; `coot_view.launch_coot_files`
+    is back). A failed final round makes the run `AUTOFDP_FAILED` (exit 1);
+    a run that did not converge skips it. The `--final` stub (all
+    parameters refined together) is replaced; `AutoFDPSettings.final` is now
+    `final_eff`. Schema (additive, still 2): `final_round`,
+    `settings.final_eff`, `steps.final_round`; new round status
+    `AUTOFDP_FINAL_DONE`. Simulated only.
 - `nasolve autosol RUN --metal ELEMENT` searches for metal ions by MR-SAD
   AutoSol directly after Phaser, with the original Phaser model as partial
   model (`autosol.phasing.partpdb_rms`, default 1.0 A, `--rmsd`), extra metals
