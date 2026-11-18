@@ -7,13 +7,14 @@ it reads no NASolve run report or checkpoint.
   (F(+)/SIGF(+)/F(-)/SIGF(-), or the intensity equivalent), the Free-R flags
   (never regenerated) and the wavelength (MTZ header; ``--wavelength`` if the
   header has none).
-- From the model: the metal HETATM sites (NARestraints heavy-atom search, as
-  in PostMR) and the B factors of the nucleotides around each one.
+- From the model: the metal HETATM sites and the B factors of the nucleotides
+  around each one, with :mod:`nasolve.metal_sites` (the heavy-atom and
+  metal-pair searches ported from NARestraints; NARestraints is not needed).
 
 Implemented:
 
 - Step 1 (``prepare_start_model``): copy the model and set each metal's B to
-  the mean B of the nucleotides around it (NARestraints metal-pair search).
+  the mean B of the nucleotides around it (metal-pair search).
 - Step 2: ``run_readyset`` (phenix.ready_set on that copy, no hydrogens, for
   the restraint dictionaries of non-standard residues; curated NASolve
   dictionaries and ``--cif`` files are given to it), then ``fdp_round``: one
@@ -53,7 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import phil_text
+from . import metal_sites, phil_text
 from .model_assessment import file_sha256
 from .run_context import artifact_reference
 
@@ -357,18 +358,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _metal_pairs():
-    """The NARestraints metal-pair search (restraints.metal_pairs)."""
-    try:
-        from restraints import metal_pairs
-    except ImportError as exc:
-        raise AutoFDPError(
-            "AutoFDP needs the NARestraints metal-pair search (restraints.metal_pairs), "
-            "from the feature/anomalous-scatterers branch of NARestraints"
-        ) from exc
-    return metal_pairs
-
-
 def _b_factor(line: str, line_number: int) -> float:
     try:
         value = float(line[60:66])
@@ -389,8 +378,8 @@ def _occupancy(line: str, line_number: int) -> float:
 def surrounding_b(model_path: Path, metal_line: int) -> NeighbourB:
     """Mean B of the nucleotides around the metal atom on ``metal_line``.
 
-    The neighbours are chosen with the NARestraints metal-pair search
-    (restraints.metal_pairs), in this order:
+    The neighbours are chosen with the metal-pair search of
+    :mod:`nasolve.metal_sites` (ported from NARestraints), in this order:
 
     1. the two nucleotides of the metal-mediated base pair the ion bridges
        (``find_metal_mediated_pairs``: base N/O/S/Se within 3.6 A, two
@@ -401,7 +390,7 @@ def surrounding_b(model_path: Path, metal_line: int) -> NeighbourB:
     The B factor is the mean over all atoms of those nucleotides (first model),
     rounded to 0.01. No nucleotide within 6 A is an AutoFDPError.
     """
-    pairs_module = _metal_pairs()
+    pairs_module = metal_sites
     lines = model_path.read_text(encoding="utf-8", errors="replace").splitlines()
     atoms = pairs_module.read_atoms(model_path)
     metal = next((atom for atom in atoms if atom.line_number == metal_line), None)
@@ -436,7 +425,7 @@ def surrounding_b(model_path: Path, metal_line: int) -> NeighbourB:
             contact.residue: (contact.distance, contact.atom_name)
             for contact in (pair.first, pair.second)
         }
-        method = "bridged base pair (NARestraints metal-pair search)"
+        method = "bridged base pair (metal-pair search)"
     else:
         contacts = closest(
             lambda atom: atom.name not in pairs_module.BACKBONE_ATOMS
@@ -489,12 +478,11 @@ def parse_b_start(value: str | float) -> str | float:
 
 
 def _metal_sites(model: Path, requested: Sequence[str]) -> tuple[list[tuple[dict, object]], list[str]]:
-    from .postmr import PostMRPreparationError, scan_metal_anomalous_sites
-
+    """Metal sites of ``model`` (:func:`nasolve.metal_sites.scan_metal_sites`)."""
     try:
-        candidates, objects, warnings = scan_metal_anomalous_sites(model)
-    except PostMRPreparationError as exc:
-        raise AutoFDPError(str(exc)) from exc
+        candidates, objects, warnings = metal_sites.scan_metal_sites(model)
+    except OSError as exc:
+        raise AutoFDPError(f"Cannot read {model}: {exc}") from exc
     found = list(zip(candidates, objects))
     if not found:
         raise AutoFDPError(
@@ -542,9 +530,9 @@ def prepare_start_model(
 ) -> BStart:
     """AutoFDP step 1: find the metal sites and set their B.
 
-    The metal HETATM sites are found as in PostMR (NARestraints
-    ``find_heavy_atoms``: Z >= 21, outside nucleotides, not Li/Be/Na/Mg/Al/
-    K/Ca), optionally restricted to ``sites``, and each site's B is set
+    The metal HETATM sites are found as in PostMR (heavy-atom search of
+    :mod:`nasolve.metal_sites`, ported from NARestraints: Z >= 21, outside
+    nucleotides, not Li/Be/Na/Mg/Al/K/Ca), optionally restricted to ``sites``, and each site's B is set
     according to ``b_start``:
 
     - ``"surrounding"``: :func:`surrounding_b`, the mean B of the neighbouring

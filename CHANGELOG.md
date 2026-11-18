@@ -142,6 +142,17 @@ entries are reconstructed from repository history.
     `nasolve.autofdp`); `--element` is refused. phenix.refine, phenix.mtz.dump
     and phenix.python are simulated in tests; first run on real data
     2026-11-13 (PdUHgPdU, Phenix 2.2.1).
+  - AutoFDP no longer calls NARestraints: it finds metal sites and their
+    neighbouring nucleotides with the new `nasolve.metal_sites`, which holds
+    NARestraints' heavy-atom search (`find_heavy_atoms`) and metal-pair search
+    (`read_atoms`, `find_metal_mediated_pairs`) copied unchanged from
+    AcetylCholine233/NARestraints `main` d1bb52d, plus `scan_metal_sites`
+    (PostMR's selection: NASolve's metal list without Li/Be/Na/Mg/Al/K/Ca,
+    outside nucleotides). Results are identical; tests compare them with
+    NARestraints and PostMR whenever NARestraints is installed, and run
+    AutoFDP with NARestraints unimportable. The neighbour method label is
+    now "bridged base pair (metal-pair search)". PostMR and AutoRefine still
+    use NARestraints as before.
   - No Coot for the f'' rounds: AutoFDP no longer opens an f'' round's model
     and maps in Coot (it did up to a70def8 on `ginkgo`), because those maps
     are not diagnostic. Only the final round (below) opens Coot.

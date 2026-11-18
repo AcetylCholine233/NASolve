@@ -134,13 +134,16 @@ sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
 1. **Source.** The model given on the command line. It is never changed.
 2. **Copy.** The model is copied unchanged to `run_NNN/source_model.pdb`, and
    the copy's checksum is checked.
-3. **Find the metals.** As in PostMR: NARestraints `find_heavy_atoms`, HETATM
+3. **Find the metals.** As in PostMR, with `find_heavy_atoms` from
+   `nasolve.metal_sites` (ported from NARestraints, so AutoFDP does not need
+   NARestraints installed): HETATM
    records with Z >= 21 outside nucleotides, without Li, Be, Na, Mg, Al, K or
    Ca. `--site` restricts the list. No metal, or an unknown `--site`, stops
    with an error. A metal with an ANISOU record is refused, because AutoFDP
    sets isotropic B only.
-4. **Neighbours.** Found with the NARestraints metal-pair search
-   (`restraints.metal_pairs`), in this order:
+4. **Neighbours.** Found with the metal-pair search in `nasolve.metal_sites`
+   (`find_metal_mediated_pairs`, ported from NARestraints
+   `restraints/metal_pairs.py`), in this order:
    1. the two nucleotides of the base pair the ion bridges
       (`find_metal_mediated_pairs`: base N, O, S or Se within 3.6 A of the ion
       in two nucleotides that are not chain neighbours, closest pair kept);

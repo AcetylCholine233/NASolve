@@ -1,5 +1,5 @@
 """AutoFDP step 1: copy the starting model and set each metal's B from the
-nucleotides around it (NARestraints metal-pair search). Pure Python; no
+nucleotides around it (metal-pair search in nasolve.metal_sites). Pure Python; no
 Phenix program runs in this step, and no NASolve run is needed."""
 
 import tempfile
