@@ -5,7 +5,16 @@ import unittest
 from pathlib import Path
 
 from nasolve.automr import prepare_automr
-from nasolve.phaser import PhaserExecutionError, execute_phaser, parse_best_tfz
+from nasolve.phaser import (
+    TFZ_FLOOR,
+    TFZ_THRESHOLD,
+    PhaserExecutionError,
+    TFZOverrideError,
+    check_tfz_override,
+    execute_phaser,
+    parse_best_tfz,
+    tfz_override_warning,
+)
 
 from .helpers import make_dataset, make_mtz_dump, make_phaser, model_text, w_model_text
 
@@ -200,6 +209,79 @@ class PhaserExecutionTests(unittest.TestCase):
             "SOLU SET RFZ=8.0 TFZ==8.6 LLG=125.5",
         ])
         self.assertEqual(parse_best_tfz(text), (8.6, 125.5))
+
+
+def low_tfz_run(root: Path, *, tfz=5.1, status="MR_FAILED", return_code=0,
+                requested="F", used="F", outputs=("pdb", "mtz")) -> tuple[Path, dict]:
+    """An AutoMR run as phaser.py records it, with a chosen Phaser outcome."""
+    run = root / "dataset" / "AutoMR" / "run_001"
+    phaser = run / "Phaser"
+    phaser.mkdir(parents=True)
+    record = {"return_code": return_code, "best_tfz": tfz, "best_llg": 40.0,
+              "reflection_data": {"requested": requested, "labin": "FP,SIGFP",
+                                  "phaser_reported_labin": "F=FP SIGF=SIGFP",
+                                  "phaser_reported_kind": used},
+              "solution_pdb": None, "solution_mtz": None}
+    for suffix in outputs:
+        path = phaser / f"mr_solution.{suffix}"
+        path.write_text("fixture\n")
+        record[f"solution_{suffix}"] = str(path)
+    report = {"workflow": "automr", "stage": "phaser", "status": status,
+              "message": f"Best TFZ {tfz} fixture", "execution": {"phaser": record}}
+    (run / "report.json").write_text(json.dumps(report))
+    return run, report
+
+
+class TFZOverrideTests(unittest.TestCase):
+    """--tfz-override accepts a Phaser result whose only problem is its TFZ."""
+
+    def test_cut_offs_are_unchanged(self):
+        self.assertEqual((TFZ_FLOOR, TFZ_THRESHOLD), (7.0, 8.0))
+
+    def test_low_tfz_is_accepted_and_described(self):
+        for tfz, status, below in ((5.1, "MR_FAILED", "below the 7.0 floor"),
+                                   (7.4, "MR_REVIEW", "below the 8.0 threshold")):
+            with self.subTest(tfz=tfz), tempfile.TemporaryDirectory() as directory:
+                run, report = low_tfz_run(Path(directory), tfz=tfz, status=status)
+                record = check_tfz_override(report, run)
+                self.assertEqual(record["accepted_by"], "--tfz-override")
+                self.assertEqual(record["mr_status"], status)
+                self.assertEqual(record["mr_message"], report["message"])
+                self.assertEqual(record["best_tfz"], tfz)
+                self.assertEqual((record["tfz_floor"], record["tfz_threshold"]), (7.0, 8.0))
+                self.assertIn("accepted_utc", record)
+                warning = tfz_override_warning(record)
+                self.assertIn(f"{status} (best TFZ {tfz:.2f}, {below})", warning)
+                self.assertIn("--tfz-override", warning)
+
+    def test_tfz_at_the_threshold_needs_no_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, report = low_tfz_run(Path(directory), tfz=8.0, status="MR_SUCCESS")
+            self.assertIsNone(check_tfz_override(report, run))
+
+    def test_outputs_are_found_by_the_run_fallback_after_a_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, report = low_tfz_run(Path(directory))
+            report["execution"]["phaser"]["solution_pdb"] = "/moved/away/mr_solution.pdb"
+            report["execution"]["phaser"]["solution_mtz"] = "/moved/away/mr_solution.mtz"
+            self.assertIsNotNone(check_tfz_override(report, run))
+
+    def test_any_other_failure_is_refused(self):
+        cases = (
+            ({"return_code": 1}, "exited with status 1"),
+            ({"tfz": None}, "reported no TFZ"),
+            ({"used": "I"}, "Phaser used I data although F data were requested"),
+            ({"outputs": ("pdb",)}, "no solution map"),
+            ({"outputs": ()}, "no solution model"),
+        )
+        for change, message in cases:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                run, report = low_tfz_run(Path(directory), **change)
+                with self.assertRaisesRegex(TFZOverrideError, message):
+                    check_tfz_override(report, run)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TFZOverrideError, "no Phaser record"):
+                check_tfz_override({"status": "MR_FAILED"}, Path(directory))
 
 
 if __name__ == "__main__":

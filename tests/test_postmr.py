@@ -1207,6 +1207,76 @@ class PostMRTests(unittest.TestCase):
                     narestraints_builder=lambda *_: None,
                 )
 
+    def test_tfz_override_continues_from_a_low_tfz_and_records_it(self):
+        def low_tfz(run: Path, source: Path, **phaser) -> Path:
+            report_path = make_postmr_report(run, source)
+            report = json.loads(report_path.read_text())
+            solution_map = run / "Phaser" / "mr_solution.mtz"
+            solution_map.write_bytes(b"map")
+            report["status"] = "MR_FAILED"
+            report["message"] = "Best TFZ 5.10 is below the 7.0 acceptance floor"
+            report["execution"]["phaser"].update(
+                {"return_code": 0, "best_tfz": 5.1, "solution_mtz": str(solution_map), **phaser})
+            report_path.write_text(json.dumps(report))
+            return report_path
+
+        def builder(pdb: Path, pairs: Path, output: Path) -> None:
+            output.write_text("geometry_restraints.edits {}\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            low_tfz(run, source)
+            data_root = make_data_root(root)
+            # Without the override the low TFZ is refused (even with
+            # --allow-mr-review), and the refusal names the override.
+            for kwargs in ({}, {"allow_mr_review": True}):
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                        PostMRPreparationError, "not MR_FAILED; --tfz-override"):
+                    prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                                   narestraints_builder=builder, **kwargs)
+            self.assertFalse((run / "PostMR").exists())
+
+            result = prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                                    narestraints_builder=builder, tfz_override=True)
+            self.assertEqual(result.status, "POSTMR_READY")
+            record = result.tfz_override_record
+            self.assertEqual(record["accepted_by"], "--tfz-override")
+            self.assertEqual((record["mr_status"], record["best_tfz"]), ("MR_FAILED", 5.1))
+            self.assertEqual(record["mr_message"], "Best TFZ 5.10 is below the 7.0 acceptance floor")
+            postmr = json.loads(result.report_path.read_text())
+            self.assertEqual(postmr["tfz_override"], record)
+            run_report = json.loads((run / "report.json").read_text())
+            self.assertEqual(run_report["postmr"]["tfz_override"], record)
+            self.assertIn("MR_FAILED (best TFZ 5.10, below the 7.0 floor) because of --tfz-override",
+                          (result.postmr_directory / "postmr.log").read_text())
+
+        # A Phaser run that failed for another reason is still refused.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            low_tfz(run, source, return_code=1)
+            with self.assertRaisesRegex(PostMRPreparationError, "Phaser exited with status 1"):
+                prepare_postmr(run, make_ready_set(root), data_root=make_data_root(root),
+                               narestraints_builder=builder, tfz_override=True)
+            self.assertFalse((run / "PostMR").exists())
+
+        # A passing run needs no override, and records none.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            make_postmr_report(run, source)
+            result = prepare_postmr(run, make_ready_set(root), data_root=make_data_root(root),
+                                    narestraints_builder=builder, tfz_override=True)
+            self.assertIsNone(result.tfz_override_record)
+            self.assertIsNone(json.loads(result.report_path.read_text())["tfz_override"])
+
     def test_completed_postmr_reports_clear_non_overwrite_message(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

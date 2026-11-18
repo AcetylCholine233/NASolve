@@ -190,7 +190,12 @@ for review and exits 3; failure or missing output exits 4.
 PostMR is deliberately a separate command so an accepted Phaser result can be
 inspected and rerun deterministically before refinement. It refuses to
 overwrite an existing `PostMR/` directory. `MR_SUCCESS` is accepted;
-`MR_REVIEW` requires an explicit override; other statuses stop.
+`MR_REVIEW` requires an explicit override; other statuses stop. The one
+exception is `--tfz-override`: a run that is `MR_REVIEW` or `MR_FAILED` only
+because of its TFZ (Phaser exit status 0, a reported TFZ, the requested
+reflection data, and both solution files; `phaser.check_tfz_override`) may
+continue. The run keeps its status, and the override is stored as
+`postmr.tfz_override` and in `PostMR/report.json`. Campaigns never pass it.
 
 The W-frame manifest assigns requested pair roles to `A:12` and `B:4`.
 Canonical DNA/RNA changes use a generated headless Coot script. Supported
@@ -389,7 +394,9 @@ distinct from the HL-bearing `refinement_data` input.
 `nasolve autosol RUN --metal ELEMENT` is a separate, optional MR-SAD search for
 metal ions, run directly after Phaser. It requires an AutoMR run with an
 accepted Phaser result (best TFZ >= 8; 7 <= TFZ < 8 only with
-`--allow-mr-review`) and may also run after PostMR, because it always uses the
+`--allow-mr-review`; a lower TFZ only with `--tfz-override`, under the same
+conditions as PostMR, recorded as `tfz_override` in the search report and its
+entry in the run report) and may also run after PostMR, because it always uses the
 original Phaser solution PDB and never a modified model. Inputs follow the
 nucleotide branch: checksum-verified STARANISO reflections, the MTZ-header
 wavelength, and a complete anomalous quartet confirmed by `phenix.mtz.dump`.

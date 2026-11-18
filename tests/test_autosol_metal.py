@@ -137,6 +137,7 @@ def make_run(root: Path, *, tfz: float = 12.3, space_group: str = "P 1", stage: 
                 "solution_pdb": str(model.resolve()),
                 "solution_mtz": str(phaser_map.resolve()),
                 "best_tfz": tfz,
+                "return_code": 0,
             },
         },
     }
@@ -308,6 +309,48 @@ class MetalSearchTests(unittest.TestCase):
             run = make_run(root, tfz=5.0)
             with self.assertRaisesRegex(AutoSolPreparationError, "below 7.0"):
                 search(run, make_autosol(root), root)
+
+    def test_tfz_override_searches_a_low_tfz_and_records_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root, tfz=5.0)
+            autosol = make_autosol(root, [("AG", (0.0, 0.0, 0.0))])
+            with self.assertRaisesRegex(AutoSolPreparationError, "--tfz-override searches anyway"):
+                search(run, autosol, root, allow_mr_review=True)
+            result = search(run, autosol, root, tfz_override=True)
+            self.assertEqual(result.status, FOUND)
+            record = result.tfz_override_record
+            self.assertEqual(record["accepted_by"], "--tfz-override")
+            self.assertEqual((record["mr_status"], record["best_tfz"]), ("MR_FAILED", 5.0))
+            payload = json.loads(result.report_path.read_text())
+            self.assertEqual(payload["tfz_override"], record)
+            self.assertEqual(payload["phaser_tfz"], 5.0)
+            listed = json.loads((run / "report.json").read_text())["metal_autosol"]["searches"]
+            self.assertEqual(listed[-1]["tfz_override"], record)
+            self.assertEqual(json.loads((run / "report.json").read_text())["status"], "MR_FAILED")
+
+        # Phaser failing for another reason is still refused, before any folder exists.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root, tfz=5.0)
+            report = json.loads((run / "report.json").read_text())
+            report["execution"]["phaser"]["return_code"] = 1
+            (run / "report.json").write_text(json.dumps(report))
+            with self.assertRaisesRegex(AutoSolPreparationError, "Phaser exited with status 1"):
+                search(run, make_autosol(root), root, tfz_override=True)
+            self.assertFalse((root / "dataset" / "AutoSolMetal").exists())
+
+        # A passing TFZ needs no override: none is recorded, and the run is
+        # checked exactly as without the flag.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run(root)
+            report = json.loads((run / "report.json").read_text())
+            del report["execution"]["phaser"]["return_code"]   # older reports
+            (run / "report.json").write_text(json.dumps(report))
+            result = search(run, make_autosol(root, []), root, tfz_override=True)
+            self.assertIsNone(result.tfz_override_record)
+            self.assertIsNone(json.loads(result.report_path.read_text())["tfz_override"])
 
     def test_changed_reflections_stop_before_launch(self):
         with tempfile.TemporaryDirectory() as directory:

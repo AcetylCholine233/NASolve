@@ -63,6 +63,7 @@ from .autosol import (
     resolve_wavelength,
 )
 from .model_assessment import file_sha256
+from .phaser import TFZ_FLOOR, TFZ_THRESHOLD, TFZOverrideError, check_tfz_override
 from .run_context import artifact_reference, dataset_directory, resolve_artifact_path
 
 
@@ -108,6 +109,7 @@ class MetalSearchResult:
     # folder with the AutoMR-requested residues built in.
     partial_model: Path | None = None
     mutations: tuple[dict[str, object], ...] = ()
+    tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
 
 
 def parse_metals(values: Sequence[str]) -> tuple[str, ...]:
@@ -161,18 +163,44 @@ def _phaser_record(report: Mapping[str, object]) -> Mapping[str, object]:
     return phaser
 
 
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _check_phaser_accepted(report: Mapping[str, object], allow_mr_review: bool) -> float:
     """Return the TFZ, refusing failed MR and unapproved review results."""
     tfz = _phaser_record(report).get("best_tfz")
-    if not isinstance(tfz, (int, float)) or isinstance(tfz, bool) or not math.isfinite(tfz):
+    if not _finite_number(tfz):
         raise AutoSolPreparationError("The Phaser result has no TFZ; MR did not succeed")
-    if tfz < 7.0:
-        raise AutoSolPreparationError(f"Phaser TFZ {tfz:.2f} is below 7.0; MR did not succeed")
-    if tfz < 8.0 and not allow_mr_review:
+    if tfz < TFZ_FLOOR:
         raise AutoSolPreparationError(
-            f"Phaser TFZ {tfz:.2f} needs review; pass --allow-mr-review to search anyway"
+            f"Phaser TFZ {tfz:.2f} is below {TFZ_FLOOR:.1f}; MR did not succeed "
+            "(--tfz-override searches anyway)"
+        )
+    if tfz < TFZ_THRESHOLD and not allow_mr_review:
+        raise AutoSolPreparationError(
+            f"Phaser TFZ {tfz:.2f} needs review; pass --allow-mr-review "
+            "(or --tfz-override) to search anyway"
         )
     return float(tfz)
+
+
+def _accept_phaser(
+    run: Path, report: Mapping[str, object], allow_mr_review: bool, tfz_override: bool,
+) -> tuple[float, dict[str, object] | None]:
+    """The TFZ the search continues from, and the --tfz-override record if one was needed.
+
+    A TFZ at or above the threshold never needs the flag, so passing it does
+    not change how such a run is checked.
+    """
+    tfz = _phaser_record(report).get("best_tfz")
+    if tfz_override and _finite_number(tfz) and tfz < TFZ_THRESHOLD:
+        try:
+            acceptance = check_tfz_override(report, run)
+        except TFZOverrideError as exc:
+            raise AutoSolPreparationError(str(exc)) from exc
+        return float(tfz), acceptance
+    return _check_phaser_accepted(report, allow_mr_review), None
 
 
 def _phaser_map(run: Path, report: Mapping[str, object]) -> Path:
@@ -298,6 +326,7 @@ def _record(
         "status": payload["status"],
         "message": payload["message"],
         "metals": payload["metals"],
+        "tfz_override": payload.get("tfz_override"),
         "created_utc": payload["created_utc"],
     })
     block["schema_version"] = SCHEMA_VERSION
@@ -380,6 +409,7 @@ def execute_metal_search(
     *,
     partial_model_rmsd: float = DEFAULT_PARTIAL_MODEL_RMSD,
     allow_mr_review: bool = False,
+    tfz_override: bool = False,
     sequence_file: Path | None = None,
     build_requested_residues: bool = True,
     coot_executable: Path | None = None,
@@ -410,7 +440,7 @@ def execute_metal_search(
     # Everything that can be checked is checked before a metal-search directory
     # exists, so a refused search leaves no trace in the run.
     run, report = _read_report(run_directory)
-    tfz = _check_phaser_accepted(report, allow_mr_review)
+    tfz, tfz_override_record = _accept_phaser(run, report, allow_mr_review, tfz_override)
     reflections = _required_path(report, "inputs", "reflections", run)
     summary = _optional_path(report, "inputs", "summary", run)
     inputs = report.get("inputs")
@@ -550,6 +580,7 @@ def execute_metal_search(
         "metals": list(elements),
         "partial_model_rmsd": partial_model_rmsd,
         "phaser_tfz": tfz,
+        "tfz_override": tfz_override_record,
         "wavelength": wavelength,
         "wavelength_source": wavelength_source,
         "input_labels": list(labels),
@@ -587,6 +618,7 @@ def execute_metal_search(
             phaser_map=phaser_map, heavy_atom_model=heavy_atom_model, sites=tuple(sites),
             partial_model=partial_model,
             mutations=tuple(partial_record.get("mutations", [])),  # type: ignore[arg-type]
+            tfz_override_record=tfz_override_record,
         )
 
     if build_error is not None:

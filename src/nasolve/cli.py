@@ -44,7 +44,7 @@ from .phenix_runtime import (
     installation_from_candidate,
     remember_phenix,
 )
-from .phaser import PhaserExecutionError, execute_phaser
+from .phaser import PhaserExecutionError, execute_phaser, tfz_override_warning
 from .postmr import PostMRPreparationError, prepare_postmr
 from .refine_doctor import RefineDoctorError, execute_refine_doctor
 
@@ -189,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicitly continue from a TFZ 7.0-7.99 MR_REVIEW result",
     )
     postmr.add_argument(
+        "--tfz-override", action="store_true",
+        help=(
+            "continue from a Phaser result whose only problem is a TFZ below 8.0 "
+            "(MR_REVIEW, or MR_FAILED below the 7.0 floor); the cut-offs are not "
+            "changed and the override is recorded in the report"
+        ),
+    )
+    postmr.add_argument(
         "--modified-pairs-only",
         action="store_true",
         help="guess base pairs and restrain only pairs containing a modified nucleotide",
@@ -235,6 +243,14 @@ def build_parser() -> argparse.ArgumentParser:
     autosol.add_argument(
         "--allow-mr-review", action="store_true",
         help="allow the metal search on a Phaser result that needs review (TFZ 7-8)",
+    )
+    autosol.add_argument(
+        "--tfz-override", action="store_true",
+        help=(
+            "metal search: continue from a Phaser result whose only problem is a TFZ "
+            "below 8.0 (MR_REVIEW, or MR_FAILED below the 7.0 floor); the cut-offs are "
+            "not changed and the override is recorded in the report"
+        ),
     )
     autosol.add_argument(
         "--original-model", action="store_true",
@@ -902,6 +918,7 @@ def _postmr(args: argparse.Namespace) -> int:
             coot_executable=coot.executable if coot else None,
             environment=phenix.environment,
             allow_mr_review=args.allow_mr_review,
+            tfz_override=args.tfz_override,
             modified_pairs_only=args.modified_pairs_only,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
             use_merged_model=not args.original_model,
@@ -915,6 +932,8 @@ def _postmr(args: argparse.Namespace) -> int:
         print(f"PostMR preparation error: {exc}", file=sys.stderr)
         return 2
     print(f"{result.status}: {result.message}")
+    if result.tfz_override_record is not None:
+        print(_color(tfz_override_warning(result.tfz_override_record), "33"))
     print(f"Run directory: {result.run_directory}")
     if result.input_model is not None:
         source = (
@@ -1033,6 +1052,7 @@ def _autosol_metal(args: argparse.Namespace) -> int:
                 DEFAULT_PARTIAL_MODEL_RMSD if args.rmsd is None else args.rmsd
             ),
             allow_mr_review=args.allow_mr_review,
+            tfz_override=args.tfz_override,
             sequence_file=args.sequence,
             build_requested_residues=not args.original_model,
             coot_executable=coot_executable,
@@ -1042,6 +1062,8 @@ def _autosol_metal(args: argparse.Namespace) -> int:
         print(f"AutoSol metal search error: {exc}", file=sys.stderr)
         return 2
     print(f"{result.status}: {result.message}")
+    if result.tfz_override_record is not None:
+        print(_color(tfz_override_warning(result.tfz_override_record), "33"))
     print(f"Metals searched: {', '.join(result.metals)}")
     print(f"Partial-model RMSD: {result.partial_model_rmsd:g} A")
     try:
@@ -1111,11 +1133,11 @@ def _autosol_metal(args: argparse.Namespace) -> int:
 def _autosol(args: argparse.Namespace) -> int:
     if args.metal:
         return _autosol_metal(args)
-    if (args.rmsd is not None or args.allow_mr_review or args.no_coot or args.sequence
-            or args.original_model):
+    if (args.rmsd is not None or args.allow_mr_review or args.tfz_override or args.no_coot
+            or args.sequence or args.original_model):
         print(
-            "AutoSol error: --rmsd, --allow-mr-review, --sequence, --original-model and "
-            "--no-coot apply only to the metal search; add --metal ELEMENT",
+            "AutoSol error: --rmsd, --allow-mr-review, --tfz-override, --sequence, "
+            "--original-model and --no-coot apply only to the metal search; add --metal ELEMENT",
             file=sys.stderr,
         )
         return 2

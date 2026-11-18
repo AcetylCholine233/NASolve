@@ -135,6 +135,9 @@ PostMR builds them (headless Coot), and that copy is AutoSol's partial model.
 Heavy atoms that belong to the bases, such as the iodines of 5-iodo-dC and
 5-iodo-dU, are then part of the model instead of being found as metal sites.
 This needs Coot; `--original-model` searches with the Phaser model as it is.
+The search needs an accepted Phaser result (TFZ >= 8.0; 7.0-7.99 with
+`--allow-mr-review`); `--tfz-override` searches from a lower TFZ when nothing
+else went wrong in Phaser, and records that in the search report.
 The AutoMR run's own files are not changed. AutoSol's
 sequence is the frame `seq_base.txt` that AutoMR froze into the run (only the W
 catalogue has one); otherwise the nucleotide chains of the Phaser model are
@@ -936,7 +939,15 @@ After a run reaches `MR_SUCCESS`, prepare it for refinement with:
 ```
 
 `MR_REVIEW` runs stop unless the user explicitly supplies
-`--allow-mr-review`. Failed MR runs cannot enter PostMR.
+`--allow-mr-review`. Failed MR runs cannot enter PostMR, with one exception:
+`--tfz-override` continues from a run whose only problem is a TFZ below 8.0
+(`MR_REVIEW`, or `MR_FAILED` below the 7.0 floor). Phaser must have exited
+normally, reported a TFZ, written both the model and the map, and used the
+reflection data that were requested; any other failure is still refused. The
+cut-offs do not change and the run keeps its MR status. The override (TFZ,
+original status and message, time) is recorded as `tfz_override` in
+`PostMR/report.json` and the run report, written to `postmr.log`, and printed
+as a warning. Campaigns do not use it.
 
 For the W/5W6W frame, PostMR uses the fixed standard sites `A:12` and `B:4`.
 It applies ordinary DNA/RNA base changes through headless Coot. For a supported
@@ -1250,6 +1261,11 @@ AutoMR classifies the best final-solution TFZ reported by Phaser:
 
 A candidate also fails if Phaser exits unsuccessfully or does not produce both
 a PDB and MTZ output. Input, discovery, and preflight errors exit with code 2.
+
+`nasolve postmr` and the metal search (`nasolve autosol --metal`) accept
+`--tfz-override` to continue from a run that failed or needs review only
+because of its TFZ. The thresholds above stay as they are, and each override is
+recorded (`tfz_override`) in the report of the step that used it.
 
 ## Current scope
 

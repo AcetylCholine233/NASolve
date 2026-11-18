@@ -32,6 +32,7 @@ from .ligand_profiles import (
     normalize_ccp4_torsion_alternates,
     frozen_reference, validate_model_phosphate_policy, write_linked_profile,
 )
+from .phaser import TFZOverrideError, check_tfz_override, tfz_override_warning
 from .run_context import artifact_reference, resolve_artifact_path
 from .sequence_reference import SequenceReferenceError
 from .sequence_family import (
@@ -67,6 +68,7 @@ class PostMRResult:
     input_model_source: str = "phaser"  # or "metal-merged"
     metal_sites: tuple[dict[str, object], ...] = ()
     anomalous_scatterer_phil: Path | None = None
+    tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
 
 
 _COOT_BASES = frozenset({"DA", "DC", "DG", "DT", "A", "C", "G", "U"})
@@ -1551,6 +1553,7 @@ def prepare_postmr(
     coot_executable: Path | None = None,
     environment: Mapping[str, str] | None = None,
     allow_mr_review: bool = False,
+    tfz_override: bool = False,
     modified_pairs_only: bool = False,
     allow_unreviewed_backbone: bool = False,
     data_root: Path | None = None,
@@ -1565,12 +1568,29 @@ def prepare_postmr(
     """
     run, report = _read_report(run_directory)
     mr_status = report.get("status")
-    if mr_status == "MR_REVIEW" and not allow_mr_review:
+    tfz_override_record = None
+    if tfz_override and mr_status in {"MR_REVIEW", "MR_FAILED"}:
+        # A low TFZ accepted explicitly; any other Phaser failure is still refused.
+        try:
+            tfz_override_record = check_tfz_override(report, run)
+        except TFZOverrideError as exc:
+            raise PostMRPreparationError(str(exc)) from exc
+        if tfz_override_record is None:
+            raise PostMRPreparationError(
+                f"PostMR requires an accepted Phaser result, not {mr_status} "
+                f"({report.get('message')}); --tfz-override only accepts a low TFZ"
+            )
+    elif mr_status == "MR_REVIEW" and not allow_mr_review:
         raise PostMRPreparationError(
-            "MR_REVIEW requires explicit --allow-mr-review before PostMR preparation"
+            "MR_REVIEW requires explicit --allow-mr-review (or --tfz-override) "
+            "before PostMR preparation"
         )
-    if mr_status not in ({"MR_SUCCESS", "MR_REVIEW"} if allow_mr_review else {"MR_SUCCESS"}):
-        raise PostMRPreparationError(f"PostMR requires an accepted Phaser result, not {mr_status}")
+    elif mr_status not in ({"MR_SUCCESS", "MR_REVIEW"} if allow_mr_review else {"MR_SUCCESS"}):
+        hint = ("; --tfz-override continues from a run that failed only on its TFZ"
+                if mr_status == "MR_FAILED" else "")
+        raise PostMRPreparationError(
+            f"PostMR requires an accepted Phaser result, not {mr_status}{hint}"
+        )
     try:
         allowed_op3 = requested_op3_sites(report)
         backbone_policy = requested_backbone_policy(report)
@@ -1903,6 +1923,7 @@ def prepare_postmr(
         "status": "POSTMR_READY",
         "message": "Post-MR model, restraints, and ReadySet outputs are ready for refinement",
         "created_utc": datetime.now(timezone.utc).isoformat(),
+        "tfz_override": tfz_override_record,
         "input_model": str(source_model),
         "input_sha256": file_sha256(source_model),
         "input_model_source": input_model_source,
@@ -1997,6 +2018,10 @@ def prepare_postmr(
         "\n".join([
             "NASolve PostMR preparation",
             "Status: POSTMR_READY",
+            *(
+                [tfz_override_warning(tfz_override_record)]
+                if tfz_override_record is not None else []
+            ),
             f"Input model: {source_model}",
             f"Input model source: {input_model_source}",
             "Metal anomalous scatterers: " + (
@@ -2042,6 +2067,7 @@ def prepare_postmr(
         input_model_source=input_model_source,
         metal_sites=tuple(metal_sites),
         anomalous_scatterer_phil=metal_phil,
+        tfz_override_record=tfz_override_record,
     )
 
 

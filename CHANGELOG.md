@@ -64,6 +64,18 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `--tfz-override` for `nasolve postmr` and `nasolve autosol RUN --metal
+  ELEMENT`: continue from a Phaser result whose only problem is a TFZ below
+  8.0 (`MR_REVIEW`, or `MR_FAILED` below the 7.0 floor). Phaser must have
+  exited with status 0, reported a TFZ, written both the solution model and
+  map, and used the requested reflection data; any other failure is still
+  refused, with its reason. The 7.0/8.0 cut-offs and the run's MR status do
+  not change, and campaigns do not use the option. Schema: the PostMR record
+  (`postmr.tfz_override`, `PostMR/report.json`) and the metal-search report
+  (and its entry under `metal_autosol.searches`) gain `tfz_override`: null,
+  or the accepted TFZ, original status and message, the cut-offs and the time.
+  The command prints a warning, and `postmr.log` records it. Simulated in
+  tests; not yet run on real data.
 - `nasolve autofdp MODEL.pdb DATA.mtz` (steps 1-3 of the f'' occupancy
   calibration specified in `docs/autofdp.md`, after the mmDNA supplements:
   Adv. Mater. 2023, JACS 2023, Small 2025, Sci. Adv. 2026). It needs only a

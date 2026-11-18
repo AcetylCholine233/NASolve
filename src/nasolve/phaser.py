@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -47,6 +48,79 @@ class PhaserExecutionResult:
         if self.status == "MR_REVIEW":
             return 3
         return 4
+
+
+#: Best TFZ below this is MR_FAILED; at or above TFZ_THRESHOLD it is MR_SUCCESS;
+#: between the two it is MR_REVIEW.
+TFZ_FLOOR = 7.0
+TFZ_THRESHOLD = 8.0
+
+
+class TFZOverrideError(ValueError):
+    """A run that ``--tfz-override`` cannot accept."""
+
+
+def check_tfz_override(report: Mapping[str, object], run_directory: Path) -> dict[str, object] | None:
+    """Accept a Phaser result whose only problem is a low TFZ (``--tfz-override``).
+
+    The cut-offs do not change: the run keeps its MR_REVIEW or MR_FAILED
+    status, and the acceptance is recorded by the step that uses it. A run
+    qualifies when Phaser exited with status 0, reported a TFZ, wrote both
+    the solution model and map, and used the reflection data that were
+    requested. Returns None when the TFZ is at or above TFZ_THRESHOLD
+    (nothing to accept), the record to store when it is below, and raises
+    TFZOverrideError when the run failed for another reason.
+    """
+    execution = report.get("execution")
+    phaser = execution.get("phaser") if isinstance(execution, Mapping) else None
+    if not isinstance(phaser, Mapping):
+        raise TFZOverrideError("The run has no Phaser record; --tfz-override needs a Phaser result")
+    return_code = phaser.get("return_code")
+    if return_code != 0:
+        raise TFZOverrideError(
+            f"Phaser exited with status {return_code}; --tfz-override only accepts a low TFZ"
+        )
+    tfz = phaser.get("best_tfz")
+    if not isinstance(tfz, (int, float)) or isinstance(tfz, bool) or not math.isfinite(tfz):
+        raise TFZOverrideError("Phaser reported no TFZ; --tfz-override only accepts a low TFZ")
+    reflection = phaser.get("reflection_data")
+    if isinstance(reflection, Mapping):
+        requested, used = reflection.get("requested"), reflection.get("phaser_reported_kind")
+        if requested is not None and used is not None and used != requested:
+            raise TFZOverrideError(
+                f"Phaser used {used} data although {requested} data were requested; "
+                "--tfz-override only accepts a low TFZ"
+            )
+    for key, suffix, name in (("solution_pdb", ".pdb", "model"), ("solution_mtz", ".mtz", "map")):
+        value = phaser.get(key)
+        path = resolve_artifact_path(value, run_directory) if isinstance(value, str) else None
+        if path is None or not path.is_file():
+            fallback = run_directory / "Phaser" / f"mr_solution{suffix}"
+            path = fallback if fallback.is_file() else None
+        if path is None:
+            raise TFZOverrideError(
+                f"Phaser wrote no solution {name}; --tfz-override only accepts a low TFZ"
+            )
+    if tfz >= TFZ_THRESHOLD:
+        return None
+    return {
+        "accepted_by": "--tfz-override",
+        "mr_status": report.get("status"),
+        "mr_message": report.get("message"),
+        "best_tfz": float(tfz),
+        "tfz_floor": TFZ_FLOOR,
+        "tfz_threshold": TFZ_THRESHOLD,
+        "accepted_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def tfz_override_warning(acceptance: Mapping[str, object]) -> str:
+    """One line for the terminal about an accepted low TFZ."""
+    tfz = float(acceptance["best_tfz"])
+    below = (f"below the {TFZ_FLOOR:.1f} floor" if tfz < TFZ_FLOOR
+             else f"below the {TFZ_THRESHOLD:.1f} threshold")
+    return (f"Warning: continuing from {acceptance.get('mr_status')} (best TFZ {tfz:.2f}, "
+            f"{below}) because of --tfz-override")
 
 
 _NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
@@ -324,18 +398,18 @@ def execute_phaser(
     elif tfz is None:
         status = "MR_FAILED"
         message = "Phaser did not report a TFZ; inspect phaser.log"
-    elif tfz < 7.0:
+    elif tfz < TFZ_FLOOR:
         status = "MR_FAILED"
-        message = f"Best TFZ {tfz:.2f} is below the 7.0 acceptance floor"
+        message = f"Best TFZ {tfz:.2f} is below the {TFZ_FLOOR:.1f} acceptance floor"
     elif not outputs_complete:
         status = "MR_FAILED"
         message = "Phaser reported a candidate solution but did not produce both PDB and MTZ outputs"
-    elif tfz < 8.0:
+    elif tfz < TFZ_THRESHOLD:
         status = "MR_REVIEW"
         message = f"Best TFZ {tfz:.2f} is a red flag and requires user review"
     else:
         status = "MR_SUCCESS"
-        message = f"Best TFZ {tfz:.2f} passes the 8.0 AutoMR threshold"
+        message = f"Best TFZ {tfz:.2f} passes the {TFZ_THRESHOLD:.1f} AutoMR threshold"
 
     previous_status = report.get("status")
     previous_message = report.get("message")
@@ -418,10 +492,15 @@ def execute_phaser(
 
 
 __all__ = [
+    "TFZOverrideError",
     "PhaserExecutionError",
     "PhaserExecutionResult",
+    "TFZ_FLOOR",
+    "TFZ_THRESHOLD",
     "build_phaser_eff",
     "execute_phaser",
     "frozen_phaser_data",
+    "check_tfz_override",
+    "tfz_override_warning",
     "parse_best_tfz",
 ]

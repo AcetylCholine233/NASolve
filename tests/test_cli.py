@@ -3,7 +3,7 @@ import io
 import shlex
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from unittest.mock import patch
 from nasolve.autorefine import AutoRefineError, AutoRefineResult
 from nasolve.cli import _workspace_run, build_parser, main
 from nasolve.config import AppConfig, ConfigError, WorkspaceSettings
-from nasolve.coot_runtime import CootInstallation
+from nasolve.coot_runtime import CootDiscoveryError, CootInstallation
 from nasolve.coot_view import CootViewError, launch_coot_view
 from nasolve.model_assessment import file_sha256
 from nasolve.refine_doctor import RefineDoctorError
@@ -318,6 +318,65 @@ class CLITests(unittest.TestCase):
         self.assertEqual(args.command, "postmr")
         self.assertTrue(args.allow_mr_review)
         self.assertTrue(args.modified_pairs_only)
+
+    def test_tfz_override_is_forwarded_and_reported(self):
+        installation = SimpleNamespace(
+            version="2.2.1",
+            executables={
+                "phenix.ready_set": Path("/phenix/phenix.ready_set"),
+                "phenix.autosol": Path("/phenix/phenix.autosol"),
+                "phenix.mtz.dump": Path("/phenix/phenix.mtz.dump"),
+            },
+            environment={"PATH": "/phenix"},
+        )
+        record = {"accepted_by": "--tfz-override", "mr_status": "MR_FAILED", "best_tfz": 5.1}
+        warning = "MR_FAILED (best TFZ 5.10, below the 7.0 floor) because of --tfz-override"
+        run = Path("/dataset/AutoMR/run_001")
+        common = (
+            patch("nasolve.cli.load_config", return_value=AppConfig()),
+            patch("nasolve.cli._workspace_run", return_value=run),
+            patch("nasolve.cli.discover_phenix", return_value=installation),
+            patch("nasolve.cli.remember_phenix"),
+            patch("nasolve.cli.save_config"),
+            patch("nasolve.cli.discover_coot", side_effect=CootDiscoveryError("no Coot")),
+        )
+        postmr_result = SimpleNamespace(
+            status="POSTMR_READY", message="ready", run_directory=run, input_model=None,
+            model_path=run / "PostMR" / "model.pdb", metal_sites=(), anomalous_scatterer_phil=None,
+            readyset_log=run / "PostMR" / "readyset.log", restraint_paths=(),
+            report_path=run / "PostMR" / "report.json", tfz_override_record=record,
+        )
+        metal_result = SimpleNamespace(
+            status="AUTOSOL_METAL_NOT_FOUND", message="no sites", metals=("Ag",),
+            partial_model_rmsd=1.0, report_path=Path("/missing/report.json"), mutations=(),
+            partial_model=None, phaser_model=run / "Phaser" / "mr_solution.pdb",
+            run_directory=run, output_directory=Path("/dataset/AutoSolMetal/run_001"),
+            log_path=Path("/dataset/AutoSolMetal/run_001/autosol.log"), sites=(),
+            tfz_override_record=record,
+        )
+        for arguments, target, result in (
+            (["postmr", "run_001", "--tfz-override"], "nasolve.cli.prepare_postmr", postmr_result),
+            (["autosol", "run_001", "--metal", "AG", "--tfz-override"],
+             "nasolve.cli.execute_metal_search", metal_result),
+        ):
+            with self.subTest(arguments=arguments):
+                output = io.StringIO()
+                with (common[0], common[1], common[2], common[3], common[4], common[5],
+                      patch(target, return_value=result) as call, redirect_stdout(output)):
+                    self.assertEqual(main(arguments), 0)
+                self.assertIs(call.call_args.kwargs["tfz_override"], True)
+                self.assertIn(warning, output.getvalue())
+                # Without the flag nothing is overridden.
+                with (common[0], common[1], common[2], common[3], common[4], common[5],
+                      patch(target, return_value=result) as call, redirect_stdout(io.StringIO())):
+                    main(arguments[:-1])
+                self.assertIs(call.call_args.kwargs["tfz_override"], False)
+
+        # Without --metal the flag is refused, like the other metal-search options.
+        error = io.StringIO()
+        with redirect_stderr(error):
+            self.assertEqual(main(["autosol", "run_001", "--tfz-override"]), 2)
+        self.assertIn("--tfz-override", error.getvalue())
 
     def test_autosol_command(self):
         parser = build_parser()
