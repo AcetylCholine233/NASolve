@@ -158,7 +158,15 @@ entries are reconstructed from repository history.
     exclusions kept); outputs named `final_001`. The edited copy
     (`final_input.eff`, with a header) and the metal settings
     (`autofdp_final.params`) are written beside the outputs; the .eff
-    itself is never changed. New line-preserving PHIL scanner
+    itself is never changed. Extra PHIL files the .eff loads are checked:
+    a refinement job's full parameter file is left out (phenix.refine's
+    output .eff names the GUI's `refine_NN.eff`, which brought the old
+    model back: "Wrong number of models of each type supplied", PdUHgPdU
+    AutoFDP run_011), with its `default_phil`; another file that sets
+    anomalous groups, a model, `group_anomalous` or the output name is
+    replaced by an edited copy in `final_round/phil_files/`
+    (`edits.removed_phil_files`, `removed_default_phil`,
+    `copied_phil_files`; `FinalEff.job_phil_files`). New line-preserving PHIL scanner
     `nasolve.phil_text` makes these edits without touching any other line.
     Preflight: the .eff must be a phenix.refine parameter file naming a
     reflection file, and every file it names must exist; another

@@ -2171,6 +2171,7 @@ class FinalEff:
     anomalous_groups: tuple[str, ...]      # its anomalous groups: replaced
     occupancy_exclusions: tuple[str, ...]  # its occupancies.remove_selection: kept
     warnings: tuple[str, ...]
+    job_phil_files: tuple[str, ...] = ()   # phil_files that are a job's own parameters: left out
 
 
 def _assigned(items: Sequence[phil_text.PhilItem], path: str) -> list[str]:
@@ -2198,6 +2199,29 @@ def _xray_model_scopes(items: Sequence[phil_text.PhilItem]) -> list[tuple[phil_t
         files = _assigned(contents, "data_manager.model.file")
         found.append((scope, files[0] if files else None))
     return found
+
+
+#: What the final round controls; a phil file the .eff loads must not set it.
+_CONTROLLED_SCOPES = ("refinement.refine.anomalous_scatterers", "data_manager.model")
+_CONTROLLED_ASSIGNMENTS = ("data_manager.default_model", "output.prefix", "output.serial")
+
+
+def _read_phil(name: str) -> tuple[str, list[phil_text.PhilItem]] | None:
+    try:
+        text = Path(name).expanduser().read_text(encoding="utf-8")
+        return text, phil_text.scan(text)
+    except (OSError, UnicodeDecodeError, phil_text.PhilSyntaxError):
+        return None
+
+
+def _job_parameters(items: Sequence[phil_text.PhilItem]) -> bool:
+    """A refinement job's full parameter file: it names a model or data.
+
+    phenix.refine's output .eff lists the GUI's ``refine_NN.eff`` it ran
+    with among ``phil_files``; the output .eff already holds those settings.
+    """
+    return any(item.path.startswith(("data_manager.model", "data_manager.miller_array"))
+               for item in items)
 
 
 def _same_file(first: str | Path, second: Path) -> bool:
@@ -2240,6 +2264,11 @@ def read_final_eff(path: Path, mtz: Path | None = None) -> FinalEff:
         raise AutoFDPError("--final-eff refers to files that do not exist: " + "; ".join(missing))
     strategies = [phil_text.starred(item.value) for item in items
                   if item.kind == "assign" and item.path == "refinement.refine.strategy"]
+    job_phils = []
+    for name in phils:
+        parsed = _read_phil(name)
+        if not _same_file(name, path) and parsed is not None and _job_parameters(parsed[1]):
+            job_phils.append(name)
     warnings = []
     if mtz is not None and not any(_same_file(name, mtz) for name in reflections):
         warnings.append(
@@ -2257,6 +2286,7 @@ def read_final_eff(path: Path, mtz: Path | None = None) -> FinalEff:
         anomalous_groups=tuple(_assigned(items, "refinement.refine.anomalous_scatterers.group.selection")),
         occupancy_exclusions=tuple(_assigned(items, "refinement.refine.occupancies.remove_selection")),
         warnings=tuple(warnings),
+        job_phil_files=tuple(job_phils),
     )
 
 
@@ -2310,8 +2340,14 @@ def write_final_inputs(
     ``final_input.eff`` is the manual .eff with only these changes: its
     refinement model and ``default_model`` are removed (AutoFDP's model is
     given on the command line), its anomalous-scatterer groups are removed,
-    ``group_anomalous`` is unselected in the strategy, and a ``phil_files``
-    entry pointing back at the .eff itself is dropped. ``autofdp_final.params``
+    ``group_anomalous`` is unselected in the strategy. Among the extra PHIL
+    files it loads (``data_manager.phil_files``), one pointing back at the
+    .eff itself or at a job's full parameter file (phenix.refine's output
+    .eff names the GUI's ``refine_NN.eff``, which has the model and the
+    anomalous groups again) is left out, with a ``default_phil`` pointing at
+    it; another one that sets anomalous groups, a model, ``group_anomalous``
+    or the output name is replaced by an edited copy in ``phil_files/``.
+    Those files themselves are never changed. ``autofdp_final.params``
     adds, for every site, an anomalous group with f' and f'' fixed at the
     given values (``refine = None``) and an occupancies.remove_selection
     (occupancy held), and names the outputs ``final_001``.
@@ -2322,13 +2358,61 @@ def write_final_inputs(
     defaults = [item for item in items if item.kind == "assign" and item.path == "data_manager.default_model"]
     groups = [item for item in items
               if item.kind == "scope" and item.path == "refinement.refine.anomalous_scatterers"]
-    self_references = [
-        item for item in items
-        if item.kind == "assign" and item.path == "data_manager.phil_files"
-        and phil_text.unquote(item.value) and _same_file(phil_text.unquote(item.value), final_eff.source)
-    ]
-    remove += defaults + groups + self_references
+    remove += defaults + groups
     replace = {}
+    removed_phils: list[str] = []
+    copied_phils: list[dict[str, object]] = []
+    phil_items = [item for item in items if item.kind == "assign" and item.path == "data_manager.phil_files"]
+    for index, item in enumerate(phil_items, start=1):
+        name = phil_text.unquote(item.value)
+        if not name:
+            continue
+        parsed = _read_phil(name)
+        if _same_file(name, final_eff.source) or (parsed is not None and _job_parameters(parsed[1])):
+            remove.append(item)
+            removed_phils.append(name)
+            continue
+        if parsed is None:
+            continue
+        other_text, other_items = parsed
+        conflicts = [
+            other for other in other_items
+            if (other.kind == "scope" and other.path in _CONTROLLED_SCOPES)
+            or (other.kind == "assign" and other.path in _CONTROLLED_ASSIGNMENTS)
+        ]
+        strategy_fix = {
+            other: re.sub(r"\*group_anomalous\b", "group_anomalous", other_text[other.start:other.end])
+            for other in other_items
+            if other.kind == "assign" and other.path == "refinement.refine.strategy"
+            and "group_anomalous" in phil_text.starred(other.value)
+        }
+        if not conflicts and not strategy_fix:
+            continue
+        copy = directory / "phil_files" / f"{index:02d}_{Path(name).name}"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(
+            f"# NASolve AutoFDP final round: copy of {name}\n"
+            "# Changed: anomalous groups, model and output name removed, group_anomalous\n"
+            "# unselected (the final round sets them). Everything else is unchanged.\n"
+            + phil_text.edit(other_text, conflicts, strategy_fix),
+            encoding="utf-8",
+        )
+        line = final_eff.text[item.start:item.end]
+        indent = line[:len(line) - len(line.lstrip())]
+        replace[item] = f"{indent}phil_files = {_phil_string(str(copy))}" + ("\n" if line.endswith("\n") else "")
+        copied_phils.append({
+            "original": name,
+            "copy": str(copy),
+            "removed": sorted({other.path for other in conflicts}
+                              | ({"group_anomalous in strategy"} if strategy_fix else set())),
+        })
+    default_phils = [
+        item for item in items
+        if item.kind == "assign" and item.path == "data_manager.default_phil"
+        and phil_text.unquote(item.value)
+        and any(_same_file(phil_text.unquote(item.value), Path(name)) for name in removed_phils)
+    ]
+    remove += default_phils
     strategy_after = list(final_eff.strategy)
     for item in items:
         if item.kind == "assign" and item.path == "refinement.refine.strategy" \
@@ -2343,7 +2427,9 @@ def write_final_inputs(
         f"# (sha256 {file_sha256(final_eff.source)}). Changed: its model and its anomalous\n"
         "# scatterer groups removed (AutoFDP's model is given on the command line and\n"
         "# autofdp_final.params holds the groups, f' and f'' fixed), group_anomalous\n"
-        "# unselected in the strategy. Everything else is as in the original.\n"
+        "# unselected in the strategy, and extra PHIL files that would set them again\n"
+        "# left out or replaced by edited copies (phil_files/). Everything else is as\n"
+        "# in the original.\n"
     )
     directory.mkdir(parents=True, exist_ok=True)
     eff_path = directory / "final_input.eff"
@@ -2376,7 +2462,9 @@ def write_final_inputs(
         "removed_models": [name for _, name in models if name],
         "removed_default_model": bool(defaults),
         "removed_anomalous_groups": list(final_eff.anomalous_groups),
-        "removed_phil_files": [phil_text.unquote(item.value) for item in self_references],
+        "removed_phil_files": removed_phils,
+        "removed_default_phil": bool(default_phils),
+        "copied_phil_files": copied_phils,
         "strategy_before": list(final_eff.strategy),
         "strategy_after": strategy_after,
         "occupancy_exclusions_kept": list(final_eff.occupancy_exclusions),

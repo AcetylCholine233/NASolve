@@ -126,6 +126,16 @@ def make_final_refine(root: Path, fdp: float = 2.6, *, final: str = "ok") -> Pat
         "args = sys.argv[1:]\n"
         "is_final = any(a.endswith('final_input.eff') for a in args)\n"
         f"mode = {final!r}\n"
+        "if is_final:\n"
+        "    eff = next(Path(a) for a in args if a.endswith('final_input.eff')).read_text()\n"
+        "    loaded = [Path(m) for m in re.findall(r'phil_files = \"(.*?)\"', eff)]\n"
+        "    texts = [eff, *(path.read_text() for path in loaded)]\n"
+        "    if sum(text.count('  model {') for text in texts) > 0:\n"
+        "        print('Sorry: Wrong number of models of each type supplied.')\n"
+        "        raise SystemExit(1)\n"
+        "    if any('anomalous_scatterers' in text for text in texts[1:]):\n"
+        "        print('Sorry: an atom is in more than one anomalous group')\n"
+        "        raise SystemExit(1)\n"
         "if '--dry_run' in args:\n"
         "    if is_final and mode == 'refuse':\n"
         "        print('Sorry: invalid selection')\n"
@@ -339,6 +349,64 @@ class FinalRoundTests(unittest.TestCase):
             self.assertEqual(entry["sites"][0]["f_double_prime"], 2.6)
             self.assertIn("sha256", entry["eff_source"])
             self.assertIn("Final round (final_round, settings of", result.log_path.read_text())
+
+    def test_job_output_eff_that_names_the_gui_eff(self):
+        # Refine_85/PdUPdU-Hg_refine_085.eff (written by phenix.refine) names the
+        # GUI's .phenix/project_data/refine_85.eff in phil_files and default_phil;
+        # that file has the model, the anomalous groups and the output name.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, mtz = make_inputs(root)
+            gui_eff = write_manual_eff(root, model, mtz)
+            gui_copy = root / "project_data" / "refine_85.eff"
+            gui_copy.write_text(gui_eff.read_text())
+            anomalous_phil = root / "restraints" / "narestraints_anomalous.phil"
+            anomalous_phil.write_text(
+                "refinement {\n  refine {\n"
+                "    strategy = *individual_sites *individual_adp *group_anomalous\n"
+                "    anomalous_scatterers {\n      group {\n        selection = chain B resid 101\n"
+                "      }\n    }\n  }\n"
+                "  pdb_interpretation {\n    secondary_structure {\n      enabled = True\n    }\n  }\n}\n"
+            )
+            text = gui_eff.read_text().replace(
+                "  default_phil = None\n",
+                f'  phil_files = "{gui_copy}"\n  phil_files = "{anomalous_phil}"\n'
+                f'  default_phil = "{gui_copy}"\n',
+            )
+            output_eff = root / "Refine_85" / "PdUPdU-Hg_refine_085.eff"
+            output_eff.parent.mkdir()
+            output_eff.write_text(text)
+            manual = read_final_eff(output_eff, mtz)
+            self.assertEqual(manual.job_phil_files, (str(gui_copy),))
+            plan_out = io.StringIO()
+            with contextlib.redirect_stdout(plan_out):
+                from nasolve.cli import _print_autofdp_plan
+                _print_autofdp_plan(_plan(root, model, mtz, refine=make_final_refine(root),
+                                          final_eff=output_eff))
+            self.assertIn(f"left out: {gui_copy} (a refinement job's own parameters, already in the .eff)",
+                          plan_out.getvalue())
+            refine = make_final_refine(root)
+            result = _execute(_plan(root, model, mtz, refine=refine, final_eff=output_eff), root,
+                              refine=refine)
+            self.assertEqual(result.status, STATUS_CONVERGED, result.message)
+            self.assertEqual(result.final.status, STATUS_FINAL_DONE)
+            written = (result.run_directory / "final_round" / "final_input.eff").read_text()
+            names = [unquote(item.value) for item in scan(written) if item.path == "data_manager.phil_files"]
+            copy = result.run_directory / "final_round" / "phil_files" / "03_narestraints_anomalous.phil"
+            self.assertEqual(names, [str(root / "restraints" / "pairs.phil"), str(copy)])
+            self.assertNotIn("default_phil", [item.path.split(".")[-1] for item in scan(written)])
+            copied = copy.read_text()
+            self.assertNotIn("anomalous_scatterers", copied)
+            self.assertIn("*individual_adp group_anomalous\n", copied)
+            self.assertIn("enabled = True", copied)
+            edits = result.final.edits
+            self.assertEqual(edits["removed_phil_files"], [str(gui_copy)])
+            self.assertTrue(edits["removed_default_phil"])
+            self.assertEqual(edits["copied_phil_files"], [{
+                "original": str(anomalous_phil), "copy": str(copy),
+                "removed": ["group_anomalous in strategy", "refinement.refine.anomalous_scatterers"],
+            }])
+            self.assertEqual(anomalous_phil.read_text().count("anomalous_scatterers"), 1)  # untouched
 
     def test_no_final_round_without_convergence_or_without_an_eff(self):
         with tempfile.TemporaryDirectory() as directory:

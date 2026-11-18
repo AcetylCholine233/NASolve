@@ -1694,7 +1694,9 @@ def _print_autofdp_plan(plan) -> None:
         print("  reflections: " + ", ".join(manual.reflection_files))
         if manual.restraint_files:
             print("  restraints: " + ", ".join(manual.restraint_files))
-        print(f"  extra parameter files: {len(manual.phil_files)}")
+        print(f"  extra parameter files: {len(manual.phil_files) - len(manual.job_phil_files)}")
+        for name in manual.job_phil_files:
+            print(f"  left out: {name} (a refinement job's own parameters, already in the .eff)")
         print("  strategy: " + (" ".join(manual.strategy) or "as phenix.refine's default")
               + ("  (group_anomalous will be unselected)" if "group_anomalous" in manual.strategy else ""))
         if manual.anomalous_groups:

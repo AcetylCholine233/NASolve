@@ -351,6 +351,17 @@ need it:
   the calibrated value; the .eff's own `remove_selection` entries are kept.
 - **Outputs:** named `final_001` (`output.prefix`/`serial`), in the
   `final_round/` folder.
+- **Extra PHIL files** the .eff loads (`data_manager.phil_files`): one that is
+  a refinement job's full parameter file is left out, with a `default_phil`
+  pointing at it. phenix.refine's output .eff (`Refine_NN/..._NNN.eff`) names
+  the GUI's `.phenix/project_data/refine_NN.eff` this way, and that file has
+  the model, the anomalous groups and the output name again ("Wrong number of
+  models of each type supplied", PdUHgPdU run_011); the output .eff already
+  holds its settings. Another loaded file that sets anomalous groups, a
+  model, `group_anomalous` or the output name is replaced by an edited copy
+  in `final_round/phil_files/`. Restraint files (secondary structure,
+  NARestraints pairs, custom bonds) are loaded unchanged. Either .eff works:
+  the GUI's `refine_NN.eff` or the job's output .eff.
 
 Everything else (reflection file and labels, restraint dictionaries, extra
 PHIL files such as NARestraints restraints, strategy, weights, cycles, maps)
