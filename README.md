@@ -176,8 +176,8 @@ site that AutoSol placed next to a symmetry copy instead of the model is
 flagged before you refine. The newest merge is selected in the run's
 `report.json["metal_merge"]`, and PostMR then starts from it: the metal ion is
 carried through mutation and ReadySet, and NARestraints recognises the
-metal-mediated pair and writes no base-pair or stacking restraints for its two
-bases. Use `./nasolve postmr "$RUN" --original-model` to start from the plain
+metal-mediated pair and writes no base-pair restraints for its two bases; each
+base is still stacked on its neighbours in the strand. Use `./nasolve postmr "$RUN" --original-model` to start from the plain
 Phaser model instead. Merge before running PostMR; a run that already has
 PostMR keeps it. Finding no site is a normal result and usually means the ion
 is not incorporated. Nothing is merged unless you choose to, and the run's

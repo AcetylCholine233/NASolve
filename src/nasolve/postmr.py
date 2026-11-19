@@ -80,6 +80,22 @@ class PostMRResult:
     overwritten: tuple[str, ...] = ()   # --force-overwrite: folders deleted first
 
 
+def _stacking_options(builder) -> dict[str, bool]:
+    """NARestraints options for stacking: keep it for bases in metal-mediated pairs.
+
+    Their base-pair restraints are left out, but each base still stacks on its
+    chain neighbours (user, 2026-11-19). NARestraints without metal-pair
+    detection has no such option and leaves no base out.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(builder.build_phil_from_pdb).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"keep_metal_pair_stacking": True} if "keep_metal_pair_stacking" in parameters else {}
+
+
 def describe_narestraints(record: Mapping[str, object]) -> str:
     """One line on the base-pair and stacking restraints PostMR made."""
     mode = record.get("mode")
@@ -94,7 +110,8 @@ def describe_narestraints(record: Mapping[str, object]) -> str:
         metal = record.get("metal_mediated_pairs") or []
         text = f"NARestraints: {pairs} (guessed from the model) and stacking"
         if metal:
-            text += f"; {len(metal)} metal-mediated pair{'s' if len(metal) != 1 else ''} not restrained"
+            text += (f"; {len(metal)} metal-mediated pair{'s' if len(metal) != 1 else ''} "
+                     "not restrained (stacking kept)")
         return text
     return "NARestraints: not run; no base-pair or stacking restraints"
 
@@ -1249,6 +1266,7 @@ def _default_narestraints_builder(
             read_base_pair_file(pairs),
             output,
             include_stacking=True,
+            **_stacking_options(builder),
         )
     finally:
         builder.load_residue_records = original_loader
@@ -1379,6 +1397,7 @@ def _default_guessed_pair_restraints_builder(
             read_base_pair_file(pair_output),
             restraint_output,
             include_stacking=True,
+            **_stacking_options(builder),
         )
     finally:
         builder.load_residue_records = original_builder_loader
@@ -1387,6 +1406,7 @@ def _default_guessed_pair_restraints_builder(
         "mode": "guessed-pairs",
         "allow_noncanonical_guessing": False,
         "include_stacking": True,
+        "metal_pair_stacking": "kept",
         "guesser_warnings": list(warnings),
         "guessed_pair_count": len(candidates),
         "retained_pair_count": len(candidates),
@@ -2074,13 +2094,15 @@ def prepare_postmr(
             "pair_file": str(pair_file),
             "restraint_file": str(narestraints),
             "include_stacking": True,
+            "metal_pair_stacking": "kept",
 
             "secondary_structure_file": str(secondary),
         })
         restraint_paths.extend([narestraints, secondary])
     elif not no_narestraints:
         # No frame: every pair NARestraints guesses, plus stacking, with its own
-        # defaults (canonical pairs; metal-mediated pairs found and left out).
+        # defaults (canonical pairs; metal-mediated pairs found and not
+        # restrained as pairs, their bases still stacked).
         _rewrite_codes(prepared, compatibility, compatibility_codes)
         pair_file = restraints_dir / "guessed_pairs.txt"
         narestraints = restraints_dir / "narestraints_guessed_pairs.phil"

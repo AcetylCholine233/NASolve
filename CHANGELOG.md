@@ -70,6 +70,19 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- PostMR keeps the bases of metal-mediated pairs stacked on their chain
+  neighbours (user's request, 2026-11-19): NARestraints still writes no
+  base-pair restraints for such a pair, but each base keeps its stacking
+  restraints (`keep_metal_pair_stacking=True` passed in frame-template and
+  guessed-pairs mode when NARestraints has the option; recorded as
+  `narestraints.metal_pair_stacking = "kept"`; the PostMR summary says
+  "(stacking kept)"). Before, NARestraints left those bases unstacked and
+  stacked nothing across them: in Y-T nasolve run_002 (Ag between A:12 DYI
+  N2T and B:4 DT O4) A:11-A:12, A:12-A:13, B:3-B:4 and B:4-B:5 had no
+  stacking; with this change the real PostMR model gets all four (A:12's as
+  parallelity edits). NARestraints fork `feature/anomalous-scatterers`
+  b6993e9 makes the same the default there. Runs already prepared keep their
+  restraints; rerun PostMR (`--force-overwrite`) to get it.
 - DYI dictionary: one base plane over both rings (user's request,
   2026-11-19). dC's base plane and the triazole plane are merged into `plan-1`
   (17 atoms: both rings, C1', O2, the ring hydrogens; e.s.d. 0.020 A), so

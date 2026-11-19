@@ -265,7 +265,9 @@ map, output, or GUI settings.
 Without a frame and without `--modified-pairs-only`, PostMR runs NARestraints
 in `guessed-pairs` mode (`--no-narestraints` skips it): `guesser.guess_pairs_detailed`
 with its defaults (canonical only, metal-mediated pairs detected and excluded),
-`write_guess` (metal pairs as comments) and `build_phil_from_pdb` with stacking.
+`write_guess` (metal pairs as comments) and `build_phil_from_pdb` with stacking,
+which keeps the bases of metal-mediated pairs stacked on their neighbours
+(`keep_metal_pair_stacking`; the frame-template builder passes it too).
 Every guessed pair is restrained; the report records the candidates, warnings
 and metal-mediated pairs.
 

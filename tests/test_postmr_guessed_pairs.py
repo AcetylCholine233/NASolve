@@ -67,7 +67,7 @@ class GuessedPairWiringTests(unittest.TestCase):
             # What AutoRefine gives phenix.refine.
             self.assertIn(phil.resolve(), [path.resolve() for path in _initial_restraints(postmr, run)])
             summary = "NARestraints: 1 base pair (guessed from the model) and stacking; " \
-                      "1 metal-mediated pair not restrained"
+                      "1 metal-mediated pair not restrained (stacking kept)"
             self.assertEqual(result.narestraints_summary, summary)
             self.assertIn(summary, (result.postmr_directory / "postmr.log").read_text())
 
@@ -130,6 +130,37 @@ class GuessedPairNARestraintsTests(unittest.TestCase):
             self.assertEqual(len(record["metal_mediated_pairs"]), 1)
             self.assertIn("via AG B:101", record["metal_mediated_pairs"][0])
             self.assertIn("# Metal-mediated pair", (root / "pairs.txt").read_text())
+
+    def test_metal_mediated_bases_stay_stacked_on_their_neighbours(self):
+        """Their base-pair restraints are left out, their stacking is not
+        (user, 2026-11-19): B:4 DU, bridged to A:12 DC by Ag B:101, still
+        stacks on B:3 DA, in guessed-pairs and frame-template mode."""
+        import re
+
+        from nasolve.postmr import (
+            _default_guessed_pair_restraints_builder,
+            _default_narestraints_builder,
+        )
+
+        def stacks(text):
+            return re.findall(r"base1 = chain (\S+) and resid (\S+)\s+"
+                              r"base2 = chain (\S+) and resid (\S+)", text)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "bridged.pdb"
+            model.write_text(bridged_model_text())
+            record = _default_guessed_pair_restraints_builder(model, root / "pairs.txt", root / "na.phil")
+            self.assertEqual(record["retained_pairs"], [])
+            self.assertIn(("B", "3", "B", "4"), stacks((root / "na.phil").read_text()))
+            self.assertEqual(record["metal_pair_stacking"], "kept")
+
+            pairs = root / "frame_pairs.txt"
+            pairs.write_text("A 12\nB 4\n")   # the frame lists the bridged pair
+            _default_narestraints_builder(model, pairs, root / "frame.phil")
+            frame = (root / "frame.phil").read_text()
+            self.assertIn(("B", "3", "B", "4"), stacks(frame))
+            self.assertNotIn("distance_ideal", frame)   # still no pair restraints
 
 
 if __name__ == "__main__":
