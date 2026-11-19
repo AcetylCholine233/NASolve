@@ -407,6 +407,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="(later step, not used yet) B change when the difference map calls for B instead of occupancy (default: 20)",
     )
     autofdp.add_argument(
+        "--nudge", type=float, metavar="Q",
+        help="start the metal site at its occupancy in the model (AutoRefine's) minus Q, "
+             "e.g. 0.1 (negative raises it; two decimals, within --occupancy-floor and 1). "
+             "One site for now: the model's only metal site, or the one --site names",
+    )
+    autofdp.add_argument(
         "--occupancy-floor", type=float, default=0.05, metavar="Q",
         help="lowest occupancy AutoFDP sets; a site whose f'' is still below theory "
              "there goes to review (default: 0.05)",
@@ -1757,9 +1763,11 @@ def _print_autofdp_plan(plan) -> None:
     print(f"  Theory: {theory}")
     print("\nAutoFDP step 1: metal B factors from neighbouring nucleotides")
     for site in plan.b_start.sites:
+        occupancy = f"{site.occupancy:.2f}" if site.nudge is None else (
+            f"{site.occupancy:.2f} -> {site.occupancy_start:.2f} (--nudge {site.nudge:g})")
         print(
             f"  {site.site} {site.atom_name} ({site.element}), occupancy "
-            f"{site.occupancy:.2f}: B {site.b_before:.2f} -> {site.b_after:.2f}"
+            f"{occupancy}: B {site.b_before:.2f} -> {site.b_after:.2f}"
         )
         if site.neighbour_b is not None:
             print(f"    {site.neighbour_b.method}:")
@@ -2031,6 +2039,7 @@ def _autofdp(args: argparse.Namespace) -> int:
             sites=tuple(args.site), b_start=b_start, theory_overrides=theory,
             wavelength=args.wavelength, restraints=tuple(args.cif),
             output_root=args.output, final_eff=final_eff, source=source,
+            nudge=args.nudge, occupancy_floor=args.occupancy_floor,
             environment=phenix.environment,
         )
         _print_autofdp_plan(plan)

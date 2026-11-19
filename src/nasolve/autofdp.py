@@ -341,6 +341,8 @@ class BStartSite:
     b_after: float
     b_source: str         # "surrounding", "model" or "value"
     neighbour_b: NeighbourB | None
+    occupancy_start: float | None = None   # written to start_model.pdb
+    nudge: float | None = None             # --nudge: occupancy_start = occupancy - nudge
 
 
 @dataclass(frozen=True)
@@ -521,12 +523,46 @@ def checked_model(path: Path) -> Path:
     return model
 
 
+def nudge_targets(sites: Sequence[BStartSite]) -> list[BStartSite]:
+    """The metal sites ``--nudge`` applies to.
+
+    For now one site: the model's only metal site, or the one ``--site``
+    names. A selection of several atoms can replace this later.
+    """
+    if len(sites) != 1:
+        raise AutoFDPError(
+            "--nudge sets the starting occupancy of one metal site for now; this model has "
+            f"{len(sites)} ({', '.join(site.site for site in sites)}): name it with --site"
+        )
+    return list(sites)
+
+
+def _nudged(site: BStartSite, nudge: float, occupancy_floor: float) -> BStartSite:
+    """The site starting at its model occupancy minus ``nudge`` (two decimals,
+    as the PDB occupancy column holds), within [occupancy_floor, 1]."""
+    start = round(site.occupancy - nudge, 2)
+    if start > 1:
+        raise AutoFDPError(
+            f"--nudge {nudge:g} would start {site.site} {site.atom_name} at occupancy "
+            f"{start:.2f}, above 1 (its occupancy is {site.occupancy:.2f})"
+        )
+    if start < occupancy_floor:
+        raise AutoFDPError(
+            f"--nudge {nudge:g} would start {site.site} {site.atom_name} at occupancy "
+            f"{start:.2f}, below the occupancy floor {occupancy_floor:g} (its occupancy is "
+            f"{site.occupancy:.2f})"
+        )
+    return replace(site, occupancy_start=start, nudge=nudge)
+
+
 def prepare_start_model(
     model: Path,
     *,
     sites: Sequence[str] = (),
     b_start: str | float = "surrounding",
     output_directory: Path | None = None,
+    nudge: float | None = None,
+    occupancy_floor: float = 0.05,
 ) -> BStart:
     """AutoFDP step 1: find the metal sites and set their B.
 
@@ -540,10 +576,17 @@ def prepare_start_model(
     - ``"model"``: unchanged;
     - a number: that B factor.
 
+    With ``nudge`` (``--nudge``), the site :func:`nudge_targets` picks starts
+    at its occupancy in the model (AutoRefine's) minus ``nudge``; the result
+    must lie within [``occupancy_floor``, 1].
+
     Without ``output_directory`` nothing is written (the plan). With it, the
     model is copied unchanged to ``source_model.pdb`` and, with only the B
-    column of the metal lines changed, to ``start_model.pdb``.
+    (and, with ``nudge``, occupancy) columns of the metal lines changed, to
+    ``start_model.pdb``.
     """
+    if nudge is not None and (isinstance(nudge, bool) or not math.isfinite(nudge)):
+        raise AutoFDPError("--nudge must be a number")
     model = checked_model(model)
     b_mode = parse_b_start(b_start)
     found, warnings = _metal_sites(model, sites)
@@ -589,7 +632,12 @@ def prepare_start_model(
             b_after=b_after,
             b_source=source,
             neighbour_b=neighbour_b,
+            occupancy_start=_occupancy(line, line_number),
         ))
+    if nudge is not None:
+        targets = {id(site) for site in nudge_targets(prepared)}
+        prepared = [_nudged(site, nudge, occupancy_floor) if id(site) in targets else site
+                    for site in prepared]
     result = BStart(model=model, sites=tuple(prepared), warnings=tuple(warnings))
     if output_directory is None:
         return result
@@ -601,10 +649,20 @@ def prepare_start_model(
         raise AutoFDPError("The copy of the starting model does not match its source")
     edited = list(lines)
     for site in prepared:
-        edited[site.line_number - 1] = _set_b_factor(lines[site.line_number - 1], site.b_after)
+        line = _set_b_factor(lines[site.line_number - 1], site.b_after)
+        if site.nudge is not None:
+            line = _set_occupancy(line, site.occupancy_start)
+        edited[site.line_number - 1] = line
     start_model = output_directory / "start_model.pdb"
     start_model.write_text("".join(edited), encoding="utf-8", newline="")
     return replace(result, source_copy=source_copy, start_model=start_model)
+
+
+def _occupancy_text(site: BStartSite) -> str:
+    """``0.90``, or ``0.90 -> 0.80 (--nudge 0.1)``."""
+    if site.nudge is None:
+        return f"{site.occupancy:.2f}"
+    return f"{site.occupancy:.2f} -> {site.occupancy_start:.2f} (--nudge {site.nudge:g})"
 
 
 def _site_record(site: BStartSite) -> dict[str, object]:
@@ -1360,6 +1418,7 @@ class AutoFDPPlan:
     final_eff: "FinalEff | None" = None  # manual .eff for the final round
     source: "AutoRefineRound | None" = None   # the AutoRefine round started from
     warnings: tuple[str, ...] = ()
+    nudge: float | None = None           # --nudge (the start occupancy is in b_start)
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1453,8 @@ def plan_autofdp(
     output_root: Path | None = None,
     final_eff: Path | None = None,
     source: AutoRefineRound | None = None,
+    nudge: float | None = None,
+    occupancy_floor: float = 0.05,
     environment: Mapping[str, str] | None = None,
 ) -> AutoFDPPlan:
     """Preflight: check the inputs and return the plan, writing nothing.
@@ -1413,7 +1474,8 @@ def plan_autofdp(
     ):
         raise AutoFDPError("The model, MTZ and final .eff must be the AutoRefine round's")
     model = checked_model(model)
-    plan_b = prepare_start_model(model, sites=sites, b_start=b_start)
+    plan_b = prepare_start_model(model, sites=sites, b_start=b_start, nudge=nudge,
+                                 occupancy_floor=occupancy_floor)
     found, _ = _metal_sites(model, ())
     selections = tuple(
         _site_selection(str(candidate["site"]), str(candidate["atom_name"]),
@@ -1448,6 +1510,7 @@ def plan_autofdp(
         final_eff=manual,
         source=source,
         warnings=tuple(_round_label_warnings(source, reflections)) if source is not None else (),
+        nudge=nudge,
     )
 
 
@@ -1530,7 +1593,7 @@ def _log_lines(
     lines += ["", "Step 1 (B start)"]
     for site in b_start.sites:
         lines.append(
-            f"{site.site} {site.atom_name} ({site.element}): occupancy {site.occupancy:.2f}; "
+            f"{site.site} {site.atom_name} ({site.element}): occupancy {_occupancy_text(site)}; "
             f"B {site.b_before:.2f} -> {site.b_after:.2f} ({site.b_source})"
         )
         if site.neighbour_b is not None:
@@ -1754,9 +1817,17 @@ def execute_autofdp(
         raise AutoFDPError("--max-iterations must be a whole number of at least 0")
     if not (math.isfinite(occupancy_floor) and 0 < occupancy_floor < 1):
         raise AutoFDPError("--occupancy-floor must be above 0 and below 1")
+    for site in plan.b_start.sites:   # before the run folder exists
+        if site.nudge is not None and site.occupancy_start is not None and (
+                site.occupancy_start < occupancy_floor):
+            raise AutoFDPError(
+                f"{site.site} would start at occupancy {site.occupancy_start:.2f} (--nudge), "
+                f"below the occupancy floor {occupancy_floor:g}"
+            )
     run_directory = _next_run_directory(plan.output_root)
     written = prepare_start_model(
-        plan.model, sites=sites, b_start=b_start, output_directory=run_directory
+        plan.model, sites=sites, b_start=b_start, output_directory=run_directory,
+        nudge=plan.nudge, occupancy_floor=occupancy_floor,
     )
     assert written.start_model is not None and written.source_copy is not None
     reflections = plan.reflections
@@ -1785,6 +1856,7 @@ def execute_autofdp(
             "sites": list(sites), "b_start": b_start, "cycles": cycles, "tolerance": tolerance,
             "max_iterations": max_iterations, "occupancy_floor": occupancy_floor,
             "final_eff": str(plan.final_eff.source) if plan.final_eff else None,
+            "nudge": plan.nudge,
         },
         "theory": {element: dict(values) for element, values in plan.theory.items()},
         "b_start": {
@@ -2837,6 +2909,7 @@ __all__ = [
     "plan_autofdp",
     "prepare_start_model",
     "propose_occupancy",
+    "nudge_targets",
     "read_autorefine_round",
     "read_final_eff",
     "read_reflections",

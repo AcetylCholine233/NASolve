@@ -69,7 +69,7 @@ nasolve autofdp ROUND | MODEL.pdb DATA.mtz
                 [--element SITE=ELEMENT]... [--candidates ELEMENT[,ELEMENT...]]
                 [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
                 [--cycles N] [--b-start surrounding|model|VALUE] [--b-step A2]
-                [--occupancy-floor Q] [--map-sigma S]
+                [--nudge Q] [--occupancy-floor Q] [--map-sigma S]
                 [--no-confirm-b] [--final-eff MANUAL.eff] [--plan]
                 [--no-coot] [--coot PATH] [--phenix-root PATH]
 ```
@@ -101,6 +101,7 @@ The first also ends a converged run with a final round from
 | `--cycles` | 3 | phenix.refine macrocycles per f″ round |
 | `--b-start` | `surrounding` | site B at the start: mean of the neighbouring nucleotides, the model's own (`model`), or a number |
 | `--b-step` | 20 Å² *(to confirm)* | B change when the map says to adjust B instead of occupancy |
+| `--nudge` | none | start the metal site at its occupancy in the model (AutoRefine's) minus Q (negative raises it); within `--occupancy-floor` and 1. One site for now: the model's only metal site, or the one `--site` names |
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the separate B-only round (not used: the final round serves as the B confirmation for now) |
@@ -172,9 +173,17 @@ sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
    `--b-start model` keeps the model's B; a number sets that B. Only the
    B-factor columns (61-66) of the metal lines change. Occupancy, coordinates
    and every other atom are unchanged. The result is `run_NNN/start_model.pdb`.
+   With `--nudge Q` (user's request, 2026-11-19), the site also starts at its
+   occupancy in the model (AutoRefine's) minus Q, written with two decimals
+   in the occupancy columns (55-60); a negative Q raises it, and the result
+   must lie within `--occupancy-floor` and 1. For now one site is nudged
+   (`nudge_targets`): the model's only metal site, or the one `--site` names;
+   a model with several and no `--site` is refused. A selection of several
+   atoms may replace this later.
 6. **Record.** `report.json` and `autofdp.log` hold, for each site:
-   occupancy, B before and after, the neighbour rule used, and each
-   neighbour's residue, mean B, atom count and closest contact.
+   occupancy (and with `--nudge`, `occupancy_start` and `nudge`), B before
+   and after, the neighbour rule used, and each neighbour's residue, mean B,
+   atom count and closest contact; `settings.nudge` holds the option.
 
 `--plan` does steps 3-5 in memory and prints them, writing nothing. Each run
 gets a new `run_NNN` folder; nothing is overwritten.

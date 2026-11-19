@@ -10,6 +10,15 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autofdp --nudge Q` (user's request, 2026-11-19): the metal site
+  starts the f'' rounds at its occupancy in the model (AutoRefine's) minus Q
+  (two decimals; negative raises it; must stay within `--occupancy-floor` and
+  1, else refused before anything is written). One site for now
+  (`autofdp.nudge_targets`, to become a selection later): the model's only
+  metal site, or the one `--site` names. `start_model.pdb` gets the occupancy
+  (and B) change; `report.json` records `settings.nudge` and each site's
+  `occupancy_start` and `nudge`; the plan and `autofdp.log` show
+  "occupancy 0.90 -> 0.80 (--nudge 0.1)". phenix.refine simulated.
 - `nasolve postmr RUN --merged-model FILE`: start PostMR from a chosen model
   with merged metal sites instead of the newest merge (user's request,
   2026-11-19). FILE is a name in the run's `Phaser/` folder (e.g.
