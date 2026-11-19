@@ -6,6 +6,7 @@ from pathlib import Path
 
 from nasolve.automr import prepare_automr
 from nasolve.phaser import (
+    classify_phaser_record,
     TFZ_FLOOR,
     TFZ_THRESHOLD,
     PhaserExecutionError,
@@ -201,6 +202,24 @@ class PhaserExecutionTests(unittest.TestCase):
             (preflight.run_directory / "Phaser").mkdir()
             with self.assertRaisesRegex(PhaserExecutionError, "refusing to overwrite"):
                 execute_phaser(preflight.report_path, make_phaser(root))
+
+    def test_recorded_phaser_result_gives_the_same_status_and_message(self):
+        """A PostMR --force-overwrite rerun re-derives the Phaser result from the
+        report with the same gate (classify_phaser_record)."""
+        cases = {
+            "success": {"tfz": 8.4}, "review": {"tfz": 7.5}, "failed": {"tfz": 6.9},
+            "no tfz": {"tfz": None}, "no outputs": {"tfz": 8.4, "create_outputs": False},
+            "exit 1": {"tfz": 8.4, "return_code": 1},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, kwargs in cases.items():
+                with self.subTest(case=name):
+                    case = root / name.replace(" ", "_")
+                    preflight = self._preflight(case)
+                    result = execute_phaser(preflight.report_path, make_phaser(case, **kwargs))
+                    record = json.loads(result.report_path.read_text())["execution"]["phaser"]
+                    self.assertEqual(classify_phaser_record(record), (result.status, result.message))
 
     def test_parser_prefers_best_solu_set(self):
         text = "\n".join([

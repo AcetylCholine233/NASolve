@@ -990,6 +990,15 @@ After a run reaches `MR_SUCCESS`, prepare it for refinement with:
 ./nasolve postmr my_dataset/AutoMR/run_004
 ```
 
+PostMR runs once per AutoMR run. To redo it (other options, a new merge),
+`./nasolve postmr "$RUN" --force-overwrite` deletes the existing PostMR and
+everything made from it: AutoRefine rounds and checkpoints, AutoSol, Refine
+Doctor and their Coot views. It then runs PostMR again, so refinement
+starts over. This cannot be undone. The Phaser outputs, metal searches and
+metal merges are kept, the Phaser/TFZ gate is applied again (give
+`--tfz-override` again if it was needed), and the run report records what was
+deleted (`postmr_overwrites`).
+
 `MR_REVIEW` runs stop unless the user explicitly supplies
 `--allow-mr-review`. Failed MR runs cannot enter PostMR, with one exception:
 `--tfz-override` continues from a run whose only problem is a TFZ below 8.0

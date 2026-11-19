@@ -34,7 +34,12 @@ from .ligand_profiles import (
     normalize_ccp4_torsion_alternates,
     frozen_reference, validate_model_phosphate_policy, write_linked_profile,
 )
-from .phaser import TFZOverrideError, check_tfz_override, tfz_override_warning
+from .phaser import (
+    TFZOverrideError,
+    check_tfz_override,
+    classify_phaser_record,
+    tfz_override_warning,
+)
 from .run_context import artifact_reference, resolve_artifact_path
 from .sequence_reference import SequenceReferenceError
 from .sequence_family import (
@@ -72,6 +77,7 @@ class PostMRResult:
     anomalous_scatterer_phil: Path | None = None
     tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
     narestraints_summary: str = ""
+    overwritten: tuple[str, ...] = ()   # --force-overwrite: folders deleted first
 
 
 def describe_narestraints(record: Mapping[str, object]) -> str:
@@ -120,7 +126,16 @@ _REQUIRED_PARENT_ATOM_GROUPS = (
 )
 
 
-def _read_report(run_directory: Path) -> tuple[Path, dict[str, object]]:
+#: Stages after PostMR; a --force-overwrite rerun starts from the Phaser result again.
+_DOWNSTREAM_STAGES = {"postmr", "autosol", "autorefine", "refine-doctor"}
+#: Folders built from PostMR (deleted by --force-overwrite), relative to the AutoMR run.
+_DOWNSTREAM_FOLDERS = ("PostMR", "AutoSol", "AutoRefine", "RefineDoctor",
+                       "CootGUI/postmr", "CootGUI/autosol", "CootGUI/autorefine")
+#: Run-report records written by those stages.
+_DOWNSTREAM_RECORDS = ("postmr", "autosol", "autorefine", "refine_doctor")
+
+
+def _read_report(run_directory: Path, *, force_overwrite: bool = False) -> tuple[Path, dict[str, object]]:
     run = run_directory.expanduser().resolve()
     report_path = run if run.name == "report.json" else run / "report.json"
     run = report_path.parent
@@ -134,13 +149,71 @@ def _read_report(run_directory: Path) -> tuple[Path, dict[str, object]]:
         )
     if report.get("workflow") != "automr":
         raise PostMRPreparationError("PostMR requires a completed Phaser report")
-    if report.get("stage") == "postmr" and report.get("status") == "POSTMR_READY":
+    stage = report.get("stage")
+    if stage in _DOWNSTREAM_STAGES and not force_overwrite:
         raise PostMRPreparationError(
-            f"PostMR is already complete; refusing to overwrite {run / 'PostMR'}"
+            f"PostMR is already complete; refusing to overwrite {run / 'PostMR'} "
+            "(--force-overwrite deletes it and everything made from it, then reruns PostMR)"
         )
-    if report.get("stage") != "phaser":
+    if stage in _DOWNSTREAM_STAGES:
+        execution = report.get("execution")
+        record = execution.get("phaser") if isinstance(execution, Mapping) else None
+        if not isinstance(record, Mapping):
+            raise PostMRPreparationError("PostMR requires a completed Phaser report")
+        # Work from the Phaser result, as the first PostMR did.
+        status, message = _recorded_phaser_result(report, record)
+        report = {key: value for key, value in report.items() if key not in _DOWNSTREAM_RECORDS}
+        report.update(stage="phaser", status=status, message=message)
+        return run, report
+    if stage != "phaser":
         raise PostMRPreparationError("PostMR requires a completed Phaser report")
     return run, report
+
+
+def _recorded_phaser_result(
+    report: Mapping[str, object], record: Mapping[str, object],
+) -> tuple[str, str]:
+    """The Phaser status and message PostMR replaced with POSTMR_READY: saved as
+    ``phaser_result`` since this change, otherwise re-derived from the Phaser
+    record with AutoMR's own gate."""
+    saved = report.get("phaser_result")
+    if isinstance(saved, Mapping) and isinstance(saved.get("status"), str):
+        return str(saved["status"]), str(saved.get("message") or "")
+    return classify_phaser_record(record)
+
+
+def _delete_downstream(run: Path, report: dict[str, object], previous: Mapping[str, object]) -> list[str]:
+    """Delete what was built from the old PostMR and reset the run report to the
+    Phaser result, recording what was removed (``postmr_overwrites``)."""
+    removed: list[str] = []
+    for relative in _DOWNSTREAM_FOLDERS:
+        path = run / relative
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            if not path.resolve().is_relative_to(run.resolve()):
+                raise PostMRPreparationError(f"Refusing to delete {path}: it is outside the run")
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+        else:
+            continue
+        removed.append(relative)
+    history = list(previous.get("postmr_overwrites") or [])
+    previous_postmr = previous.get("postmr")
+    history.append({
+        "deleted_utc": datetime.now(timezone.utc).isoformat(),
+        "deleted": removed,
+        "previous_stage": previous.get("stage"),
+        "previous_status": previous.get("status"),
+        "previous_postmr_created_utc": (
+            previous_postmr.get("created_utc") if isinstance(previous_postmr, Mapping) else None
+        ),
+    })
+    report["postmr_overwrites"] = history   # carried into the new PostMR's report
+    report["updated_utc"] = history[-1]["deleted_utc"]
+    _write_json(run / "report.json", report)
+    return removed
 
 
 def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
@@ -1699,6 +1772,7 @@ def prepare_postmr(
     modified_pair_builder: Callable[[Path, Path, Path, Path], object] | None = None,
     guessed_pair_builder: Callable[[Path, Path, Path], object] | None = None,
     use_merged_model: bool = True,
+    force_overwrite: bool = False,
 ) -> PostMRResult:
     """Prepare a completed Phaser solution without modifying the MR outputs.
 
@@ -1710,8 +1784,18 @@ def prepare_postmr(
     guessed pairs that contain a modified nucleotide; a run without a frame
     otherwise gets every pair NARestraints guesses, plus stacking, as
     NARestraints does on its own (``no_narestraints`` skips that).
+
+    ``force_overwrite`` reruns PostMR on a run that already has one: after every
+    check has passed, it deletes the old PostMR and everything made from it
+    (AutoSol, AutoRefine rounds and checkpoints, Refine Doctor, their Coot
+    views), resets the run report to the Phaser result and records the
+    deletion in ``postmr_overwrites``. The Phaser outputs, metal searches and
+    metal merges are kept.
     """
-    run, report = _read_report(run_directory)
+    run, report = _read_report(run_directory, force_overwrite=force_overwrite)
+    previous_report = (
+        json.loads((run / "report.json").read_text(encoding="utf-8")) if force_overwrite else {}
+    )
     mr_status = report.get("status")
     frame_record = report.get("frame")
     if no_narestraints and (
@@ -1822,11 +1906,15 @@ def prepare_postmr(
         )
 
     postmr = run / "PostMR"
+    overwritten: list[str] = []
+    if force_overwrite:   # every check above has passed
+        overwritten = _delete_downstream(run, report, previous_report)
     try:
         postmr.mkdir()
     except FileExistsError as exc:
         raise PostMRPreparationError(
-            f"PostMR directory already exists; refusing to overwrite {postmr}"
+            f"PostMR directory already exists; refusing to overwrite {postmr} "
+            "(--force-overwrite deletes it and everything made from it)"
         ) from exc
     model_dir = postmr / "Model"
     coot_dir = postmr / "Coot"
@@ -2236,6 +2324,8 @@ def prepare_postmr(
         ]),
         encoding="utf-8",
     )
+    # Kept so a --force-overwrite rerun can apply the same Phaser gate.
+    report["phaser_result"] = {"status": mr_status, "message": report.get("message")}
     report["stage"] = "postmr"
     report["status"] = "POSTMR_READY"
     report["message"] = postmr_payload["message"]
@@ -2257,6 +2347,7 @@ def prepare_postmr(
         anomalous_scatterer_phil=metal_phil,
         tfz_override_record=tfz_override_record,
         narestraints_summary=describe_narestraints(narestraints_report),
+        overwritten=tuple(overwritten),
     )
 
 

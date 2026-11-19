@@ -202,6 +202,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="guess base pairs and restrain only pairs containing a modified nucleotide",
     )
     postmr.add_argument(
+        "--force-overwrite", action="store_true",
+        help=("rerun PostMR on a run that already has one: first DELETE its PostMR and "
+              "everything made from it (AutoRefine rounds and checkpoints, AutoSol, Refine "
+              "Doctor, their Coot views); cannot be undone. Phaser outputs, metal searches "
+              "and metal merges are kept"),
+    )
+    postmr.add_argument(
         "--no-narestraints", action="store_true",
         help=("runs without a frame: skip NARestraints (by default it guesses every "
               "base pair and restrains them and stacking)"),
@@ -936,6 +943,7 @@ def _postmr(args: argparse.Namespace) -> int:
             tfz_override=args.tfz_override,
             modified_pairs_only=args.modified_pairs_only,
             no_narestraints=args.no_narestraints,
+            force_overwrite=args.force_overwrite,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
             use_merged_model=not args.original_model,
         )
@@ -948,6 +956,9 @@ def _postmr(args: argparse.Namespace) -> int:
         print(f"PostMR preparation error: {exc}", file=sys.stderr)
         return 2
     print(f"{result.status}: {result.message}")
+    if result.overwritten:
+        print(_color("Deleted before rerunning (--force-overwrite): "
+                     + ", ".join(result.overwritten), "33"))
     if result.tfz_override_record is not None:
         print(_color(tfz_override_warning(result.tfz_override_record), "33"))
     print(f"Run directory: {result.run_directory}")

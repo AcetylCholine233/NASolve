@@ -10,6 +10,22 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve postmr RUN --force-overwrite`: rerun PostMR on an AutoMR run that
+  already has one (user's request and choice, 2026-11-19: delete and
+  restart). After every check has passed, it deletes `PostMR/`, `AutoSol/`,
+  `AutoRefine/` (rounds and checkpoints), `RefineDoctor/` and
+  `CootGUI/{postmr,autosol,autorefine}`, removes their run-report records,
+  resets the report to the Phaser result and runs PostMR again; refinement
+  starts a new history. Phaser outputs, metal searches and merges are kept.
+  The Phaser/TFZ gate is applied again (so a refused rerun deletes nothing).
+  Schema: the run report gains `phaser_result` (the Phaser status and message
+  PostMR replaces with POSTMR_READY; for older reports re-derived from
+  `execution.phaser`) and `postmr_overwrites` (what each overwrite deleted,
+  the previous stage, status and PostMR time). The AutoMR status logic is now
+  `phaser.classify_phaser_result` / `classify_phaser_record` (same rules and
+  messages). A rerun that fails leaves the run at its Phaser result. ReadySet
+  simulated in tests.
+
 - PostMR runs NARestraints on runs without a frame (nonstandard mode): its
   guesser finds the model's base pairs and PostMR restrains all of them, plus
   stacking, with NARestraints' defaults (canonical pairs; metal-mediated pairs

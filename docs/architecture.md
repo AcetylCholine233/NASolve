@@ -189,7 +189,16 @@ for review and exits 3; failure or missing output exits 4.
 
 PostMR is deliberately a separate command so an accepted Phaser result can be
 inspected and rerun deterministically before refinement. It refuses to
-overwrite an existing `PostMR/` directory. `MR_SUCCESS` is accepted;
+overwrite an existing `PostMR/` directory unless `--force-overwrite` is given.
+That option runs every PostMR check first (including the Phaser/TFZ gate, from
+the run report's `phaser_result`, or for older reports re-derived from
+`execution.phaser` with `phaser.classify_phaser_record`, the same function
+AutoMR uses), then deletes `PostMR/`, `AutoSol/`, `AutoRefine/` (rounds and
+checkpoints), `RefineDoctor/` and `CootGUI/{postmr,autosol,autorefine}`,
+removes their run-report records, resets the report to the Phaser result,
+appends the deletion to `postmr_overwrites`, and runs PostMR again. Phaser
+outputs, metal searches and metal merges are kept. A rerun that then fails
+leaves the run at its Phaser result. `MR_SUCCESS` is accepted;
 `MR_REVIEW` requires an explicit override; other statuses stop. The one
 exception is `--tfz-override`: a run that is `MR_REVIEW` or `MR_FAILED` only
 because of its TFZ (Phaser exit status 0, a reported TFZ, the requested

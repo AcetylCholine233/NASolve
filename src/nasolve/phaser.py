@@ -288,6 +288,54 @@ def parse_best_tfz(log_text: str) -> tuple[float | None, float | None]:
     return max(scored, key=lambda item: item[0]) if scored else (None, None)
 
 
+def classify_phaser_result(
+    *,
+    return_code: object,
+    requested_kind: object,
+    labin: object,
+    labin_echo: object,
+    used_kind: object,
+    tfz: float | None,
+    outputs_complete: bool,
+) -> tuple[str, str]:
+    """AutoMR's status and message for a Phaser run (the TFZ gate)."""
+    if return_code != 0:
+        return "MR_FAILED", f"Phaser exited with status {return_code}; inspect phaser.log"
+    if requested_kind is not None and used_kind is not None and used_kind != requested_kind:
+        return "MR_FAILED", (
+            f"{describe(str(requested_kind)).capitalize()} ({labin}) "
+            f"were requested but Phaser reported LABIN {labin_echo}; inspect phaser.log"
+        )
+    if tfz is None:
+        return "MR_FAILED", "Phaser did not report a TFZ; inspect phaser.log"
+    if tfz < TFZ_FLOOR:
+        return "MR_FAILED", f"Best TFZ {tfz:.2f} is below the {TFZ_FLOOR:.1f} acceptance floor"
+    if not outputs_complete:
+        return "MR_FAILED", (
+            "Phaser reported a candidate solution but did not produce both PDB and MTZ outputs"
+        )
+    if tfz < TFZ_THRESHOLD:
+        return "MR_REVIEW", f"Best TFZ {tfz:.2f} is a red flag and requires user review"
+    return "MR_SUCCESS", f"Best TFZ {tfz:.2f} passes the {TFZ_THRESHOLD:.1f} AutoMR threshold"
+
+
+def classify_phaser_record(record: Mapping[str, object]) -> tuple[str, str]:
+    """The same status and message, from a report's ``execution.phaser`` record."""
+    reflection = record.get("reflection_data")
+    reflection = reflection if isinstance(reflection, Mapping) else {}
+    tfz = record.get("best_tfz")
+    tfz = float(tfz) if isinstance(tfz, (int, float)) and not isinstance(tfz, bool) else None
+    return classify_phaser_result(
+        return_code=record.get("return_code"),
+        requested_kind=reflection.get("requested"),
+        labin=reflection.get("labin"),
+        labin_echo=reflection.get("phaser_reported_labin"),
+        used_kind=reflection.get("phaser_reported_kind"),
+        tfz=tfz,
+        outputs_complete=bool(record.get("solution_pdb")) and bool(record.get("solution_mtz")),
+    )
+
+
 def _solution_sort_key(path: Path) -> tuple[int, str]:
     match = re.search(r"\.(\d+)\.(?:pdb|mtz)$", path.name, re.I)
     return (int(match.group(1)) if match else 10**9, path.name.casefold())
@@ -369,11 +417,6 @@ def execute_phaser(
     labin_echo = reported_labin(output)
     used_kind = reported_data_kind(labin_echo)
     requested_kind = phaser_data.get("requested")
-    data_mismatch = (
-        requested_kind is not None
-        and used_kind is not None
-        and used_kind != requested_kind
-    )
     raw_pdb = _find_solution(phaser_directory, ".pdb")
     raw_mtz = _find_solution(phaser_directory, ".mtz")
     solution_pdb: Path | None = None
@@ -386,30 +429,15 @@ def execute_phaser(
         shutil.copyfile(raw_mtz, solution_mtz)
 
     outputs_complete = solution_pdb is not None and solution_mtz is not None
-    if return_code != 0:
-        status = "MR_FAILED"
-        message = f"Phaser exited with status {return_code}; inspect phaser.log"
-    elif data_mismatch:
-        status = "MR_FAILED"
-        message = (
-            f"{describe(str(requested_kind)).capitalize()} ({phaser_data.get('labin')}) "
-            f"were requested but Phaser reported LABIN {labin_echo}; inspect phaser.log"
-        )
-    elif tfz is None:
-        status = "MR_FAILED"
-        message = "Phaser did not report a TFZ; inspect phaser.log"
-    elif tfz < TFZ_FLOOR:
-        status = "MR_FAILED"
-        message = f"Best TFZ {tfz:.2f} is below the {TFZ_FLOOR:.1f} acceptance floor"
-    elif not outputs_complete:
-        status = "MR_FAILED"
-        message = "Phaser reported a candidate solution but did not produce both PDB and MTZ outputs"
-    elif tfz < TFZ_THRESHOLD:
-        status = "MR_REVIEW"
-        message = f"Best TFZ {tfz:.2f} is a red flag and requires user review"
-    else:
-        status = "MR_SUCCESS"
-        message = f"Best TFZ {tfz:.2f} passes the {TFZ_THRESHOLD:.1f} AutoMR threshold"
+    status, message = classify_phaser_result(
+        return_code=return_code,
+        requested_kind=requested_kind,
+        labin=phaser_data.get("labin"),
+        labin_echo=labin_echo,
+        used_kind=used_kind,
+        tfz=tfz,
+        outputs_complete=outputs_complete,
+    )
 
     previous_status = report.get("status")
     previous_message = report.get("message")
@@ -498,6 +526,8 @@ __all__ = [
     "TFZ_FLOOR",
     "TFZ_THRESHOLD",
     "build_phaser_eff",
+    "classify_phaser_record",
+    "classify_phaser_result",
     "execute_phaser",
     "frozen_phaser_data",
     "check_tfz_override",
