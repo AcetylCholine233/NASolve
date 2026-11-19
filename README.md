@@ -853,9 +853,14 @@ entries for `DC` (every shared atom, unchanged) and `TZF`
 (4-(1,2,4-triazol-1-yl)phenol: the triazole ring), with C4-N4 1.411 +/- 0.015 A.
 Like `1AP`'s, it is used for refinement in place of ReadySet's. ReadySet
 (Phenix 2.2.1 eLBOW) reads one component from each supplied dictionary file,
-and NASolve supplies one combined file; any other residue that is not in the
-CCD gets restraints built from the model ("from scratch") with no chirality
-restraints, as `DE` did beside `1AP`. A DYI that is already in the search
+so NASolve gives it one file per curated residue. (Before 2026-11-19 it gave
+one combined file: ReadySet then used only the first residue's dictionary,
+fetched the CCD entry or built "from scratch" restraints for the others, as
+for `DE` beside `1AP`, and crashed for `DYI` beside `DU`.) The wwPDB CCD now
+has its own `DYI`, an unrelated molybdopterin (released 2026), so a tool that
+looks `DYI` up in the CCD instead of using NASolve's dictionary gets the wrong
+molecule; wwPDB keeps `01`-`99`, `DRG`, `INH` and `LIG` free for such
+laboratory ligands. A DYI that is already in the search
 model must use these atom names: PostMR checks every curated residue it keeps
 from the starting model (names, and the dictionary's bonds) before it starts,
 because ReadySet crashes on mismatched names. NARestraints sees `DYI` as `C34` (N4-methyl-dC), an

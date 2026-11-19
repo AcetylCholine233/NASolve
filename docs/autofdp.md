@@ -195,9 +195,11 @@ model and an MTZ, the restraint dictionaries come from `phenix.ready_set` on
 `hydrogens=False`, `ligands=True`, `optimise_ligand_geometry=False`.
 
 - NASolve's curated dictionaries for curated residues in the model (C38, 5IU,
-  DU, DE, DF, S6G, 1AP) and any `--cif` files are given to ReadySet, combined
-  into `input_dictionaries.cif` (`ready_set.input.cif_file_name`). Two files
-  defining the same residue stop AutoFDP.
+  DU, DE, DF, S6G, 1AP, DYI) and any `--cif` files are given to ReadySet one
+  file per residue (one `ready_set.input.cif_file_name` each; ReadySet reads
+  only the first residue of a file, so a `--cif` file defining several is
+  split into `ReadySet/inputs/`). `input_dictionaries.cif` combines them; two
+  files defining the same residue stop AutoFDP.
 - ReadySet's model must keep every atom with its coordinates, occupancy and B
   (largest changes recorded; any change stops AutoFDP) and must add no
   hydrogen. It is saved as `run_NNN/readyset_model.pdb`, the model

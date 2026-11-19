@@ -735,8 +735,11 @@ def run_readyset(
     The actions are PostMR's (``postmr.READYSET_ACTIONS``): dictionaries for
     unknown residues only, no hydrogens, no geometry optimisation. NASolve's
     curated dictionaries for curated residues in the model (C38, 5IU, DU, ...)
-    and any ``--cif`` files are given to ReadySet, combined into
-    ``input_dictionaries.cif``. ReadySet's model must keep every atom with its
+    and any ``--cif`` files are given to ReadySet, one file per component
+    (ReadySet reads only the first component of each file;
+    ``ligand_profiles.readyset_dictionary_files``); ``input_dictionaries.cif``
+    combines them to check that no two define one component. ReadySet's model
+    must keep every atom with its
     coordinates, occupancy and B (it becomes ``readyset_model.pdb`` beside
     ``directory``), and must add no hydrogen. The restraints for phenix.refine
     follow PostMR's precedence (``ligand_profiles.effective_restraints``):
@@ -750,6 +753,7 @@ def run_readyset(
         combine_dictionary_inputs,
         effective_restraints,
         normalize_ccp4_torsion_alternates,
+        readyset_dictionary_files,
     )
     from .phosphate import PhosphateError
     from .postmr import READYSET_ACTIONS
@@ -782,15 +786,19 @@ def run_readyset(
         shutil.copyfile(path, destination)
         user_copies.append(destination)
     combined: Path | None = None
+    inputs: list[Path] = []
     if curated_copies or user_copies:
+        # The combined file checks that no two dictionaries define one
+        # component; ReadySet reads only the first component of each file it
+        # is given, so it gets them one file per component.
         combined = directory / "input_dictionaries.cif"
         try:
             combine_dictionary_inputs([*curated_copies, *user_copies], combined)
+            inputs = readyset_dictionary_files([*curated_copies, *user_copies], directory / "inputs")
         except PhosphateError as exc:
             raise AutoFDPError(f"The restraint dictionaries cannot be combined: {exc}") from exc
     command = [str(ready_set_executable), str(start_model), *READYSET_ACTIONS]
-    if combined is not None:
-        command.append(f"ready_set.input.cif_file_name={combined}")
+    command += [f"ready_set.input.cif_file_name={path}" for path in inputs]
     log = directory / "ready_set.log"
     try:
         completed = subprocess.run(

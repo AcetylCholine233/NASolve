@@ -200,6 +200,52 @@ def combine_dictionary_inputs(paths: Sequence[Path], output: Path) -> None:
         handle.write(prefix + "\n" + "\n".join(blocks))
 
 
+def readyset_dictionary_files(paths: Sequence[Path], directory: Path) -> list[Path]:
+    """The dictionaries to give phenix.ready_set: one file per component.
+
+    ReadySet (Phenix 2.2.1, ``elbow/utilities/ready_set_utils.py``,
+    ``get_user_defined_restraints``) reads one component from each
+    ``ready_set.input.cif_file_name`` file, the first. Any other residue in
+    that file counts as unknown: ReadySet fetches the CCD entry of that code,
+    or builds a dictionary from the model. A file that defines one component
+    is given as it is. A file that defines several is split into one file per
+    component in ``directory`` (its ``_chem_comp`` row and atom block; links
+    and modifications are not components and stay out of ReadySet's input).
+    """
+    result: list[Path] = []
+    for path in paths:
+        blocks = _blocks(path)
+        components = [block for block in blocks if _component_ids(block)]
+        if sum(len(_component_ids(block)) for block in components) <= 1:
+            result.append(path)
+            continue
+        lists = [block for block in blocks
+                 if "_chem_comp.id" in block.values and not _component_ids(block)]
+        for block in components:
+            ids = _component_ids(block)
+            if len(ids) != 1:
+                raise PhosphateError(
+                    f"{path.name}: one data block defines atoms of several components "
+                    f"({', '.join(sorted(ids))})"
+                )
+            code = next(iter(ids))
+            prefix = ""
+            for listing in lists:
+                values = listing.values
+                columns = {k: v for k, v in values.items() if k.startswith("_chem_comp.")}
+                rows = [i for i, value in enumerate(values["_chem_comp.id"]) if value == code]
+                if rows:
+                    prefix = _emit({"data_": "comp_list",
+                                    **{k: [v[i] for i in rows] for k, v in columns.items()}})
+                    break
+            directory.mkdir(parents=True, exist_ok=True)
+            output = directory / f"{path.stem}_{code}.cif"
+            with output.open("x", encoding="utf-8") as handle:
+                handle.write(prefix + "\n" + block.text)
+            result.append(output)
+    return result
+
+
 def _exclude_components(source: Path, codes: set[str], output: Path) -> tuple[Path | None, set[str]]:
     """Keep ReadySet additions except authoritative component definitions."""
     retained = []

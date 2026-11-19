@@ -31,6 +31,7 @@ from .backbone import (
 )
 from .ligand_profiles import (
     AUTHORITATIVE_CODES, combine_dictionary_inputs, effective_restraints,
+    readyset_dictionary_files,
     normalize_ccp4_torsion_alternates,
     frozen_reference, validate_model_phosphate_policy, write_linked_profile,
 )
@@ -1511,7 +1512,7 @@ def _run_readyset(
     model: Path,
     ready_set_executable: Path,
     readyset_directory: Path,
-    ligand_cif: Path | None,
+    ligand_cifs: Path | Sequence[Path] | None,
     environment: Mapping[str, str] | None,
     *,
     phosphate_sites: tuple[str, ...] = (),
@@ -1519,7 +1520,10 @@ def _run_readyset(
     passthrough_sites: tuple[str, ...] = (),
 ) -> tuple[Path, Path, Path | None, list[str], dict[str, object]]:
     command = [str(ready_set_executable), str(model), *READYSET_ACTIONS]
-    if ligand_cif is not None:
+    # One file per component: ReadySet reads only the first of each file.
+    if isinstance(ligand_cifs, Path):
+        ligand_cifs = (ligand_cifs,)
+    for ligand_cif in ligand_cifs or ():
         command.append(f"ready_set.input.cif_file_name={ligand_cif}")
     log = readyset_directory / "ready_set.log"
     try:
@@ -2148,11 +2152,13 @@ def prepare_postmr(
             shutil.copyfile(source, destination)
         copied_cifs.append(destination)
         restraint_paths.append(destination)
-    readyset_cif: Path | None = None
+    readyset_cifs: list[Path] = []
     if copied_cifs:
-        readyset_cif = restraints_dir / "curated_ligands.cif"
+        # The combined file checks that no two dictionaries define one
+        # component; ReadySet gets the dictionaries one file per component.
         try:
-            combine_dictionary_inputs(copied_cifs, readyset_cif)
+            combine_dictionary_inputs(copied_cifs, restraints_dir / "curated_ligands.cif")
+            readyset_cifs = readyset_dictionary_files(copied_cifs, readyset_dir / "dictionaries")
         except PhosphateError as exc:
             raise PostMRPreparationError(str(exc)) from exc
 
@@ -2170,7 +2176,7 @@ def prepare_postmr(
         prepared,
         ready_set_executable.expanduser().resolve(),
         readyset_dir,
-        readyset_cif,
+        readyset_cifs,
         environment,
         phosphate_sites=tuple(item["site"] for item in phosphate_before["removed"]),
         allow_op3_sites=allowed_op3, passthrough_sites=passthrough_sites,

@@ -7,6 +7,7 @@ combined dictionary file and builds any other non-CCD residue "from scratch",
 with every chiral centre set to "both" (as it did for DE beside 1AP).
 """
 
+import io
 import json
 import math
 import tempfile
@@ -267,6 +268,113 @@ class DYIPostMRTests(unittest.TestCase):
             # ReadySet's from-scratch DYI is left out; the copy folds DC's
             # alternative sugar torsions for Phenix.
             self.assertIn("_chem_comp_tor.alt_value_angle", result.dictionaries[0].read_text())
+
+
+def phenix_221_readyset(log: list):
+    """Stand-in for phenix.ready_set that reads user dictionaries as Phenix
+    2.2.1 does (elbow ready_set_utils.get_user_defined_restraints): one
+    component from each cif_file_name file, the first. A residue that is not
+    standard and has no user dictionary is looked up in the CCD instead; here
+    that fails, as it did for DYI in U-Y_Ag AutoMR run_004 (the CCD's DYI is a
+    molybdopterin since 2026)."""
+    import re as _re
+
+    def run(command, cwd, **kwargs):
+        given = []
+        for argument in command:
+            if argument.startswith("ready_set.input.cif_file_name="):
+                text = Path(argument.split("=", 1)[1]).read_text(encoding="utf-8")
+                # CCP4 (data_comp_CODE) or CCD (data_CODE) format.
+                first = _re.search(r"^data_(?:comp_)?(?!(?:comp_)?list\b)(\S+)", text, _re.M)
+                given.append(first.group(1) if first else None)
+        log.append(given)
+        model = Path(command[1]).read_text()
+        residues = {line[17:20].strip() for line in model.splitlines()
+                    if line.startswith(("ATOM", "HETATM"))}
+        unknown = sorted(residues - {"DA", "DC", "DG", "DT"} - set(given))
+        if unknown:
+            return SimpleNamespace(returncode=1, stdout="".join(
+                f"Attempting to download Chemical Components file for {code}\n" for code in unknown))
+        (cwd / f"{Path(command[1]).stem}.updated.pdb").write_text(model)
+        return SimpleNamespace(returncode=0, stdout="".join(
+            f"Build ligand and use user provided restraints : {code}\n" for code in given))
+
+    return run
+
+
+class ReadySetDictionaryInputTests(unittest.TestCase):
+    """U-Y_Ag AutoMR run_004 (2026-11-19): DU and DYI in one model. PostMR gave
+    ReadySet one combined curated_ligands.cif; ReadySet used it for DU only,
+    fetched the CCD's (unrelated) DYI and crashed. Each curated dictionary now
+    goes to ReadySet as its own file."""
+
+    def model_with_du_and_dyi(self, root: Path) -> Path:
+        model = root / "model.pdb"
+        model.write_text("".join(phosphate(residue="DYI"))
+                         + "".join(phosphate(chain="B", number=4, previous=3, residue="DU",
+                                             start=40, shift=30.0)))
+        return model
+
+    def test_postmr_gives_readyset_one_file_per_curated_residue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.model_with_du_and_dyi(root)
+            run = root / "dataset" / "AutoMR" / "run_001"
+            report_path = make_postmr_report(run, original)
+            report = json.loads(report_path.read_text())
+            report["frame"] = None
+            report["post_mr_plan"] = {"sequences": {}, "standard_pair": None, "mutations": {}}
+            report_path.write_text(json.dumps(report))
+
+            def no_pairs(prepared, compatibility, pair_file, output):
+                pair_file.write_text("")
+                return {"retained_pair_count": 0, "retained_pairs": [], "modified_sites": []}
+
+            seen: list = []
+            with patch("nasolve.postmr.subprocess.run", side_effect=phenix_221_readyset(seen)):
+                result = prepare_postmr(run, root / "ready_set", modified_pairs_only=True,
+                                        modified_pair_builder=no_pairs)
+            self.assertEqual(sorted(seen[0]), ["DU", "DYI"])
+            postmr = json.loads(result.report_path.read_text())
+            given = [argument.split("=", 1)[1] for argument in postmr["readyset"]["command"]
+                     if argument.startswith("ready_set.input.cif_file_name=")]
+            self.assertEqual(sorted(Path(path).name for path in given), ["DU.cif", "DYI.cif"])
+            # The combined file is still written and checked for clashes.
+            self.assertTrue((result.postmr_directory / "Restraints" / "curated_ligands.cif").is_file())
+
+    def test_a_file_with_several_components_is_split(self):
+        from nasolve.ligand_profiles import combine_dictionary_inputs, readyset_dictionary_files
+        from nasolve.curated_ligands import ligand_dictionary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            combined = root / "two.cif"
+            combine_dictionary_inputs([DICTIONARY, ligand_dictionary("1AP")], combined)
+            single = root / "DYI_only.cif"
+            single.write_text(DICTIONARY.read_text(encoding="utf-8"))
+            files = readyset_dictionary_files([single, combined], root / "inputs")
+            self.assertEqual(files[0], single)   # one component: given as it is
+            self.assertEqual([path.name for path in files[1:]], ["two_DYI.cif", "two_1AP.cif"])
+            for path, code, other in zip(files[1:], ("DYI", "1AP"), ("1AP", "DYI")):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(f"data_comp_{code}", text)
+                self.assertNotIn(f"data_comp_{other}", text)
+                listing = dict(MMCIF2Dict(io.StringIO(text[:text.index(f"data_comp_{code}")])))
+                self.assertEqual(listing["_chem_comp.id"], [code])   # its own list row only
+
+    def test_autofdp_gives_readyset_one_file_per_component(self):
+        from nasolve.autofdp import run_readyset
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            start = self.model_with_du_and_dyi(root)
+            seen: list = []
+            executable = root / "phenix.ready_set"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            with patch("nasolve.autofdp.subprocess.run", side_effect=phenix_221_readyset(seen)):
+                result = run_readyset(start, root / "ReadySet", executable)
+            self.assertEqual(sorted(seen[0]), ["DU", "DYI"])
+            self.assertEqual(result.curated_codes, ("DU", "DYI"))
 
 
 class KeptResidueNameTests(unittest.TestCase):

@@ -271,8 +271,12 @@ class FdpRoundTests(unittest.TestCase):
             self.assertEqual(readyset_args[0], str(run / "start_model.pdb"))
             for flag in ("ready_set.actions.hydrogens=False", "ready_set.actions.ligands=True",
                          "ready_set.actions.optimise_ligand_geometry=False",
-                         f"ready_set.input.cif_file_name={run / 'ReadySet' / 'input_dictionaries.cif'}"):
+                         f"ready_set.input.cif_file_name={run / 'ReadySet' / 'DU.cif'}"):
                 self.assertIn(flag, readyset_args)
+            # One file per component (ReadySet reads only the first of each);
+            # the combined file is still written as the clash check.
+            self.assertEqual(sum(arg.startswith("ready_set.input.cif_file_name=") for arg in readyset_args), 1)
+            self.assertTrue((run / "ReadySet" / "input_dictionaries.cif").is_file())
             self.assertEqual(result.readyset.curated_codes, ("DU",))
             self.assertEqual(result.readyset.dictionaries, (run / "ReadySet" / "DU.cif",))
             self.assertIn(str(run / "ReadySet" / "DU.cif"), received)

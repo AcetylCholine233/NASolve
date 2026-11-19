@@ -336,9 +336,14 @@ The parameterized monomer overrides (curated entries with
 use selected-site `NASnoOP3` modifications. Their dictionaries must carry
 energy types, numerical bond targets, the DNA group, the registered planes and
 signed sugar chiral centres (C1', C3', C4'), because they replace ReadySet's.
-ReadySet (Phenix 2.2.1 eLBOW) reads one component from each supplied dictionary
-file and NASolve supplies one combined file, so another non-CCD residue is
-built from the model with every chiral centre set to "both". Curated residues
+ReadySet (Phenix 2.2.1 eLBOW, `ready_set_utils.get_user_defined_restraints`)
+reads one component from each supplied dictionary file, the first; any other
+residue counts as unknown, and ReadySet fetches its CCD entry or builds it from
+the model with every chiral centre set to "both". PostMR therefore gives
+ReadySet one file per curated residue (`ligand_profiles.readyset_dictionary_files`,
+which splits a file defining several), and still writes the combined
+`Restraints/curated_ligands.cif` to check that no two dictionaries define one
+component. Curated residues
 kept from the starting model are checked against their dictionary before
 `PostMR/` is created: every heavy-atom name must exist in it, and every
 dictionary bond between two of the residue's atoms must be a bond in the model

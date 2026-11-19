@@ -108,6 +108,21 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- PostMR and AutoFDP give phenix.ready_set one dictionary file per curated
+  residue (`ready_set.input.cif_file_name` repeated;
+  `ligand_profiles.readyset_dictionary_files` splits a file defining several).
+  ReadySet (Phenix 2.2.1, `ready_set_utils.get_user_defined_restraints`) reads
+  only the first component of each file, so with NASolve's one combined file
+  every other curated residue counted as unknown. In U-Y_Ag nasolve AutoMR
+  run_004 (DU and DYI, 2026-11-19) ReadySet used the file for DU, fetched the
+  wwPDB CCD entry DYI, which since 2026 is an unrelated molybdopterin
+  ("Molybdopterin hydrox dioxo molybdenum", C10 H13 Mo N5 O9 P S2; not in
+  Phenix 2.2.1's bundled CCD), ran eLBOW on it with the model's atoms and
+  stopped ("Bond length too long : 10.47"). The same cause gave DE its
+  from-scratch restraints beside 1AP. The combined `curated_ligands.cif` /
+  `input_dictionaries.cif` is still written and checked. ReadySet simulated
+  (a stand-in that reads dictionaries as Phenix 2.2.1 does).
+
 - PostMR stopped with "ReadySet failed with status 1" (eLBOW:
   `AttributeError: 'AtomClass' object has no attribute 'atom_name_in_input'`,
   Phenix 2.2.1) when a curated residue already in the starting model used its
