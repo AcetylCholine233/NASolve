@@ -284,6 +284,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--cycles", type=int, default=5,
         help="number of refinement macrocycles (default: 5)",
     )
+    autorefine.add_argument(
+        "--restraints", action="append", default=[], type=Path, metavar="FILE",
+        help=(
+            "extra restraint file for this round: PHIL (.eff, .phil, .params), e.g. a "
+            "secondary-structure .eff, or a CIF dictionary (.cif); repeatable. It is "
+            "copied into the round, recorded with its checksum, and kept by later "
+            "rounds from this round's checkpoint"
+        ),
+    )
     autofdp = subparsers.add_parser(
         "autofdp",
         help="measure metal occupancy by f'' refinement from a model and an MTZ, "
@@ -1234,6 +1243,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             from_checkpoint=args.from_checkpoint,
             recipe=args.recipe,
             macro_cycles=args.cycles,
+            user_restraints=args.restraints,
             progress=progress,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
@@ -1257,6 +1267,10 @@ def _autorefine(args: argparse.Namespace) -> int:
         print("Phases: " + (",".join(phase_labels) if phase_labels else "none"))
         selections = refinement.get("anomalous_selections", [])
         print("Anomalous: " + ("; ".join(selections) if selections else "off"))
+        for item in inputs.get("user_restraints") or []:
+            if isinstance(item, dict):
+                print(f"Extra restraints: {Path(str(item.get('copy'))).name} "
+                      f"(copy of {item.get('source')})")
     stats = result.statistics
     print("\n                 Initial    Final")
     print(

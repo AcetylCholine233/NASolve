@@ -540,6 +540,69 @@ class AutoRefineTests(unittest.TestCase):
             self.assertIn(expected, payload["inputs"]["restraints"])
             self.assertIn(expected, payload["command"])
 
+    def test_restraints_option_copies_records_and_carries_forward(self):
+        """nasolve autorefine --restraints FILE (user, 2026-11-19: Y-T nasolve
+        run_001 had no secondary-structure restraints, and a file put in
+        PostMR/Restraints afterwards was ignored)."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            source = root / "elsewhere" / "5W6W_secondary_structure.eff"
+            source.parent.mkdir()
+            source.write_text("refinement.pdb_interpretation.secondary_structure.enabled = True\n")
+            text = source.read_text()
+            digest = file_sha256(source)
+
+            def refine(**kwargs):
+                return execute_autorefine(
+                    run, make_refine(root, final_work=0.244, final_free=0.267), make_mtz_dump(root),
+                    phenix_version=PHENIX_21, environment={"PATH": "/usr/bin:/bin"},
+                    macro_cycles=1, auto_select_success=False, **kwargs,
+                )
+
+            first = refine(user_restraints=(source,))
+            copy = (first.report_path.parent / "extra_restraints" / source.name).resolve()
+            self.assertEqual(copy.read_text(), text)
+            payload = json.loads(first.report_path.read_text())
+            self.assertIn(str(copy), payload["command"])
+            self.assertNotIn(str(source.resolve()), payload["command"])
+            self.assertEqual(payload["inputs"]["user_restraints"],
+                             [{"source": str(source.resolve()), "sha256": digest, "copy": str(copy)}])
+            registry = json.loads((run / "AutoRefine" / "checkpoints.json").read_text())
+            checkpoint = next(item for item in registry["checkpoints"] if item["id"] == first.checkpoint_id)
+            recorded = [ref for ref in checkpoint["restraints"] if ref.get("sha256") == digest]
+            self.assertEqual([(ref["anchor"], ref["relative_path"]) for ref in recorded],
+                             [("run", f"AutoRefine/{first.report_path.parent.name}/extra_restraints/{source.name}")])
+
+            # Editing the original later does not change what the checkpoint holds,
+            # and the next round from it uses the copy without --restraints.
+            source.write_text("refinement.pdb_interpretation.secondary_structure.enabled = False\n")
+            second = refine(from_checkpoint=first.checkpoint_id)
+            self.assertIn(str(copy), json.loads(second.report_path.read_text())["command"])
+
+            # The same contents again would be applied twice: refused before a round exists.
+            source.write_text(text)
+            rounds = sorted((run / "AutoRefine").glob("round_*"))
+            with self.assertRaisesRegex(AutoRefineError, "already in the restraints of checkpoint"):
+                refine(from_checkpoint=first.checkpoint_id, user_restraints=(source,))
+            self.assertEqual(sorted((run / "AutoRefine").glob("round_*")), rounds)
+
+    def test_restraints_option_refuses_missing_files_and_other_file_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            model = root / "model.pdb"
+            model.write_text("END\n")
+            for path, message in ((root / "missing.eff", "does not exist"),
+                                  (model, "not model.pdb")):
+                with self.subTest(path=path.name), self.assertRaisesRegex(AutoRefineError, message):
+                    execute_autorefine(
+                        run, make_refine(root, final_work=0.244, final_free=0.267), make_mtz_dump(root),
+                        phenix_version=PHENIX_21, environment={"PATH": "/usr/bin:/bin"},
+                        macro_cycles=1, user_restraints=(path,),
+                    )
+            self.assertEqual(list((run / "AutoRefine").glob("round_*")), [])
+
     def test_terminal_protection_metadata_is_frozen_and_inherited(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

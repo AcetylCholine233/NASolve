@@ -378,6 +378,41 @@ class CLITests(unittest.TestCase):
             self.assertEqual(main(["autosol", "run_001", "--tfz-override"]), 2)
         self.assertIn("--tfz-override", error.getvalue())
 
+    def test_autorefine_forwards_and_prints_extra_restraints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "run_001"
+            round_directory = run / "AutoRefine" / "round_001"
+            round_directory.mkdir(parents=True)
+            copy = round_directory / "extra_restraints" / "5W6W_secondary_structure.eff"
+            report = round_directory / "report.json"
+            report.write_text(json.dumps({"inputs": {"observation_labels": ["F"], "user_restraints": [
+                {"source": "/data/5W6W_secondary_structure.eff", "sha256": "0" * 64, "copy": str(copy)},
+            ]}, "refinement": {}}))
+            result = SimpleNamespace(
+                status="AUTOREFINE_READY", message="done", checkpoint_id="refine-001",
+                parent_checkpoint="postmr", report_path=report, statistics={}, model_path=None,
+                model_cif=None, reflection_cif=None, map_coefficients=None,
+                log_path=round_directory / "phenix.refine.log", selected_as_current=False,
+                run_directory=run, exit_code=2,
+            )
+            phenix = SimpleNamespace(version="2.2.1", environment=None, executables={
+                "phenix.refine": Path("/phenix/phenix.refine"),
+                "phenix.mtz.dump": Path("/phenix/phenix.mtz.dump"),
+            })
+            output = io.StringIO()
+            with (patch("nasolve.cli.load_config", return_value=AppConfig()),
+                  patch("nasolve.cli._workspace_run", return_value=run),
+                  patch("nasolve.cli.discover_phenix", return_value=phenix),
+                  patch("nasolve.cli.remember_phenix"), patch("nasolve.cli.save_config"),
+                  patch("nasolve.cli.resolve_view_profile", side_effect=CootViewError("no view")),
+                  patch("nasolve.cli.execute_autorefine", return_value=result) as call,
+                  redirect_stdout(output)):
+                main(["autorefine", "run_001", "--restraints", "ss.eff", "--restraints", "x.cif"])
+            self.assertEqual(call.call_args.kwargs["user_restraints"], [Path("ss.eff"), Path("x.cif")])
+            self.assertIn("Extra restraints: 5W6W_secondary_structure.eff "
+                          "(copy of /data/5W6W_secondary_structure.eff)", output.getvalue())
+
     def test_autosol_command(self):
         parser = build_parser()
         args = parser.parse_args(["autosol", "run_001"])
@@ -392,6 +427,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(refine.command, "autorefine")
         self.assertEqual(refine.from_checkpoint, "clean")
         self.assertEqual(refine.cycles, 5)
+        self.assertEqual(refine.restraints, [])
+        extra = parser.parse_args([
+            "autorefine", "run_001", "--restraints", "a.eff", "--restraints", "DYI.cif",
+        ])
+        self.assertEqual(extra.restraints, [Path("a.eff"), Path("DYI.cif")])
         doctor = parser.parse_args([
             "refine-doctor", "run_001", "--from", "refine-003", "--cycles", "3",
         ])

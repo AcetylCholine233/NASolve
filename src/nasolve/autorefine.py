@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -1381,6 +1382,10 @@ def _file_reference(path: Path, run: Path) -> dict[str, object]:
     }
 
 
+#: File types ``--restraints`` accepts: PHIL parameter files and CIF dictionaries.
+_USER_RESTRAINT_SUFFIXES = frozenset({".eff", ".phil", ".params", ".cif"})
+
+
 def _cached_file_referencer(
     run: Path,
 ) -> Callable[[Path], dict[str, object]]:
@@ -1653,11 +1658,19 @@ def execute_autorefine(
     refine_coordinates: bool = True,
     anomalous_groups: Mapping[str, Mapping[str, object]] | None = None,
     extra_restraints: Sequence[Path] = (),
+    user_restraints: Sequence[Path] = (),
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
 ) -> AutoRefineResult:
-    """Run one quiet refinement round and append an immutable checkpoint."""
+    """Run one quiet refinement round and append an immutable checkpoint.
+
+    ``user_restraints`` (``nasolve autorefine --restraints FILE``) are copied
+    into ``round_NNN/extra_restraints/``; phenix.refine gets the copies, the
+    checkpoint records them (run-anchored, checksummed), and later rounds from
+    that checkpoint keep them. A file whose contents are already in the parent
+    checkpoint's restraints is refused, so nothing is applied twice.
+    """
     xyz_wxc_scale = (
         0.1
         if recipe == "AutoRefine/geometry-conservative"
@@ -1740,6 +1753,26 @@ def execute_autorefine(
 
     restraints = [*restraints, *resolved_extra_restraints]
 
+    in_use = {file_sha256(path) for path in restraints if isinstance(path, Path) and path.is_file()}
+    user_sources: list[tuple[Path, str]] = []
+    for value in user_restraints:
+        source = Path(value).expanduser().resolve()
+        if not source.is_file():
+            raise AutoRefineError(f"Restraint file does not exist: {source}")
+        if source.suffix.lower() not in _USER_RESTRAINT_SUFFIXES:
+            raise AutoRefineError(
+                f"--restraints takes PHIL (.eff, .phil, .params) or CIF (.cif) restraint "
+                f"files, not {source.name}"
+            )
+        digest = file_sha256(source)
+        if digest in in_use:
+            raise AutoRefineError(
+                f"{source.name} is already in the restraints of checkpoint {parent.get('id')} "
+                "(or given twice); it would be applied twice"
+            )
+        in_use.add(digest)
+        user_sources.append((source, digest))
+
     requested_terminal_protection_path: Path | None = None
     if requested_terminal_protection is not None:
         requested_terminal_protection_path = Path(
@@ -1778,7 +1811,7 @@ def execute_autorefine(
     ):
         automatic_terminal_seed = _prepare_terminal_phosphate_protection(
             model,
-            restraints,
+            [*restraints, *(source for source, _ in user_sources)],
             refine_executable,
             environment,
             terminal_phosphate_sites,
@@ -1793,6 +1826,23 @@ def execute_autorefine(
         raise AutoRefineError(
             f"Refinement round already exists; refusing to overwrite {round_directory}"
         ) from exc
+
+    user_restraint_records: list[dict[str, object]] = []
+    if user_sources:
+        copies = round_directory / "extra_restraints"
+        copies.mkdir()
+        for index, (source, digest) in enumerate(user_sources, 1):
+            copy = copies / source.name
+            if copy.exists():   # two files with the same name
+                copy = copies / f"{index:02d}_{source.name}"
+            shutil.copyfile(source, copy)
+            if file_sha256(copy) != digest:
+                raise AutoRefineError(f"{source} changed while it was being copied")
+            resolved_extra_restraints.append(copy)
+            restraints.append(copy)
+            user_restraint_records.append(
+                {"source": str(source), "sha256": digest, "copy": str(copy)}
+            )
 
     pre_refinement_geometry: Path | None = None
     pre_refinement_geometry_log: Path | None = None
@@ -2191,6 +2241,7 @@ def execute_autorefine(
             "extra_restraints": [
                 str(path) for path in resolved_extra_restraints
             ],
+            "user_restraints": user_restraint_records,   # --restraints: original and copy
         },
         "refinement": {
             "target": "automatic",

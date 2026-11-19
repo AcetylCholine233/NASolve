@@ -264,6 +264,19 @@ starts from that improved model, while `--from` creates a deliberate branch:
 ./nasolve autorefine "$RUN" --from refine-001
 ```
 
+To add restraints PostMR did not make, give them with `--restraints FILE`
+(repeatable): a PHIL file (`.eff`, `.phil`, `.params`), for example a
+secondary-structure `.eff`, or a CIF dictionary (`.cif`). Each file is copied
+into `AutoRefine/round_NNN/extra_restraints/`; phenix.refine gets the copy, the
+checkpoint records it with its checksum, and later rounds from that checkpoint
+keep it, so it is given once. A file whose contents are already in the
+checkpoint's restraints is refused. Putting a file into `PostMR/Restraints`
+by hand does nothing: AutoRefine uses only the restraints PostMR recorded.
+
+```bash
+./nasolve autorefine "$RUN" --restraints secondary_structure.eff
+```
+
 Bookmark, select, or import a manually corrected model with:
 
 ```bash
@@ -1151,7 +1164,8 @@ candidate sites and whether AutoSol is required are written to `report.json`.
 `nasolve autorefine RUN` performs one five-macrocycle default refinement. It
 uses the current checkpoint model, the original STARANISO observations and
 unchanged Free-R flags, the ReadySet-generated ligand dictionary when present,
-and the PostMR PHIL/EFF restraint stack. A validated AutoSol MTZ contributes
+and the PostMR PHIL/EFF restraint stack, plus any `--restraints` files given
+to this or an earlier round of the branch. A validated AutoSol MTZ contributes
 only its Hendrickson-Lattman coefficients; its HA coordinates never replace
 known model atoms.
 

@@ -8,6 +8,20 @@ entries are reconstructed from repository history.
 
 ## [Unreleased]
 
+### Added
+
+- `nasolve autorefine --restraints FILE` (repeatable): extra restraints for a
+  round, PHIL (`.eff`, `.phil`, `.params`) or CIF (`.cif`); other file types
+  are refused. Each file is copied into `round_NNN/extra_restraints/`, passed
+  to phenix.refine as that copy and recorded in the checkpoint's restraints
+  (run-anchored, SHA-256), so later rounds from that checkpoint keep it; a
+  file whose contents are already in the parent checkpoint's restraints is
+  refused before a round exists. The round report's `inputs.user_restraints`
+  lists each original path, checksum and copy; the terminal shows them.
+  Motivation: Y-T nasolve AutoMR run_001 (nonstandard, no frame) had no
+  secondary-structure restraints, and a `5W6W_secondary_structure.eff` copied
+  into `PostMR/Restraints` afterwards was not used. phenix.refine simulated.
+
 ### Changed
 
 - AutoMR decides pass/fail on the TFZ after refinement (Phaser's `TFZ==`, the
