@@ -44,7 +44,7 @@ from .phenix_runtime import (
     installation_from_candidate,
     remember_phenix,
 )
-from .phaser import PhaserExecutionError, describe_tfz, execute_phaser, tfz_override_warning
+from .phaser import PhaserExecutionError, execute_phaser, tfz_override_warning
 from .postmr import PostMRPreparationError, prepare_postmr
 from .refine_doctor import RefineDoctorError, execute_refine_doctor
 
@@ -884,7 +884,6 @@ def _automr(args: argparse.Namespace) -> int:
     if args.execute:
         print(f"{phaser.status}: {phaser.message}")
         print("Phaser executed: yes")
-        print(describe_tfz(phaser.tfz_scores))
         print(f"Run directory: {phaser.run_directory}")
         print(f"Phaser log: {phaser.log_path}")
         print(f"Report: {phaser.report_path}")
