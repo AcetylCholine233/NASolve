@@ -177,11 +177,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="completed AutoMR run directory (default: active workspace run)",
     )
     postmr.add_argument("--coot", help="one-run Coot executable override")
-    postmr.add_argument(
+    starting_model = postmr.add_mutually_exclusive_group()
+    starting_model.add_argument(
         "--original-model", action="store_true",
         help=(
             "start from the original Phaser model even if metal sites were merged "
             "into it in Coot (Phaser/*-merged.pdb)"
+        ),
+    )
+    starting_model.add_argument(
+        "--merged-model", metavar="FILE",
+        help=(
+            "start from this model with merged metal sites: a file name in the run's "
+            "Phaser/ folder (e.g. mr_solution-merged-2.pdb) or a path. A model saved by "
+            "hand is accepted with a warning and compared with the Phaser model. "
+            "Default: the newest merge saved with the NASolve merge command"
         ),
     )
     postmr.add_argument(
@@ -824,7 +834,8 @@ def _print_metal_merge_hint(merge) -> None:
         "Calculate > Scripting > Python)."
     )
     print(f"Merged model will be saved as: {merge.output_directory / (merge.merged_stem + '.pdb')}")
-    print(f"'nasolve postmr {merge.run_directory}' then starts from the merged model.")
+    print(f"'nasolve postmr {merge.run_directory}' then starts from the newest merged model "
+          "(--merged-model NAME picks another).")
     for warning in merge.warnings:
         print(f"Warning: {warning}")
 
@@ -949,6 +960,7 @@ def _postmr(args: argparse.Namespace) -> int:
             force_overwrite=args.force_overwrite,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
             use_merged_model=not args.original_model,
+            merged_model=args.merged_model,
         )
     except (
         ConfigError,
@@ -970,7 +982,14 @@ def _postmr(args: argparse.Namespace) -> int:
             "Phaser model with merged metal sites"
             if result.input_model_source == "metal-merged" else "Phaser model"
         )
+        if result.merge_selected_by == "--merged-model":
+            source += ", chosen with --merged-model"
         print(f"Starting model: {result.input_model} ({source})")
+        for warning in result.merge_warnings:
+            print(_color(f"Warning: {warning}", "33"))
+        if result.other_merges:
+            print("Other merged models recorded (choose one with --merged-model NAME): "
+                  + ", ".join(result.other_merges))
     print(f"Prepared model: {result.model_path}")
     for site in result.metal_sites:
         print(

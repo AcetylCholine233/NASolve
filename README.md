@@ -177,7 +177,15 @@ flagged before you refine. The newest merge is selected in the run's
 `report.json["metal_merge"]`, and PostMR then starts from it: the metal ion is
 carried through mutation and ReadySet, and NARestraints recognises the
 metal-mediated pair and writes no base-pair restraints for its two bases; each
-base is still stacked on its neighbours in the strand. Use `./nasolve postmr "$RUN" --original-model` to start from the plain
+base is still stacked on its neighbours in the strand. Each merge is kept
+(`mr_solution-merged.pdb`, `-2`, `-3`, ...). To start from another model, name
+it: `./nasolve postmr "$RUN" --merged-model mr_solution-merged-2.pdb` (a file
+name in the run's `Phaser/` folder, or a path). A model you saved yourself in
+Coot is accepted too, with a warning: PostMR records its checksum, compares it
+with the Phaser model residue by residue, and warns again when anything other
+than the merged metals and the planned mutations differs. Without `--merged-model`, a merge whose file was
+changed after merging stops PostMR. PostMR prints which model it used and the
+other recorded merges, and records how it was chosen (`metal_merge.selected_by`). Use `./nasolve postmr "$RUN" --original-model` to start from the plain
 Phaser model instead. Merge before running PostMR; a run that already has
 PostMR keeps it. Finding no site is a normal result and usually means the ion
 is not incorporated. Nothing is merged unless you choose to, and the run's

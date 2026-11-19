@@ -209,6 +209,141 @@ class PostMRTests(unittest.TestCase):
             self.assertEqual(result.input_model_source, "phaser")
             self.assertEqual(result.input_model.name, "mr_solution.pdb")
 
+    def test_merged_model_option_chooses_which_recorded_merge_postmr_uses(self):
+        """--merged-model NAME (user, 2026-11-19): PostMR starts from that
+        recorded merge instead of the newest one."""
+        from nasolve.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdb"
+            source.write_text(postmr_model_text())
+            run = root / "run_004"
+            report_path = make_postmr_report(run, source)
+            base = postmr_model_text().replace("END\n", "")
+            first = run / "Phaser" / "mr_solution-merged.pdb"
+            first.write_text(base + pdb_record("HETATM", 4, "AG", "AG", "Z", 1, element="AG") + "END\n")
+            second = run / "Phaser" / "mr_solution-merged-2.pdb"
+            second.write_text(base + pdb_record("HETATM", 4, "AG", "AG", "Z", 1, element="AG")
+                              + pdb_record("HETATM", 5, "HG", "HG", "Z", 2, element="HG",
+                                           x=9.0) + "END\n")
+            report = json.loads(report_path.read_text())
+            report["metal_merge"] = {"schema_version": 1, "selected": second.name, "models": [
+                {"name": path.name, "sites_merged": sites, "created_utc": created,
+                 "model": {"anchor": "run", "relative_path": "Phaser/" + path.name,
+                           "sha256": file_sha256(path)}}
+                for path, sites, created in ((first, 1, "2026-11-19T17:58:00+00:00"),
+                                             (second, 2, "2026-11-19T18:30:00+00:00"))
+            ]}
+            report_path.write_text(json.dumps(report))
+            data_root = make_data_root(root)
+
+            def builder(pdb, pairs, output):
+                output.write_text("geometry_restraints.edits {}\n")
+
+            def postmr(**kwargs):
+                return prepare_postmr(run, make_ready_set(root), data_root=data_root,
+                                      narestraints_builder=builder, **kwargs)
+
+            not_pdb = run / "Phaser" / "notes.txt"
+            not_pdb.write_text("not a model\n")
+            for bad, message in (
+                ({"merged_model": "mr_solution-merged-3.pdb"},
+                 "no such file: mr_solution-merged-3.pdb .*merges recorded for this run: "
+                 r"mr_solution-merged.pdb \(2026-11-19 17:58, 1 site\), "
+                 r"mr_solution-merged-2.pdb \(2026-11-19 18:30, 2 sites\)"),
+                ({"merged_model": "notes.txt"}, "is not a PDB model with atoms"),
+                ({"merged_model": first.name, "use_merged_model": False},
+                 "--merged-model and --original-model cannot be combined"),
+            ):
+                with self.subTest(bad=bad):
+                    with self.assertRaisesRegex(PostMRPreparationError, message):
+                        postmr(**bad)
+                    self.assertFalse((run / "PostMR").exists())
+
+            result = postmr(merged_model=first.name)
+            self.assertEqual(result.input_model, first.resolve())
+            self.assertEqual(result.merge_selected_by, "--merged-model")
+            self.assertEqual(result.merge_warnings, ())   # a recorded, unchanged merge
+            self.assertEqual(result.other_merges, (second.name,))
+            record = json.loads((result.postmr_directory / "report.json").read_text())
+            self.assertEqual(record["metal_merge"]["name"], first.name)
+            self.assertEqual(record["metal_merge"]["selected_by"], "--merged-model")
+            self.assertNotIn(" HG ", result.model_path.read_text())
+            # The run's default selection is not changed.
+            self.assertEqual(json.loads(report_path.read_text())["metal_merge"]["selected"], second.name)
+
+            # A path to the merge works too; without the option, the newest is used.
+            for kwargs, expected, selected_by in (
+                ({"merged_model": str(first)}, first, "--merged-model"),
+                ({}, second, "newest merge (report.json metal_merge.selected)"),
+            ):
+                with self.subTest(kwargs=kwargs):
+                    result = postmr(force_overwrite=True, **kwargs)
+                    self.assertEqual(result.input_model, expected.resolve())
+                    self.assertEqual(result.merge_selected_by, selected_by)
+
+            # A model saved by hand (U-Y_Ag run_004: a second Ag saved over the
+            # merge's name in Coot) is used as it is, with warnings and a
+            # comparison with the Phaser model.
+            by_hand = run / "Phaser" / "my_two_metals.pdb"
+            by_hand.write_text(second.read_text())
+            result = postmr(force_overwrite=True, merged_model=by_hand.name)
+            self.assertEqual(result.input_model, by_hand.resolve())
+            self.assertIn(" HG ", result.model_path.read_text())
+            self.assertEqual(result.merge_warnings, (
+                "my_two_metals.pdb was not saved by NASolve's merge command; using it as given",))
+            record = json.loads((result.postmr_directory / "report.json").read_text())["metal_merge"]
+            self.assertIs(record["recorded_merge"], False)
+            self.assertEqual(record["model"], {"anchor": "run", "relative_path": "Phaser/my_two_metals.pdb",
+                                               "sha256": file_sha256(by_hand)})
+            comparison = record["comparison_with_phaser_model"]
+            self.assertEqual(comparison["added"], ["AG Z:1", "HG Z:2"])
+            self.assertEqual((comparison["removed"], comparison["residue_changes"],
+                              comparison["moved_atoms"]), ([], [], 0))
+            self.assertIn("Warning: my_two_metals.pdb was not saved by NASolve's merge command",
+                          (result.postmr_directory / "postmr.log").read_text())
+
+            # A recorded name whose file changed: the default refuses it, the
+            # explicit choice uses the file as it is now and says so.
+            first.write_text(first.read_text().replace("END\n", "") + pdb_record(
+                "HETATM", 6, "AG", "AG", "Z", 3, element="AG", x=-9.0) + "END\n")
+            report = json.loads(report_path.read_text())
+            report["metal_merge"]["selected"] = first.name
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(PostMRPreparationError, "name the model to use with --merged-model"):
+                postmr(force_overwrite=True)
+            result = postmr(force_overwrite=True, merged_model=first.name)
+            self.assertEqual(result.merge_warnings[0],
+                             "mr_solution-merged.pdb has changed since it was merged "
+                             "(mr_solution-merged.pdb (2026-11-19 17:58, 1 site)); using the file as it is now")
+            moved = root / "elsewhere" / "moved.pdb"   # any path; A:12 P moved by 5 A
+            moved.parent.mkdir()
+            moved.write_text(pdb_record("HETATM", 1, "P", "DE", "A", 12, x=5.0)
+                             + "".join(postmr_model_text().splitlines(keepends=True)[1:]))
+            result = postmr(force_overwrite=True, merged_model=str(moved))
+            self.assertEqual(result.input_model, moved.resolve())
+            self.assertEqual(result.merge_warnings[-1],
+                             "moved.pdb differs from the Phaser model beyond the merged metals and "
+                             "planned mutations: 1 atom(s) moved (up to 5.00 A)")
+
+            # A residue renamed in the chosen model: expected when it is a
+            # planned mutation (the metal search builds those), otherwise a warning.
+            from nasolve.postmr import _compare_with_phaser
+            mutated = root / "elsewhere" / "mutated.pdb"
+            mutated.write_text(postmr_model_text(second="DT"))
+            phaser = run / "Phaser" / "mr_solution.pdb"
+            self.assertEqual(_compare_with_phaser(mutated, phaser, {"B:4": {"ligand_code": "DT"}})
+                             ["residue_changes"], [{"site": "B:4", "from": "DG", "to": "DT", "planned": True}])
+            _, record = _merged_metal_model(run, json.loads(report_path.read_text()), str(mutated))
+            self.assertIn("residues changed (not planned mutations): B:4 DG->DT", record["warnings"][-1])
+
+            parser = build_parser()
+            self.assertEqual(parser.parse_args(["postmr", "run_004", "--merged-model", first.name]).merged_model,
+                             first.name)
+            with self.assertRaises(SystemExit), patch("sys.stderr"):
+                parser.parse_args(["postmr", "run_004", "--merged-model", first.name, "--original-model"])
+
     def test_non_object_report_is_rejected_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run_001"

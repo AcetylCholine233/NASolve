@@ -498,9 +498,16 @@ checksums. Its startup script also adds a NASolve toolbar action (and
 the Phaser model, caps occupancies at 1.00, and writes a new
 `<model>-merged[-N].pdb` in the source AutoMR run's `Phaser/` directory without
 overwriting, then appends it to that run's `report.json["metal_merge"]` (run-
-anchored, SHA-256) and selects it. PostMR starts from the selected merged model
-unless `--original-model` is given, refuses one that is missing or changed, and
-records `input_model_source`; AutoSol metal searches keep using the original
+anchored, SHA-256) and selects it. PostMR starts from the selected (newest)
+merged model, or from the model named by `--merged-model FILE` (a name in
+`Phaser/` or a path), unless `--original-model` is given. Without the option a
+selected model that is missing or changed is refused. A chosen file that is a
+recorded, unchanged merge keeps its record; any other PDB file (saved by hand,
+or a recorded name changed since) is used with `recorded_merge: false`, its
+checksum, `comparison_with_phaser_model` (residues added, residue-name changes
+marked planned when they are `post_mr_plan.mutations`, and atoms added, removed
+or moved in the other residues) and warnings. PostMR records `input_model_source` and `metal_merge.selected_by`
+and does not change the run's selection; AutoSol metal searches keep using the original
 Phaser model. Live validation against Phenix 2.2.1-6174 AutoSol is still pending;
 tests use a simulated AutoSol that accepts only the full PHIL paths above.
 

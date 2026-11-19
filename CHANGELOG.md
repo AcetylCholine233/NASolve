@@ -10,6 +10,26 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve postmr RUN --merged-model FILE`: start PostMR from a chosen model
+  with merged metal sites instead of the newest merge (user's request,
+  2026-11-19). FILE is a name in the run's `Phaser/` folder (e.g.
+  `mr_solution-merged-2.pdb`) or a path. A recorded, unchanged merge keeps its
+  record. Any other PDB file is used as it is: a model saved by hand in Coot,
+  or a recorded name whose file changed since (U-Y_Ag run_004 has both: the
+  first merge renamed `mr_solution-mergedadad.pdb`, and a two-Ag model saved
+  as `mr_solution-merged.pdb`, which the default refuses as changed). Such a
+  file is recorded with `recorded_merge: false`, its checksum and
+  `comparison_with_phaser_model`, residue by residue: residues added (the
+  merged metals), residue-name changes (marked planned when they are the run's
+  planned mutations, which the metal search builds into its partial model),
+  and atoms added, removed or moved (> 0.01 A) in the other residues. A warning
+  is printed and logged for it, and another when residues were removed or
+  changed outside the plan, or atoms removed or moved. On the real U-Y_Ag
+  run_004 `mr_solution-merged_2Ag.pdb`: Ag B:101 and B:102 added, A:12 DG->DU
+  (planned), nothing else. A missing file or one with no atoms is refused before anything is
+  written (the recorded merges are listed). Excludes `--original-model`. The
+  run's own selection is not changed; `metal_merge.selected_by` records how
+  the model was chosen, and the command prints the other recorded merges.
 - `nasolve autofdp ROUND`: AutoFDP from an AutoRefine round folder
   (`RUN/AutoRefine/round_NNN`; user's request, 2026-11-19). Its
   `refined_NNN.pdb` is the starting model, the one X-ray data file its

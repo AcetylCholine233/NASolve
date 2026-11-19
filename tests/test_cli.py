@@ -380,6 +380,41 @@ class CLITests(unittest.TestCase):
             self.assertEqual(main(["autosol", "run_001", "--tfz-override"]), 2)
         self.assertIn("--tfz-override", error.getvalue())
 
+    def test_postmr_merged_model_is_forwarded_and_reported(self):
+        installation = SimpleNamespace(
+            version="2.2.1", executables={"phenix.ready_set": Path("/phenix/phenix.ready_set")},
+            environment={"PATH": "/phenix"},
+        )
+        run = Path("/dataset/AutoMR/run_004")
+        result = SimpleNamespace(
+            status="POSTMR_READY", message="ready", run_directory=run,
+            input_model=run / "Phaser" / "mr_solution-merged.pdb", input_model_source="metal-merged",
+            merge_selected_by="--merged-model", other_merges=("mr_solution-merged-2.pdb",),
+            merge_warnings=("mr_solution-merged.pdb has changed since it was merged; using the file as it is now",),
+            model_path=run / "PostMR" / "model.pdb", metal_sites=(), anomalous_scatterer_phil=None,
+            readyset_log=run / "PostMR" / "readyset.log", restraint_paths=(),
+            report_path=run / "PostMR" / "report.json", tfz_override_record=None,
+            narestraints_summary="NARestraints: not run; no base-pair or stacking restraints",
+            overwritten=(),
+        )
+        output = io.StringIO()
+        with (patch("nasolve.cli.load_config", return_value=AppConfig()),
+              patch("nasolve.cli._workspace_run", return_value=run),
+              patch("nasolve.cli.discover_phenix", return_value=installation),
+              patch("nasolve.cli.remember_phenix"), patch("nasolve.cli.save_config"),
+              patch("nasolve.cli.discover_coot", side_effect=CootDiscoveryError("no Coot")),
+              patch("nasolve.cli.prepare_postmr", return_value=result) as call,
+              redirect_stdout(output)):
+            self.assertEqual(main(["postmr", str(run), "--merged-model", "mr_solution-merged.pdb"]), 0)
+        self.assertEqual(call.call_args.kwargs["merged_model"], "mr_solution-merged.pdb")
+        self.assertIs(call.call_args.kwargs["use_merged_model"], True)
+        text = output.getvalue()
+        self.assertIn(f"Starting model: {run / 'Phaser' / 'mr_solution-merged.pdb'} (Phaser model with "
+                      "merged metal sites, chosen with --merged-model)", text)
+        self.assertIn("Other merged models recorded (choose one with --merged-model NAME): "
+                      "mr_solution-merged-2.pdb", text)
+        self.assertIn("Warning: mr_solution-merged.pdb has changed since it was merged", text)
+
     def test_autorefine_forwards_and_prints_extra_restraints(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

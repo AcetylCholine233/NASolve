@@ -79,6 +79,9 @@ class PostMRResult:
     tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
     narestraints_summary: str = ""
     overwritten: tuple[str, ...] = ()   # --force-overwrite: folders deleted first
+    merge_selected_by: str | None = None    # how the merged model was chosen
+    merge_warnings: tuple[str, ...] = ()    # --merged-model: an unrecorded or changed file
+    other_merges: tuple[str, ...] = ()      # recorded merges PostMR did not use
 
 
 def _stacking_options(builder) -> dict[str, bool]:
@@ -248,43 +251,205 @@ def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
     raise PostMRPreparationError("The Phaser solution PDB is missing")
 
 
+#: How PostMR chose its merged model (recorded as ``metal_merge.selected_by``).
+MERGE_BY_OPTION = "--merged-model"
+MERGE_BY_DEFAULT = "newest merge (report.json metal_merge.selected)"
+
+
+def _merge_label(entry: Mapping[str, object]) -> str:
+    """``mr_solution-merged-2.pdb (2026-11-19 18:30, 2 sites)``."""
+    details = []
+    created = entry.get("created_utc")
+    if isinstance(created, str) and len(created) >= 16:
+        details.append(created[:16].replace("T", " "))
+    sites = entry.get("sites_merged")
+    if isinstance(sites, int):
+        details.append(f"{sites} site{'s' if sites != 1 else ''}")
+    return f"{entry.get('name')}" + (f" ({', '.join(details)})" if details else "")
+
+
+def recorded_merges(report: Mapping[str, object]) -> list[dict[str, object]]:
+    """The merged metal models recorded for a run, oldest first."""
+    block = report.get("metal_merge")
+    if block is None:
+        return []
+    if not isinstance(block, Mapping):
+        raise PostMRPreparationError("The metal_merge record in report.json is malformed")
+    models = block.get("models")
+    return [dict(item) for item in (models if isinstance(models, list) else [])
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str)]
+
+
+def _atom_positions(path: Path) -> dict[tuple[str, str, str, str], tuple[float, float, float]]:
+    """Atoms of a PDB file by (chain, residue number, residue name, atom name)."""
+    positions = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith(("ATOM  ", "HETATM")) and len(line) >= 54:
+            try:
+                xyz = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+            except ValueError:
+                continue
+            key = (line[21].strip(), line[22:27].strip(), line[17:20].strip(), line[12:16].strip())
+            positions[key] = xyz
+    return positions
+
+
+def _compare_with_phaser(
+    model: Path, phaser: Path, planned: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """How a chosen model differs from the Phaser model, residue by residue.
+
+    Residues only in the chosen model (the merged metals) are ``added``;
+    residues whose name changed are listed with whether that change is a
+    planned mutation (the AutoMR run's ``post_mr_plan.mutations``; the metal
+    search builds those into its partial model, so a merge made from it has
+    them). For residues with the same name, atoms added, removed and moved
+    (> 0.01 A) are counted.
+    """
+    import math
+
+    chosen, original = _atom_positions(model), _atom_positions(phaser)
+
+    def residues(atoms):
+        grouped: dict[tuple[str, str], dict[str, object]] = {}
+        for (chain, number, name, atom), xyz in atoms.items():
+            entry = grouped.setdefault((chain, number), {"name": name, "atoms": {}})
+            entry["atoms"][atom] = xyz
+        return grouped
+
+    new, old = residues(chosen), residues(original)
+    site = lambda key: f"{key[0]}:{key[1]}"  # noqa: E731
+    planned = planned or {}
+
+    def planned_code(key):
+        value = planned.get(site(key))
+        return value.get("ligand_code") if isinstance(value, Mapping) else value
+
+    changes, added_atoms, removed_atoms, shifts = [], [], [], []
+    for key in sorted(new.keys() & old.keys()):
+        before, after = old[key], new[key]
+        if before["name"] != after["name"]:
+            changes.append({"site": site(key), "from": before["name"], "to": after["name"],
+                            "planned": planned_code(key) == after["name"]})
+            continue
+        added_atoms += [f"{after['name']} {site(key)} {atom}"
+                        for atom in sorted(after["atoms"].keys() - before["atoms"].keys())]
+        removed_atoms += [f"{before['name']} {site(key)} {atom}"
+                          for atom in sorted(before["atoms"].keys() - after["atoms"].keys())]
+        shifts += [math.dist(after["atoms"][atom], before["atoms"][atom])
+                   for atom in after["atoms"].keys() & before["atoms"].keys()]
+    moved = [shift for shift in shifts if shift > 0.01]
+    return {
+        "phaser_model": str(phaser),
+        "added": [f"{new[key]['name']} {site(key)}" for key in sorted(new.keys() - old.keys())],
+        "removed": [f"{old[key]['name']} {site(key)}" for key in sorted(old.keys() - new.keys())],
+        "residue_changes": changes,
+        "added_atoms": added_atoms,
+        "removed_atoms": removed_atoms,
+        "moved_atoms": len(moved),
+        "max_shift": round(max(moved), 3) if moved else 0.0,
+    }
+
+
+def _chosen_model_path(run: Path, choice: str | Path) -> Path | None:
+    """``--merged-model``: an absolute path, else relative to the current
+    folder, the run's ``Phaser/`` folder or the run."""
+    wanted = Path(choice).expanduser()
+    candidates = [wanted] if wanted.is_absolute() else [
+        Path.cwd() / wanted, run / "Phaser" / wanted, run / wanted]
+    return next((path.resolve() for path in candidates if path.is_file()), None)
+
+
 def _merged_metal_model(
-    run: Path, report: Mapping[str, object]
+    run: Path, report: Mapping[str, object], choice: str | Path | None = None,
 ) -> tuple[Path, dict[str, object]] | None:
     """The Phaser model with metal sites merged in Coot, if one is selected.
 
     ``report.json["metal_merge"]`` is written by the metal view's Coot command
-    ("Merge metal sites and save"), which saves ``Phaser/<model>-merged.pdb``
-    and selects it. A selected model that is missing or changed since merging
-    stops PostMR rather than silently falling back to the plain model.
+    ("Merge metal sites and save"), which saves ``Phaser/<model>-merged[-N].pdb``,
+    records it with its checksum and selects it. Without ``choice`` the selected
+    (newest) merge is used; if it is missing or changed since merging PostMR
+    stops rather than silently falling back to the plain model.
+
+    ``choice`` (``--merged-model``) is a model file (a name in the run's
+    ``Phaser/`` folder, or a path). A recorded merge whose file is unchanged
+    keeps its record. Any other PDB file (saved by hand in Coot, or a recorded
+    name whose file has changed since) is used as it is, with its checksum,
+    ``recorded_merge: false``, a comparison with the Phaser model (atoms added,
+    removed, moved) and warnings. The returned record says how it was chosen
+    (``selected_by``).
     """
-    block = report.get("metal_merge")
-    if block is None:
-        return None
-    if not isinstance(block, Mapping):
-        raise PostMRPreparationError("The metal_merge record in report.json is malformed")
-    selected = block.get("selected")
-    if selected is None:
-        return None
-    models = block.get("models")
-    entry = next(
-        (
-            item for item in (models if isinstance(models, list) else [])
-            if isinstance(item, Mapping) and item.get("name") == selected
-        ),
-        None,
-    )
-    if entry is None or not isinstance(entry.get("model"), Mapping):
-        raise PostMRPreparationError(
-            f"The selected merged metal model {selected!r} is not recorded properly"
-        )
-    path = resolve_artifact_path(entry["model"], run)
+    merges = recorded_merges(report)
+    if choice is None:
+        block = report.get("metal_merge")
+        selected = block.get("selected") if isinstance(block, Mapping) else None
+        if selected is None:
+            return None
+        entry = next((item for item in merges if item["name"] == selected), None)
+        if entry is None or not isinstance(entry.get("model"), Mapping):
+            raise PostMRPreparationError(
+                f"The selected merged metal model {selected!r} is not recorded properly"
+            )
+        path = resolve_artifact_path(entry["model"], run)
+        if path is None:
+            raise PostMRPreparationError(
+                f"The merged metal model {selected} is missing or was changed after merging. "
+                "Merge again in Coot, name the model to use with --merged-model FILE, or use "
+                "--original-model to start from the Phaser model."
+            )
+        return path, {**entry, "selected_by": MERGE_BY_DEFAULT}
+
+    path = _chosen_model_path(run, choice)
     if path is None:
+        recorded = ", ".join(_merge_label(item) for item in merges) or "none"
         raise PostMRPreparationError(
-            f"The merged metal model {selected} is missing or was changed after merging. "
-            "Merge again in Coot, or use --original-model to start from the Phaser model."
+            f"--merged-model: no such file: {choice} (looked in the current folder, "
+            f"{run / 'Phaser'} and {run}); merges recorded for this run: {recorded}"
         )
-    return path, dict(entry)
+    if path.suffix.lower() not in {".pdb", ".ent"} or not _atom_positions(path):
+        raise PostMRPreparationError(f"--merged-model: {path} is not a PDB model with atoms")
+    for item in merges:
+        if isinstance(item.get("model"), Mapping):
+            resolved = resolve_artifact_path(item["model"], run)
+            if resolved is not None and resolved.resolve() == path:
+                return path, {**item, "selected_by": MERGE_BY_OPTION}
+    plan = report.get("post_mr_plan")
+    comparison = _compare_with_phaser(
+        path, _solution_model(run, report),
+        plan.get("mutations") if isinstance(plan, Mapping) else None,
+    )
+    warnings = []
+    same_name = [item for item in merges if item["name"] == path.name]
+    if same_name and path.parent == (run / "Phaser").resolve():
+        warnings.append(
+            f"{path.name} has changed since it was merged ({_merge_label(same_name[-1])}); "
+            "using the file as it is now"
+        )
+    else:
+        warnings.append(f"{path.name} was not saved by NASolve's merge command; using it as given")
+    unplanned = [f"{item['site']} {item['from']}->{item['to']}"
+                 for item in comparison["residue_changes"] if not item["planned"]]
+    if comparison["removed"] or comparison["removed_atoms"] or comparison["moved_atoms"] or unplanned:
+        parts = []
+        if comparison["removed"]:
+            parts.append("residues removed: " + ", ".join(comparison["removed"]))
+        if unplanned:
+            parts.append("residues changed (not planned mutations): " + ", ".join(unplanned))
+        if comparison["removed_atoms"]:
+            parts.append(f"{len(comparison['removed_atoms'])} atom(s) removed")
+        if comparison["moved_atoms"]:
+            parts.append(f"{comparison['moved_atoms']} atom(s) moved "
+                         f"(up to {comparison['max_shift']:.2f} A)")
+        warnings.append(f"{path.name} differs from the Phaser model beyond the merged "
+                        "metals and planned mutations: " + "; ".join(parts))
+    return path, {
+        "name": path.name,
+        "model": {**artifact_reference(path, run), "sha256": file_sha256(path)},
+        "recorded_merge": False,
+        "selected_by": MERGE_BY_OPTION,
+        "comparison_with_phaser_model": comparison,
+        "warnings": warnings,
+    }
 
 
 def _site_parts(site: str) -> tuple[str, str]:
@@ -1796,12 +1961,14 @@ def prepare_postmr(
     modified_pair_builder: Callable[[Path, Path, Path, Path], object] | None = None,
     guessed_pair_builder: Callable[[Path, Path, Path], object] | None = None,
     use_merged_model: bool = True,
+    merged_model: str | Path | None = None,
     force_overwrite: bool = False,
 ) -> PostMRResult:
     """Prepare a completed Phaser solution without modifying the MR outputs.
 
     When metal sites were merged into the Phaser model in Coot, PostMR starts
-    from that merged model unless ``use_merged_model`` is False.
+    from the newest merged model unless ``use_merged_model`` is False;
+    ``merged_model`` (``--merged-model``) names another recorded merge.
 
     NARestraints: a run with a frame uses the frame's pair file and
     secondary-structure restraints; ``modified_pairs_only`` restrains only
@@ -1873,7 +2040,9 @@ def prepare_postmr(
             "A site cannot simultaneously request standard 5'-phosphate construction "
             "and experimental backbone passthrough"
         )
-    merged = _merged_metal_model(run, report) if use_merged_model else None
+    if merged_model is not None and not use_merged_model:
+        raise PostMRPreparationError("--merged-model and --original-model cannot be combined")
+    merged = _merged_metal_model(run, report, merged_model) if use_merged_model else None
     if merged is not None:
         source_model, merge_record = merged
         input_model_source = "metal-merged"
@@ -2327,6 +2496,10 @@ def prepare_postmr(
             ),
             f"Input model: {source_model}",
             f"Input model source: {input_model_source}",
+            *([f"Merged model: {merge_record.get('name')} ({merge_record.get('selected_by')})"]
+              if merge_record is not None else []),
+            *([f"Warning: {warning}" for warning in merge_record.get("warnings") or ()]
+              if merge_record is not None and merge_record.get("recorded_merge") is False else []),
             "Metal anomalous scatterers: " + (
                 ", ".join(f"{site['element']} {site['site']} {site['atom_name']}"
                           for site in metal_sites) or "none"
@@ -2371,6 +2544,13 @@ def prepare_postmr(
         restraint_paths=tuple(restraint_paths),
         input_model=source_model,
         input_model_source=input_model_source,
+        merge_selected_by=merge_record.get("selected_by") if merge_record else None,
+        merge_warnings=tuple(merge_record.get("warnings") or ())
+        if merge_record and merge_record.get("recorded_merge") is False else (),
+        other_merges=tuple(
+            item["name"] for item in recorded_merges(report)
+            if merge_record is None or item["name"] != merge_record.get("name")
+        ) if merge_record is not None else (),
         metal_sites=tuple(metal_sites),
         anomalous_scatterer_phil=metal_phil,
         tfz_override_record=tfz_override_record,
