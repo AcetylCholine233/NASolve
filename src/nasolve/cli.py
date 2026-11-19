@@ -202,6 +202,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="guess base pairs and restrain only pairs containing a modified nucleotide",
     )
     postmr.add_argument(
+        "--no-narestraints", action="store_true",
+        help=("runs without a frame: skip NARestraints (by default it guesses every "
+              "base pair and restrains them and stacking)"),
+    )
+    postmr.add_argument(
         "--allow-unreviewed-backbone", action="store_true",
         help=("experimental: continue at explicitly marked non-standard backbone "
               "sites without validating their linkage chemistry"),
@@ -930,6 +935,7 @@ def _postmr(args: argparse.Namespace) -> int:
             allow_mr_review=args.allow_mr_review,
             tfz_override=args.tfz_override,
             modified_pairs_only=args.modified_pairs_only,
+            no_narestraints=args.no_narestraints,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
             use_merged_model=not args.original_model,
         )
@@ -960,6 +966,8 @@ def _postmr(args: argparse.Namespace) -> int:
     if result.anomalous_scatterer_phil is not None:
         print(f"Anomalous-scatterer PHIL for phenix.refine by hand: {result.anomalous_scatterer_phil}")
     print(f"ReadySet log: {result.readyset_log}")
+    if result.narestraints_summary:
+        print(result.narestraints_summary)
     for restraint in result.restraint_paths:
         print(f"Restraint: {restraint}")
     print(f"Report: {result.report_path}")

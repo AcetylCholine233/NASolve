@@ -304,6 +304,17 @@ Useful opt-in variants are:
 ./nasolve postmr "$RUN" --modified-pairs-only
 ```
 
+PostMR on a nonstandard run (no frame) runs NARestraints by default: its
+guesser finds the base pairs in the model and PostMR restrains every one of
+them, plus stacking, with NARestraints' own defaults (canonical pairs only;
+metal-mediated pairs are found by element and left unrestrained, as are their
+bases' stacking). The pairs go to `PostMR/Restraints/guessed_pairs.txt`, the
+restraints to `narestraints_guessed_pairs.phil`, which AutoRefine uses; the
+terminal and `postmr.log` say how many pairs were restrained. A modified
+residue is guessed as its NARestraints label (DYI as C34), so check pairs
+involving it. `--no-narestraints` skips this. Runs with a frame keep the frame's
+pair file and secondary-structure restraints.
+
 ### Inspect the prepared model in Coot
 
 Open the selected current checkpoint in the active workspace, an explicit run,

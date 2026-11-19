@@ -71,6 +71,26 @@ class PostMRResult:
     metal_sites: tuple[dict[str, object], ...] = ()
     anomalous_scatterer_phil: Path | None = None
     tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
+    narestraints_summary: str = ""
+
+
+def describe_narestraints(record: Mapping[str, object]) -> str:
+    """One line on the base-pair and stacking restraints PostMR made."""
+    mode = record.get("mode")
+    count = record.get("retained_pair_count")
+    pairs = f"{count} base pair{'s' if count != 1 else ''}" if isinstance(count, int) else "base pairs"
+    if mode == "frame-template":
+        return (f"NARestraints: frame {record.get('frame')} pair file and secondary-structure "
+                "restraints, with stacking")
+    if mode == "modified-pairs-only":
+        return f"NARestraints: {pairs} containing a modified nucleotide (guessed), no stacking"
+    if mode == "guessed-pairs":
+        metal = record.get("metal_mediated_pairs") or []
+        text = f"NARestraints: {pairs} (guessed from the model) and stacking"
+        if metal:
+            text += f"; {len(metal)} metal-mediated pair{'s' if len(metal) != 1 else ''} not restrained"
+        return text
+    return "NARestraints: not run; no base-pair or stacking restraints"
 
 
 _COOT_BASES = frozenset({"DA", "DC", "DG", "DT", "A", "C", "G", "U"})
@@ -1255,6 +1275,63 @@ def _default_modified_pair_restraints_builder(
     }
 
 
+def _default_guessed_pair_restraints_builder(
+    compatibility_pdb: Path,
+    pair_output: Path,
+    restraint_output: Path,
+) -> dict[str, object]:
+    """NARestraints on a model without a frame: guess the pairs, then restrain
+    them and stacking, with NARestraints' defaults."""
+    try:
+        from restraints import builder, guesser
+        from restraints.base_pairs import read_base_pair_file
+        from restraints.residue_library import load_residue_records
+    except ImportError as exc:
+        raise PostMRPreparationError("NARestraints is not installed") from exc
+    required_codes = {
+        identity[2]
+        for line in _coordinate_records(compatibility_pdb)
+        if (identity := _record_identity(line)) is not None
+    }
+    records, corrections = _patch_narestraints_records(load_residue_records(), required_codes)
+    original_builder_loader = builder.load_residue_records
+    original_guesser_loader = guesser.load_residue_records
+    builder.load_residue_records = lambda: records
+    guesser.load_residue_records = lambda: records
+    try:
+        candidates, warnings, metal_pairs = guesser.guess_pairs_detailed(compatibility_pdb)
+        guesser.write_guess(pair_output, candidates, metal_pairs)
+        builder.build_phil_from_pdb(
+            compatibility_pdb,
+            read_base_pair_file(pair_output),
+            restraint_output,
+            include_stacking=True,
+        )
+    finally:
+        builder.load_residue_records = original_builder_loader
+        guesser.load_residue_records = original_guesser_loader
+    return {
+        "mode": "guessed-pairs",
+        "allow_noncanonical_guessing": False,
+        "include_stacking": True,
+        "guesser_warnings": list(warnings),
+        "guessed_pair_count": len(candidates),
+        "retained_pair_count": len(candidates),
+        "retained_pairs": [
+            {
+                "first": _candidate_site(candidate.first),
+                "second": _candidate_site(candidate.second),
+                "recipe": str(candidate.recipe),
+                "score": float(candidate.score),
+                "noncanonical": bool(candidate.noncanonical),
+            }
+            for candidate in candidates
+        ],
+        "metal_mediated_pairs": [pair.describe() for pair in metal_pairs],
+        "compatibility_corrections": corrections,
+    }
+
+
 def _selection_site(text: str, base: str) -> str | None:
     match = re.search(
         rf"\b{re.escape(base)}\s*=\s*chain\s+['\"]?([^\s'\"]+)['\"]?"
@@ -1615,19 +1692,36 @@ def prepare_postmr(
     allow_mr_review: bool = False,
     tfz_override: bool = False,
     modified_pairs_only: bool = False,
+    no_narestraints: bool = False,
     allow_unreviewed_backbone: bool = False,
     data_root: Path | None = None,
     narestraints_builder: Callable[[Path, Path, Path], object] | None = None,
     modified_pair_builder: Callable[[Path, Path, Path, Path], object] | None = None,
+    guessed_pair_builder: Callable[[Path, Path, Path], object] | None = None,
     use_merged_model: bool = True,
 ) -> PostMRResult:
     """Prepare a completed Phaser solution without modifying the MR outputs.
 
     When metal sites were merged into the Phaser model in Coot, PostMR starts
     from that merged model unless ``use_merged_model`` is False.
+
+    NARestraints: a run with a frame uses the frame's pair file and
+    secondary-structure restraints; ``modified_pairs_only`` restrains only
+    guessed pairs that contain a modified nucleotide; a run without a frame
+    otherwise gets every pair NARestraints guesses, plus stacking, as
+    NARestraints does on its own (``no_narestraints`` skips that).
     """
     run, report = _read_report(run_directory)
     mr_status = report.get("status")
+    frame_record = report.get("frame")
+    if no_narestraints and (
+        modified_pairs_only
+        or (isinstance(frame_record, Mapping) and isinstance(frame_record.get("name"), str))
+    ):
+        raise PostMRPreparationError(
+            "--no-narestraints applies only to runs without a frame and without "
+            "--modified-pairs-only"
+        )
     tfz_override_record = None
     if tfz_override and mr_status in {"MR_REVIEW", "MR_FAILED"}:
         # A low TFZ accepted explicitly; any other Phaser failure is still refused.
@@ -1896,6 +1990,29 @@ def prepare_postmr(
             "secondary_structure_file": str(secondary),
         })
         restraint_paths.extend([narestraints, secondary])
+    elif not no_narestraints:
+        # No frame: every pair NARestraints guesses, plus stacking, with its own
+        # defaults (canonical pairs; metal-mediated pairs found and left out).
+        _rewrite_codes(prepared, compatibility, compatibility_codes)
+        pair_file = restraints_dir / "guessed_pairs.txt"
+        narestraints = restraints_dir / "narestraints_guessed_pairs.phil"
+        try:
+            builder_result = (guessed_pair_builder or _default_guessed_pair_restraints_builder)(
+                compatibility, pair_file, narestraints,
+            )
+        except PostMRPreparationError:
+            raise
+        except Exception as exc:
+            raise PostMRPreparationError(f"NARestraints pair guessing failed: {exc}") from exc
+        if not isinstance(builder_result, Mapping):
+            raise PostMRPreparationError("Guessed-pair NARestraints builder returned no structured report")
+        narestraints_report = dict(builder_result)
+        narestraints_report.setdefault("mode", "guessed-pairs")
+        if not narestraints.is_file():
+            raise PostMRPreparationError("NARestraints did not create its expected output")
+        narestraints_report["pair_file"] = str(pair_file)
+        narestraints_report["restraint_file"] = str(narestraints)
+        restraint_paths.append(narestraints)
 
     residue_codes = {
         identity[2]
@@ -2103,6 +2220,7 @@ def prepare_postmr(
                 for action in actions
             ),
             f"Coot executed: {'yes' if coot_actions else 'no'}",
+            describe_narestraints(narestraints_report),
             "Internal phosphate extras removed before restraints: " + (
                 ", ".join(f"{item['site']} {item['atom']}" for item in phosphate_before["removed"])
                 or "none"
@@ -2138,6 +2256,7 @@ def prepare_postmr(
         metal_sites=tuple(metal_sites),
         anomalous_scatterer_phil=metal_phil,
         tfz_override_record=tfz_override_record,
+        narestraints_summary=describe_narestraints(narestraints_report),
     )
 
 

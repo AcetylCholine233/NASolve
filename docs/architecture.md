@@ -253,6 +253,13 @@ portable 5W6W secondary-structure template contains 17 non-overlapping
 scaffold base pairs, no stacking pairs, and no historical input paths, cell,
 map, output, or GUI settings.
 
+Without a frame and without `--modified-pairs-only`, PostMR runs NARestraints
+in `guessed-pairs` mode (`--no-narestraints` skips it): `guesser.guess_pairs_detailed`
+with its defaults (canonical only, metal-mediated pairs detected and excluded),
+`write_guess` (metal pairs as comments) and `build_phil_from_pdb` with stacking.
+Every guessed pair is restrained; the report records the candidates, warnings
+and metal-mediated pairs.
+
 `--modified-pairs-only` generates a model-derived restraint selection in either
 standard or nonstandard mode. After all coordinate edits,
 the NARestraints guesser runs with `allow_noncanonical=True`. NASolve defines

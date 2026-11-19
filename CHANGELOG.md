@@ -10,6 +10,20 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- PostMR runs NARestraints on runs without a frame (nonstandard mode): its
+  guesser finds the model's base pairs and PostMR restrains all of them, plus
+  stacking, with NARestraints' defaults (canonical pairs; metal-mediated pairs
+  detected and not restrained, nor their bases' stacking). Previously such a
+  run got no pair or stacking restraints (`narestraints.mode = "none"`), e.g.
+  Y-T nasolve AutoMR run_001. New files `PostMR/Restraints/guessed_pairs.txt`
+  and `narestraints_guessed_pairs.phil` (passed to AutoRefine); report
+  `narestraints.mode = "guessed-pairs"` with candidates, warnings and
+  `metal_mediated_pairs`. `nasolve postmr --no-narestraints` keeps the old
+  behaviour; it is refused with a frame or `--modified-pairs-only`. The
+  terminal and `postmr.log` gain a one-line NARestraints summary for every
+  mode. On the real `MR_frames/5W6W/5W6W_noPO4.pdb` (NARestraints d1bb52d):
+  19 pairs, 38 stacking pairs. ReadySet and phenix.refine simulated.
+
 - `nasolve autorefine --restraints FILE` (repeatable): extra restraints for a
   round, PHIL (`.eff`, `.phil`, `.params`) or CIF (`.cif`); other file types
   are refused. Each file is copied into `round_NNN/extra_restraints/`, passed
