@@ -342,7 +342,7 @@ class BStartSite:
     b_source: str         # "surrounding", "model" or "value"
     neighbour_b: NeighbourB | None
     occupancy_start: float | None = None   # written to start_model.pdb
-    nudge: float | None = None             # --nudge: occupancy_start = occupancy - nudge
+    nudge: float | None = None             # --nudge: occupancy_start = occupancy + nudge
 
 
 @dataclass(frozen=True)
@@ -538,9 +538,9 @@ def nudge_targets(sites: Sequence[BStartSite]) -> list[BStartSite]:
 
 
 def _nudged(site: BStartSite, nudge: float, occupancy_floor: float) -> BStartSite:
-    """The site starting at its model occupancy minus ``nudge`` (two decimals,
+    """The site starting at its model occupancy plus ``nudge`` (two decimals,
     as the PDB occupancy column holds), within [occupancy_floor, 1]."""
-    start = round(site.occupancy - nudge, 2)
+    start = round(site.occupancy + nudge, 2)
     if start > 1:
         raise AutoFDPError(
             f"--nudge {nudge:g} would start {site.site} {site.atom_name} at occupancy "
@@ -577,7 +577,7 @@ def prepare_start_model(
     - a number: that B factor.
 
     With ``nudge`` (``--nudge``), the site :func:`nudge_targets` picks starts
-    at its occupancy in the model (AutoRefine's) minus ``nudge``; the result
+    at its occupancy in the model (AutoRefine's) plus ``nudge``; the result
     must lie within [``occupancy_floor``, 1].
 
     Without ``output_directory`` nothing is written (the plan). With it, the

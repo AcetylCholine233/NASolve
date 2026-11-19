@@ -408,8 +408,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--nudge", type=float, metavar="Q",
-        help="start the metal site at its occupancy in the model (AutoRefine's) minus Q, "
-             "e.g. 0.1 (negative raises it; two decimals, within --occupancy-floor and 1). "
+        help="start the metal site at its occupancy in the model (AutoRefine's) plus Q, "
+             "e.g. 0.05 (negative lowers it; two decimals, within --occupancy-floor and 1). "
              "One site for now: the model's only metal site, or the one --site names",
     )
     autofdp.add_argument(

@@ -101,7 +101,7 @@ The first also ends a converged run with a final round from
 | `--cycles` | 3 | phenix.refine macrocycles per f″ round |
 | `--b-start` | `surrounding` | site B at the start: mean of the neighbouring nucleotides, the model's own (`model`), or a number |
 | `--b-step` | 20 Å² *(to confirm)* | B change when the map says to adjust B instead of occupancy |
-| `--nudge` | none | start the metal site at its occupancy in the model (AutoRefine's) minus Q (negative raises it); within `--occupancy-floor` and 1. One site for now: the model's only metal site, or the one `--site` names |
+| `--nudge` | none | start the metal site at its occupancy in the model (AutoRefine's) plus Q (negative lowers it); within `--occupancy-floor` and 1. One site for now: the model's only metal site, or the one `--site` names |
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the separate B-only round (not used: the final round serves as the B confirmation for now) |
@@ -174,8 +174,8 @@ sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
    B-factor columns (61-66) of the metal lines change. Occupancy, coordinates
    and every other atom are unchanged. The result is `run_NNN/start_model.pdb`.
    With `--nudge Q` (user's request, 2026-11-19), the site also starts at its
-   occupancy in the model (AutoRefine's) minus Q, written with two decimals
-   in the occupancy columns (55-60); a negative Q raises it, and the result
+   occupancy in the model (AutoRefine's) plus Q, written with two decimals
+   in the occupancy columns (55-60); a negative Q lowers it, and the result
    must lie within `--occupancy-floor` and 1. For now one site is nudged
    (`nudge_targets`): the model's only metal site, or the one `--site` names;
    a model with several and no `--site` is refused. A selection of several
