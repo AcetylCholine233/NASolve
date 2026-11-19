@@ -7,6 +7,9 @@ from pathlib import Path
 from nasolve.automr import prepare_automr
 from nasolve.phaser import (
     TFZ_FLOOR,
+    TFZScores,
+    describe_tfz,
+    parse_tfz_scores,
     TFZ_THRESHOLD,
     PhaserExecutionError,
     TFZOverrideError,
@@ -202,6 +205,62 @@ class PhaserExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(PhaserExecutionError, "refusing to overwrite"):
                 execute_phaser(preflight.report_path, make_phaser(root))
 
+    def test_refined_tfz_decides_and_both_are_recorded(self):
+        """Y-T nasolve AutoMR run_004 (Phaser 2.9.0, 2026-11-19): translation
+        TFZ 6.5, TFZ 7.8 after refinement. The status used to come from the
+        first TFZ on the line (6.5: MR_FAILED); it now comes from the refined
+        one (7.8: MR_REVIEW), and both are recorded and shown."""
+        line = "   SOLU SET  RFZ=3.9 TFZ=6.5 PAK=0 LLG=95 TFZ==7.8 LLG=96 TFZ==7.8 PAK=0 LLG=96 TFZ==7.8"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preflight = self._preflight(root)
+            result = execute_phaser(preflight.report_path, make_phaser(root, solution_line=line))
+            self.assertEqual(result.status, "MR_REVIEW")
+            self.assertEqual((result.tfz, result.translation_tfz, result.refined_tfz, result.tfz_basis),
+                             (7.8, 6.5, 7.8, "refined"))
+            self.assertIn("Best TFZ 7.80 (after refinement; translation search 6.50)", result.message)
+            record = json.loads(result.report_path.read_text())["execution"]["phaser"]
+            self.assertEqual(
+                {key: record[key] for key in ("best_tfz", "best_llg", "translation_tfz", "refined_tfz",
+                                              "tfz_basis")},
+                {"best_tfz": 7.8, "best_llg": 96.0, "translation_tfz": 6.5, "refined_tfz": 7.8,
+                 "tfz_basis": "refined"},
+            )
+            log = (result.run_directory / "automr.log").read_text()
+            self.assertIn("Best TFZ: 7.8 (after refinement; decides pass/fail)", log)
+            self.assertIn("TFZ after refinement (TFZ==): 7.8", log)
+            self.assertIn("TFZ from the translation search (TFZ=): 6.5", log)
+
+    def test_translation_tfz_decides_when_no_refined_tfz_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preflight = self._preflight(root)
+            result = execute_phaser(preflight.report_path, make_phaser(root, 7.5))
+            self.assertEqual((result.status, result.tfz_basis, result.refined_tfz), ("MR_REVIEW", "translation", None))
+            self.assertIn("translation search; no TFZ after refinement reported", result.message)
+            log = (result.run_directory / "automr.log").read_text()
+            self.assertIn("TFZ after refinement (TFZ==): not reported", log)
+
+    def test_tfz_parsing(self):
+        cases = {
+            # The manual run of the same data (Y-T_Ag phaser_1).
+            "SOLU SET  RFZ=4.0 TFZ=6.3 PAK=1 LLG=97 TFZ==7.8 LLG=97 TFZ==7.8":
+                TFZScores(7.8, 97.0, 6.3, 7.8, "refined"),
+            "SOLU SET RFZ=9.1 TFZ=14.3 LLG=121": TFZScores(14.3, 121.0, 14.3, None, "translation"),
+            # Two copies: the last translation search and the final refined value.
+            "SOLU SET RFZ=5.4 TFZ=8.4 PAK=0 LLG=72 TFZ==9.4 RF++ TFZ=13.9 PAK=0 LLG=253 TFZ==17.0 LLG=260 TFZ==17.2":
+                TFZScores(17.2, 260.0, 13.9, 17.2, "refined"),
+            "No placed solution": TFZScores(None, None, None, None, None),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse_tfz_scores(text), expected)
+        # The best solution is the one with the highest deciding (refined) TFZ.
+        two = "SOLU SET RFZ=4 TFZ=9.0 LLG=50 TFZ==7.0\nSOLU SET RFZ=4 TFZ=6.0 LLG=60 TFZ==8.2"
+        self.assertEqual(parse_tfz_scores(two), TFZScores(8.2, 60.0, 6.0, 8.2, "refined"))
+        self.assertEqual(describe_tfz(TFZScores(7.8, 96.0, 6.5, 7.8, "refined")),
+                         "TFZ 7.80 after refinement (decides pass/fail); 6.50 from the translation search")
+
     def test_parser_prefers_best_solu_set(self):
         text = "\n".join([
             "intermediate TFZ=99.0",
@@ -245,6 +304,7 @@ class TFZOverrideTests(unittest.TestCase):
                 run, report = low_tfz_run(Path(directory), tfz=tfz, status=status)
                 record = check_tfz_override(report, run)
                 self.assertEqual(record["accepted_by"], "--tfz-override")
+                self.assertIn("refined_tfz", record)   # None in reports from before both were kept
                 self.assertEqual(record["mr_status"], status)
                 self.assertEqual(record["mr_message"], report["message"])
                 self.assertEqual(record["best_tfz"], tfz)

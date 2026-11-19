@@ -90,6 +90,7 @@ class AutoMRCootTests(unittest.TestCase):
                 ["automr", str(dataset), "--execute"], self._phenix(root)
             )
             self.assertEqual(code, 0)
+            self.assertIn("TFZ 8.40 from the translation search (decides pass/fail", out)
             self.assertIn("Open in Coot with: nasolve show", out)
             self.assertIn("--stage automr", out)
             launched.assert_not_called()

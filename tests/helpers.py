@@ -136,7 +136,9 @@ def make_phaser(
     return_code: int = 0,
     create_outputs: bool = True,
     labin_echo: str | None = None,
+    solution_line: str | None = None,
 ) -> Path:
+    """A stand-in phenix.phaser; ``solution_line`` replaces its SOLU SET line."""
     executable = root / "phenix.phaser"
     output_commands = ""
     if create_outputs:
@@ -145,7 +147,8 @@ def make_phaser(
             "printf 'mtz' > PHASER.1.mtz\n"
         )
     score_command = (
-        f"echo 'SOLU SET RFZ=9.1 TFZ={tfz} LLG={llg}'\n"
+        f"echo '{solution_line}'\n" if solution_line is not None
+        else f"echo 'SOLU SET RFZ=9.1 TFZ={tfz} LLG={llg}'\n"
         if tfz is not None else "echo 'No placed solution'\n"
     )
     labin_command = f"echo 'LABIN {labin_echo}'\n" if labin_echo else ""

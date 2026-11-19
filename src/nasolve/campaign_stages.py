@@ -303,7 +303,8 @@ def execute_stage(
         required = [result.parameter_path, result.log_path]
         if result.status in {"MR_SUCCESS", "MR_REVIEW"}:
             required.extend([stage_directory / "mr_solution.pdb", stage_directory / "mr_solution.mtz"])
-        extra.update(tfz=result.tfz, llg=result.llg)
+        extra.update(tfz=result.tfz, llg=result.llg, translation_tfz=result.translation_tfz,
+                     refined_tfz=result.refined_tfz, tfz_basis=result.tfz_basis)
     elif stage == "postmr":
         if report.get("status") != "MR_SUCCESS":
             raise CampaignStageError("Campaign PostMR requires MR_SUCCESS; review is an inspection stop")

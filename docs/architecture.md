@@ -168,7 +168,11 @@ sources stop the run. Nonstandard mode does not apply this symmetry rule.
 1. Validate and freeze AutoMR input; optionally mirror the search model; assess
    the exact model supplied to Phaser.
 2. Run Phaser in an isolated `Phaser/` directory without stripping heteroatoms.
-3. Classify the best TFZ: `>= 8.0` pass; `7.0–7.99` review; `< 7.0` fail.
+3. Classify the best TFZ: `>= 8.0` pass; `7.0–7.99` review; `< 7.0` fail. The
+   deciding TFZ is the TFZ-equivalent after refinement (`TFZ==`, last on the
+   `SOLU SET` line), or the translation-search TFZ (`TFZ=`) when no refined
+   value is reported; `execution.phaser` records `best_tfz` (deciding),
+   `refined_tfz`, `translation_tfz` and `tfz_basis` (`phaser.parse_tfz_scores`).
 4. `nasolve postmr RUN` applies supported site changes, builds the restraint
    stack, and runs ReadySet with hydrogens disabled.
 5. If PostMR finds nucleotide-bound I, Br, or Se, `nasolve autosol RUN` performs

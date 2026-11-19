@@ -361,7 +361,8 @@ For each dataset, AutoMR:
    checksummed standard-frame sequence snapshot when available;
 6. optionally runs Phenix Phaser with one explicit ensemble and preserved
    heteroatoms; and
-7. reports the best TFZ and retains both the raw and selected MR outputs.
+7. reports the best solution's TFZ (after refinement, and from the translation
+   search) and retains both the raw and selected MR outputs.
 
 NASolve does not edit the original dataset or search model.
 
@@ -1283,7 +1284,16 @@ human-readable record.
 
 ## Result gates
 
-AutoMR classifies the best final-solution TFZ reported by Phaser:
+AutoMR classifies the best final solution by its TFZ after refinement: the
+`TFZ==` value on Phaser's `SOLU SET` line (the last one on the line). Phaser
+also reports the translation-search TFZ (`TFZ=`); both are recorded in
+`report.json` (`refined_tfz`, `translation_tfz`; `best_tfz` is the one that
+decided, named by `tfz_basis`) and shown in `automr.log` and on the terminal.
+When Phaser reports no refined value, the translation-search TFZ decides and
+the report says so. For example, `SOLU SET RFZ=3.9 TFZ=6.5 PAK=0 LLG=95
+TFZ==7.8 ...` is TFZ 7.8 (`MR_REVIEW`), with 6.5 from the translation search.
+Runs made before this change were classified by the translation-search TFZ and
+keep their recorded status.
 
 | Result | TFZ | Meaning | Exit code |
 | --- | ---: | --- | ---: |

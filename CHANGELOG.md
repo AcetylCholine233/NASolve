@@ -10,6 +10,23 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- AutoMR decides pass/fail on the TFZ after refinement (Phaser's `TFZ==`, the
+  last on the best `SOLU SET` line) instead of the first TFZ on that line,
+  which is the translation-search `TFZ=` (user's decision, 2026-11-19). Example:
+  Y-T AutoMR run_004 (Phaser 2.9.0), `SOLU SET RFZ=3.9 TFZ=6.5 PAK=0 LLG=95
+  TFZ==7.8 ...`, was MR_FAILED at 6.5 and is now MR_REVIEW at 7.8; a manual
+  run of the same data gave 6.3 and 7.8. When no refined value is reported the
+  translation-search TFZ decides. The cut-offs (7.0, 8.0) are unchanged.
+  Both values are recorded and displayed: `execution.phaser` gains
+  `translation_tfz`, `refined_tfz` and `tfz_basis` ("refined" or
+  "translation"); `best_tfz` is the deciding value and `best_llg` the last LLG
+  on that line (was the first). `automr.log`, the terminal and the status
+  message show both; `--tfz-override` records copy them; campaign Phaser
+  stages record them. The metal search's TFZ gate uses `best_tfz`, so it also
+  follows the refined value. Runs made earlier keep their recorded status and
+  `best_tfz` (no `tfz_basis`); rerun AutoMR to reclassify one. Phaser
+  simulated in tests; parsing checked on the real Y-T_Ag manual Phaser log.
+
 - Metal searches (`nasolve autosol RUN --metal ELEMENT`) are written inside the
   AutoMR run they come from, `AutoMR/run_NNN/AutoSolMetal/run_NNN` (numbered
   per AutoMR run), instead of `DATASET/AutoSolMetal/run_NNN` (user's request,

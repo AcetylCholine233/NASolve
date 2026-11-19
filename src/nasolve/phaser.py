@@ -36,10 +36,17 @@ class PhaserExecutionResult:
     report_path: Path
     log_path: Path
     parameter_path: Path
-    tfz: float | None
+    tfz: float | None   # the TFZ that decided the status (after refinement when reported)
     llg: float | None
     solution_pdb: Path | None
     solution_mtz: Path | None
+    translation_tfz: float | None = None   # TFZ= from the translation search
+    refined_tfz: float | None = None       # TFZ== after refinement
+    tfz_basis: str | None = None           # "refined" or "translation"
+
+    @property
+    def tfz_scores(self) -> "TFZScores":
+        return TFZScores(self.tfz, self.llg, self.translation_tfz, self.refined_tfz, self.tfz_basis)
 
     @property
     def exit_code(self) -> int:
@@ -108,6 +115,9 @@ def check_tfz_override(report: Mapping[str, object], run_directory: Path) -> dic
         "mr_status": report.get("status"),
         "mr_message": report.get("message"),
         "best_tfz": float(tfz),
+        "translation_tfz": phaser.get("translation_tfz"),
+        "refined_tfz": phaser.get("refined_tfz"),
+        "tfz_basis": phaser.get("tfz_basis"),   # None: recorded before both were kept
         "tfz_floor": TFZ_FLOOR,
         "tfz_threshold": TFZ_THRESHOLD,
         "accepted_utc": datetime.now(timezone.utc).isoformat(),
@@ -125,6 +135,11 @@ def tfz_override_warning(acceptance: Mapping[str, object]) -> str:
 
 _NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
 _TFZ_RE = re.compile(rf"\bTFZ\s*={{0,2}}\s*({_NUMBER})", re.I)
+#: Phaser's solution annotation: "TFZ=" is the translation-function Z-score,
+#: "TFZ==" the TFZ-equivalent after refinement, e.g.
+#: "SOLU SET RFZ=3.9 TFZ=6.5 PAK=0 LLG=95 TFZ==7.8 LLG=96 TFZ==7.8".
+_TRANSLATION_TFZ_RE = re.compile(rf"\bTFZ\s*=(?!=)\s*({_NUMBER})", re.I)
+_REFINED_TFZ_RE = re.compile(rf"\bTFZ\s*==\s*({_NUMBER})", re.I)
 _LLG_RE = re.compile(rf"\bLLG\s*={{0,2}}\s*({_NUMBER})", re.I)
 
 
@@ -269,23 +284,84 @@ def build_phaser_eff(report: Mapping[str, object], phaser_directory: Path) -> st
     ])
 
 
-def parse_best_tfz(log_text: str) -> tuple[float | None, float | None]:
-    """Return the highest final-solution TFZ and its same-line LLG when present."""
-    solution_lines = [
-        line for line in log_text.splitlines()
-        if re.search(r"\bSOLU\s+SET\b", line, re.I) and _TFZ_RE.search(line)
-    ]
-    candidate_lines = solution_lines or [
-        line for line in log_text.splitlines() if _TFZ_RE.search(line)
-    ]
-    scored: list[tuple[float, float | None]] = []
-    for line in candidate_lines:
-        tfz_match = _TFZ_RE.search(line)
-        if not tfz_match:
+@dataclass(frozen=True)
+class TFZScores:
+    """The best Phaser solution's TFZ values.
+
+    ``tfz`` decides pass/fail: the TFZ after refinement (``TFZ==``, the last on
+    the solution line) when Phaser reports one, otherwise the translation-search
+    TFZ (``TFZ=``, the last on the line: the last placed copy). ``llg`` is the
+    last LLG on the same line.
+    """
+
+    tfz: float | None
+    llg: float | None
+    translation_tfz: float | None
+    refined_tfz: float | None
+    basis: str | None   # "refined", "translation" or None
+
+
+def _last(pattern: re.Pattern[str], line: str) -> float | None:
+    values = pattern.findall(line)
+    return float(values[-1]) if values else None
+
+
+def parse_tfz_scores(log_text: str) -> TFZScores:
+    """Return the TFZ values of the best final solution (highest deciding TFZ)."""
+    lines = log_text.splitlines()
+    candidates = [line for line in lines
+                  if re.search(r"\bSOLU\s+SET\b", line, re.I) and _TFZ_RE.search(line)]
+    candidates = candidates or [line for line in lines if _TFZ_RE.search(line)]
+    best: TFZScores | None = None
+    for line in candidates:
+        refined = _last(_REFINED_TFZ_RE, line)
+        translation = _last(_TRANSLATION_TFZ_RE, line)
+        deciding = refined if refined is not None else translation
+        if deciding is None:
             continue
-        llg_match = _LLG_RE.search(line)
-        scored.append((float(tfz_match.group(1)), float(llg_match.group(1)) if llg_match else None))
-    return max(scored, key=lambda item: item[0]) if scored else (None, None)
+        scores = TFZScores(
+            tfz=deciding,
+            llg=_last(_LLG_RE, line),
+            translation_tfz=translation,
+            refined_tfz=refined,
+            basis="refined" if refined is not None else "translation",
+        )
+        if best is None or scores.tfz > best.tfz:
+            best = scores
+    return best or TFZScores(None, None, None, None, None)
+
+
+def parse_best_tfz(log_text: str) -> tuple[float | None, float | None]:
+    """Return the deciding TFZ of the best final solution and its LLG."""
+    scores = parse_tfz_scores(log_text)
+    return scores.tfz, scores.llg
+
+
+def describe_tfz(scores: TFZScores) -> str:
+    """One line with both TFZ values, saying which decides pass/fail."""
+    def number(value: float | None) -> str:
+        return f"{value:.2f}" if value is not None else "not reported"
+
+    if scores.basis == "refined":
+        return (f"TFZ {number(scores.refined_tfz)} after refinement (decides pass/fail); "
+                f"{number(scores.translation_tfz)} from the translation search")
+    if scores.basis == "translation":
+        return (f"TFZ {number(scores.translation_tfz)} from the translation search "
+                "(decides pass/fail; Phaser reported no TFZ after refinement)")
+    return "TFZ not reported"
+
+
+_BASIS_WORDS = {"refined": "after refinement", "translation": "translation search"}
+
+
+def _basis_note(scores: TFZScores) -> str:
+    if scores.basis == "refined" and scores.translation_tfz is not None:
+        return f" (after refinement; translation search {scores.translation_tfz:.2f})"
+    if scores.basis == "refined":
+        return " (after refinement)"
+    if scores.basis == "translation":
+        return " (translation search; no TFZ after refinement reported)"
+    return ""
 
 
 def _solution_sort_key(path: Path) -> tuple[int, str]:
@@ -364,7 +440,8 @@ def execute_phaser(
         return_code = 127
     log_path.write_text(output, encoding="utf-8")
 
-    tfz, llg = parse_best_tfz(output)
+    scores = parse_tfz_scores(output)
+    tfz, llg = scores.tfz, scores.llg
     phaser_data = frozen_phaser_data(report)
     labin_echo = reported_labin(output)
     used_kind = reported_data_kind(labin_echo)
@@ -400,16 +477,18 @@ def execute_phaser(
         message = "Phaser did not report a TFZ; inspect phaser.log"
     elif tfz < TFZ_FLOOR:
         status = "MR_FAILED"
-        message = f"Best TFZ {tfz:.2f} is below the {TFZ_FLOOR:.1f} acceptance floor"
+        message = (f"Best TFZ {tfz:.2f}{_basis_note(scores)} is below the "
+                   f"{TFZ_FLOOR:.1f} acceptance floor")
     elif not outputs_complete:
         status = "MR_FAILED"
         message = "Phaser reported a candidate solution but did not produce both PDB and MTZ outputs"
     elif tfz < TFZ_THRESHOLD:
         status = "MR_REVIEW"
-        message = f"Best TFZ {tfz:.2f} is a red flag and requires user review"
+        message = f"Best TFZ {tfz:.2f}{_basis_note(scores)} is a red flag and requires user review"
     else:
         status = "MR_SUCCESS"
-        message = f"Best TFZ {tfz:.2f} passes the {TFZ_THRESHOLD:.1f} AutoMR threshold"
+        message = (f"Best TFZ {tfz:.2f}{_basis_note(scores)} passes the "
+                   f"{TFZ_THRESHOLD:.1f} AutoMR threshold")
 
     previous_status = report.get("status")
     previous_message = report.get("message")
@@ -442,8 +521,11 @@ def execute_phaser(
                 report["symmetry"].get("mr_copies", 1)
                 if isinstance(report.get("symmetry"), Mapping) else 1
             ),
-            "best_tfz": tfz,
+            "best_tfz": tfz,   # the deciding TFZ (tfz_basis)
             "best_llg": llg,
+            "translation_tfz": scores.translation_tfz,
+            "refined_tfz": scores.refined_tfz,
+            "tfz_basis": scores.basis,
             "raw_solution_pdb": str(raw_pdb) if raw_pdb else None,
             "raw_solution_mtz": str(raw_mtz) if raw_mtz else None,
             "solution_pdb": str(solution_pdb) if solution_pdb else None,
@@ -469,7 +551,12 @@ def execute_phaser(
             + (f"; Phaser reported LABIN {labin_echo}" if labin_echo else ""),
             f"Composition residues: {report['model_assessment']['polymer_residue_count']}",
             f"Search copies: {report['execution']['phaser']['search_copies']}",
-            f"Best TFZ: {tfz if tfz is not None else 'not reported'}",
+            f"Best TFZ: {tfz if tfz is not None else 'not reported'}"
+            + (f" ({_BASIS_WORDS[scores.basis]}; decides pass/fail)" if scores.basis else ""),
+            "TFZ after refinement (TFZ==): "
+            + (f"{scores.refined_tfz}" if scores.refined_tfz is not None else "not reported"),
+            "TFZ from the translation search (TFZ=): "
+            + (f"{scores.translation_tfz}" if scores.translation_tfz is not None else "not reported"),
             f"Best LLG: {llg if llg is not None else 'not reported'}",
             f"Result: {message}",
             f"Phaser log: {log_path}",
@@ -488,6 +575,9 @@ def execute_phaser(
         llg=llg,
         solution_pdb=solution_pdb,
         solution_mtz=solution_mtz,
+        translation_tfz=scores.translation_tfz,
+        refined_tfz=scores.refined_tfz,
+        tfz_basis=scores.basis,
     )
 
 
@@ -495,6 +585,7 @@ __all__ = [
     "TFZOverrideError",
     "PhaserExecutionError",
     "PhaserExecutionResult",
+    "TFZScores",
     "TFZ_FLOOR",
     "TFZ_THRESHOLD",
     "build_phaser_eff",
@@ -502,5 +593,7 @@ __all__ = [
     "frozen_phaser_data",
     "check_tfz_override",
     "tfz_override_warning",
+    "describe_tfz",
     "parse_best_tfz",
+    "parse_tfz_scores",
 ]
