@@ -10,6 +10,22 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autofdp ROUND`: AutoFDP from an AutoRefine round folder
+  (`RUN/AutoRefine/round_NNN`; user's request, 2026-11-19). Its
+  `refined_NNN.pdb` is the starting model, the one X-ray data file its
+  `refined_NNN.eff` names (`data_manager.miller_array` amplitude or intensity
+  arrays; Free-R flags and phases are not data) is the MTZ, and that .eff is
+  the final round's (as `--final-eff`; giving both is refused). The round's
+  `report.json` must name the same model; its checkpoint and status are
+  printed and recorded in the run report as `inputs.autorefine_round`
+  (anchored references with checksums of the model and .eff, and the .eff's
+  data labels). When the f'' rounds' anomalous array differs from the .eff's
+  data labels, a warning is printed, logged and recorded (`warnings`). The
+  final-round edits were checked on the real Y-T nasolve run_002
+  `round_002/refined_001.eff`: its model, Ag group and `group_anomalous` are
+  removed and the round's `autorefine.params` is left out, the restraint
+  PHIL files are kept. The two-file form now refuses extra arguments
+  (a third path was ignored). phenix.refine, ReadySet and Coot simulated.
 - `nasolve postmr RUN --force-overwrite`: rerun PostMR on an AutoMR run that
   already has one (user's request and choice, 2026-11-19: delete and
   restart). After every check has passed, it deletes `PostMR/`, `AutoSol/`,

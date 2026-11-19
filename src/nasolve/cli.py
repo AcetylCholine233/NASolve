@@ -307,14 +307,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp = subparsers.add_parser(
         "autofdp",
-        help="measure metal occupancy by f'' refinement from a model and an MTZ, "
-             "optionally ending with a final round from a manual .eff",
+        help="measure metal occupancy by f'' refinement from an AutoRefine round, or "
+             "from a model and an MTZ, optionally ending with a final round from a .eff",
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
-            "within the tolerance of theory. Needs only a starting model (PDB) and "
-            "an MTZ with anomalous data and Free-R flags; labels, flags and "
-            "wavelength are read from the MTZ, the metal sites from the model. Steps "
+            "within the tolerance of theory. Give an AutoRefine round folder "
+            "(RUN/AutoRefine/round_NNN): its refined_NNN.pdb is the starting model, "
+            "the reflection file its refined_NNN.eff refined against is the MTZ, and "
+            "that .eff is the final round's (as --final-eff). Or give a starting "
+            "model (PDB) and an MTZ with anomalous data and Free-R flags. Labels, "
+            "flags and wavelength are read from the MTZ, the metal sites from the "
+            "model. Steps "
             "1 to 3 are implemented: copy the model and set each metal's B to the "
             "mean B of its neighbouring nucleotides (step 1); run ReadySet (no "
             "hydrogens) for the restraint dictionaries and one phenix.refine round "
@@ -334,13 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     autofdp.add_argument(
-        "model", type=Path, metavar="MODEL.pdb",
-        help="the starting model (PDB format), e.g. an AutoRefine refined_001.pdb",
-    )
-    autofdp.add_argument(
-        "mtz", type=Path, metavar="DATA.mtz",
-        help="the reflection file with anomalous data and Free-R flags "
-             "(the two files may be given in either order)",
+        "inputs", type=Path, nargs="+", metavar="ROUND | MODEL.pdb DATA.mtz",
+        help="an AutoRefine round folder (RUN/AutoRefine/round_NNN; its "
+             "refined_NNN.pdb, the MTZ its refined_NNN.eff names, and that .eff as "
+             "the final round's), or the starting model (PDB format) and the "
+             "reflection file with anomalous data and Free-R flags, in either order",
     )
     autofdp.add_argument(
         "--output", type=Path, metavar="DIR",
@@ -415,7 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
              ".phenix/project_data/refine_NN.eff). When every site converges, a "
              "final round uses all of its settings with AutoFDP's model, the metal "
              "sites' occupancy held and f'/f'' fixed at the calibrated values, and "
-             "opens the result in Coot",
+             "opens the result in Coot. Not with an AutoRefine round, whose "
+             "refined_NNN.eff is used",
     )
     autofdp.add_argument(
         "--plan", action="store_true",
@@ -1695,7 +1698,7 @@ def _autofdp_files(files: list[Path]) -> tuple[Path, Path]:
 
     models = [path for path in files if path.suffix.lower() in MODEL_SUFFIXES]
     mtzs = [path for path in files if path.suffix.lower() == ".mtz"]
-    if len(models) != 1 or len(mtzs) != 1:
+    if len(files) != 2 or len(models) != 1 or len(mtzs) != 1:
         raise AutoFDPError(
             "Give one model (.pdb) and one reflection file (.mtz), not "
             + " and ".join(path.name for path in files)
@@ -1706,6 +1709,10 @@ def _autofdp_files(files: list[Path]) -> tuple[Path, Path]:
 def _print_autofdp_plan(plan) -> None:
     reflections = plan.reflections
     print("AutoFDP inputs")
+    source = plan.source
+    if source is not None:
+        about = ", ".join(value for value in (source.checkpoint, source.status) if value)
+        print(f"  AutoRefine round: {source.directory}" + (f" ({about})" if about else ""))
     print(f"  Model: {plan.model}")
     print(f"  MTZ: {reflections.mtz}")
     print(
@@ -1721,6 +1728,8 @@ def _print_autofdp_plan(plan) -> None:
         print(f"  Warning: {warning}")
     for path in plan.restraints:
         print(f"  Restraints: {path}")
+    for warning in plan.warnings:
+        print(f"  Warning: {warning}")
     theory = "; ".join(
         f"{element} f' {values['f_prime']:.2f}, f'' {values['f_double_prime']:.2f} "
         f"({values['source']})"
@@ -1748,7 +1757,8 @@ def _print_autofdp_plan(plan) -> None:
         print(f"Warning: {warning}")
     manual = plan.final_eff
     if manual is not None:
-        print(f"\nFinal round settings (--final-eff): {manual.source}")
+        given = "the AutoRefine round's .eff" if source is not None else "--final-eff"
+        print(f"\nFinal round settings ({given}): {manual.source}")
         print("  model: " + (", ".join(manual.models) or "none named")
               + " -> replaced by AutoFDP's final_model.pdb")
         print("  reflections: " + ", ".join(manual.reflection_files))
@@ -1954,13 +1964,25 @@ def _autofdp(args: argparse.Namespace) -> int:
         parse_b_start,
         parse_theory_overrides,
         plan_autofdp,
+        read_autorefine_round,
     )
 
     if args.element:
         print("AutoFDP error: --element is not implemented yet", file=sys.stderr)
         return 2
     try:
-        model, mtz = _autofdp_files([args.model, args.mtz])
+        source = None
+        final_eff = args.final_eff
+        if len(args.inputs) == 1:
+            if args.final_eff is not None:
+                raise AutoFDPError(
+                    "--final-eff cannot be given with an AutoRefine round: the round's "
+                    "refined_NNN.eff is the final round's .eff"
+                )
+            source = read_autorefine_round(args.inputs[0])
+            model, mtz, final_eff = source.model, source.mtz, source.eff
+        else:
+            model, mtz = _autofdp_files(list(args.inputs))
         b_start = parse_b_start(args.b_start)
         theory = parse_theory_overrides(args.theory)
         if args.cycles < 1:
@@ -1989,7 +2011,7 @@ def _autofdp(args: argparse.Namespace) -> int:
             model, mtz, refine, mtz_dump,
             sites=tuple(args.site), b_start=b_start, theory_overrides=theory,
             wavelength=args.wavelength, restraints=tuple(args.cif),
-            output_root=args.output, final_eff=args.final_eff,
+            output_root=args.output, final_eff=final_eff, source=source,
             environment=phenix.environment,
         )
         _print_autofdp_plan(plan)

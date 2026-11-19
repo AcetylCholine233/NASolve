@@ -1350,6 +1350,8 @@ class AutoFDPPlan:
     restraints: tuple[Path, ...]
     output_root: Path                    # run_NNN is created inside it
     final_eff: "FinalEff | None" = None  # manual .eff for the final round
+    source: "AutoRefineRound | None" = None   # the AutoRefine round started from
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1383,6 +1385,7 @@ def plan_autofdp(
     restraints: Sequence[Path] = (),
     output_root: Path | None = None,
     final_eff: Path | None = None,
+    source: AutoRefineRound | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> AutoFDPPlan:
     """Preflight: check the inputs and return the plan, writing nothing.
@@ -1392,8 +1395,15 @@ def plan_autofdp(
     theoretical f'/f'' of every metal element (``phenix.python``). Runs no
     refinement. ``output_root`` defaults to ``AutoFDP`` beside the MTZ file.
     ``final_eff`` (a manual phenix.refine .eff) is checked with
-    ``read_final_eff``.
+    ``read_final_eff``. ``source`` (``read_autorefine_round``) records the
+    AutoRefine round the model, the MTZ and the final .eff come from; they
+    must be that round's.
     """
+    if source is not None and (
+        not _same_file(model, source.model) or not _same_file(mtz, source.mtz)
+        or final_eff is None or not _same_file(final_eff, source.eff)
+    ):
+        raise AutoFDPError("The model, MTZ and final .eff must be the AutoRefine round's")
     model = checked_model(model)
     plan_b = prepare_start_model(model, sites=sites, b_start=b_start)
     found, _ = _metal_sites(model, ())
@@ -1428,6 +1438,8 @@ def plan_autofdp(
         restraints=tuple(files),
         output_root=root,
         final_eff=manual,
+        source=source,
+        warnings=tuple(_round_label_warnings(source, reflections)) if source is not None else (),
     )
 
 
@@ -1453,6 +1465,21 @@ def _file_record(path: Path, run_directory: Path) -> dict[str, object]:
         "absolute_path_at_creation": str(path.resolve()),
         "sha256": file_sha256(path),
         "size": path.stat().st_size,
+    }
+
+
+def _source_record(plan: AutoFDPPlan, run_directory: Path) -> dict[str, object] | None:
+    """The AutoRefine round the run started from (``nasolve autofdp ROUND``)."""
+    source = plan.source
+    if source is None:
+        return None
+    return {
+        "directory": artifact_reference(source.directory, run_directory),
+        "checkpoint": source.checkpoint,
+        "status": source.status,
+        "model": _file_record(source.model, run_directory),
+        "eff": _file_record(source.eff, run_directory),
+        "eff_observation_labels": list(source.observation_labels),
     }
 
 
@@ -1487,9 +1514,12 @@ def _log_lines(
         f"Observations: {','.join(reflections.observation_labels)}; Free-R "
         f"{reflections.free_r_label} (test value {reflections.free_r_test_value})",
         f"Wavelength: {reflections.wavelength:g} A ({reflections.wavelength_source.get('method')})",
-        "",
-        "Step 1 (B start)",
     ]
+    if plan.source is not None:
+        lines.insert(1, f"AutoRefine round: {plan.source.directory}"
+                        + (f" ({plan.source.checkpoint})" if plan.source.checkpoint else ""))
+    lines += [f"Warning: {warning}" for warning in plan.warnings]
+    lines += ["", "Step 1 (B start)"]
     for site in b_start.sites:
         lines.append(
             f"{site.site} {site.atom_name} ({site.element}): occupancy {site.occupancy:.2f}; "
@@ -1732,7 +1762,9 @@ def execute_autofdp(
             "model": _file_record(plan.model, run_directory),
             "mtz": _file_record(reflections.mtz, run_directory),
             "restraints": [_file_record(path, run_directory) for path in plan.restraints],
+            "autorefine_round": _source_record(plan, run_directory),
         },
+        "warnings": list(plan.warnings),
         "reflections": {
             "observation_labels": list(reflections.observation_labels),
             "free_r_label": reflections.free_r_label,
@@ -2283,6 +2315,173 @@ def read_final_eff(path: Path, mtz: Path | None = None) -> FinalEff:
     )
 
 
+#: An AutoRefine round's phenix.refine output model (output.prefix=refined).
+_ROUND_MODEL = re.compile(r"refined_(\d{3})\.pdb")
+_DATA_ARRAY_TYPES = {"amplitude", "intensity"}
+
+
+@dataclass(frozen=True)
+class AutoRefineRound:
+    """An AutoRefine round AutoFDP starts from (``nasolve autofdp ROUND``).
+
+    The round's ``refined_NNN.pdb`` is the starting model, the reflection file
+    its ``refined_NNN.eff`` refined against is the MTZ, and that .eff gives
+    the final round's settings (as ``--final-eff`` would).
+    """
+
+    directory: Path
+    model: Path                            # refined_NNN.pdb
+    eff: Path                              # refined_NNN.eff
+    mtz: Path                              # the .eff's X-ray data file
+    observation_labels: tuple[str, ...]    # the data labels the .eff selected
+    checkpoint: str | None = None          # from the round's report.json
+    status: str | None = None
+
+
+def _rounds_below(path: Path) -> list[Path]:
+    """AutoRefine rounds in an AutoMR run or its AutoRefine folder (for errors)."""
+    folder = path / "AutoRefine" if (path / "AutoRefine").is_dir() else path
+    return sorted(child for child in folder.glob("round_*") if child.is_dir())
+
+
+def _eff_data_arrays(items: Sequence[phil_text.PhilItem]) -> list[tuple[str, tuple[str, ...]]]:
+    """Each ``data_manager.miller_array`` of a phenix.refine .eff that holds
+    X-ray data: (file, labels of the data).
+
+    phenix.refine's output .eff gives each label group an ``array_type``: only
+    amplitude and intensity arrays are data (not Free-R flags or phases). A
+    file whose groups have no ``array_type`` (a hand-written .eff) is taken as
+    data with all its labels. Groups of another type than ``x_ray`` are left
+    out.
+    """
+    found = []
+    for scope in items:
+        if scope.kind != "scope" or scope.path != "data_manager.miller_array":
+            continue
+        contents = phil_text.inside(items, scope)
+        files = _assigned(contents, "data_manager.miller_array.file")
+        if not files:
+            continue
+        groups = []   # (names, kinds, array types)
+        for group in contents:
+            if group.kind != "scope" or group.path != "data_manager.miller_array.labels":
+                continue
+            inner = phil_text.inside(contents, group)
+
+            def choice(name: str) -> tuple[str, ...]:
+                values = [phil_text.starred(item.value) for item in inner
+                          if item.kind == "assign"
+                          and item.path == f"data_manager.miller_array.labels.{name}"]
+                return values[0] if values else ()
+
+            groups.append((_assigned(inner, "data_manager.miller_array.labels.name"),
+                           choice("type"), choice("array_type")))
+        groups = [group for group in groups if not group[1] or "x_ray" in group[1]]
+        if any(array_types for _, _, array_types in groups):
+            labels = [name for names, _, array_types in groups
+                      if _DATA_ARRAY_TYPES & set(array_types) for name in names]
+        else:
+            labels = [name for names, _, _ in groups for name in names] or _assigned(
+                contents, "data_manager.miller_array.user_selected_labels")
+        if labels:
+            found.append((files[0], tuple(labels)))
+    return found
+
+
+def read_autorefine_round(directory: Path) -> AutoRefineRound:
+    """Read an AutoRefine round folder (``RUN/AutoRefine/round_NNN``) for AutoFDP.
+
+    The round must hold one ``refined_NNN.pdb`` (phenix.refine's model) and
+    the ``refined_NNN.eff`` beside it. The MTZ is the one reflection file that
+    .eff names for X-ray data (``data_manager.miller_array``); it must exist.
+    The round's ``report.json``, when present, gives its checkpoint and
+    status, and must name the same model. Nothing is written.
+    """
+    directory = directory.expanduser().resolve()
+    if not directory.is_dir():
+        raise AutoFDPError(
+            f"{directory} is not a folder: give an AutoRefine round (RUN/AutoRefine/round_NNN), "
+            "or a model (.pdb) and a reflection file (.mtz)"
+        )
+    models = sorted(path for path in directory.iterdir()
+                    if path.is_file() and _ROUND_MODEL.fullmatch(path.name))
+    if not models:
+        rounds = _rounds_below(directory)
+        if rounds:
+            raise AutoFDPError(
+                f"{directory} is not an AutoRefine round; give one of its rounds: "
+                + ", ".join(str(path) for path in rounds)
+            )
+        raise AutoFDPError(
+            f"No refined_NNN.pdb in {directory}: not an AutoRefine round, or its "
+            "refinement did not finish"
+        )
+    if len(models) > 1:
+        raise AutoFDPError(
+            f"{directory} has more than one refined model ({', '.join(path.name for path in models)}); "
+            "give the model and the MTZ instead"
+        )
+    model = models[0]
+    eff = model.with_suffix(".eff")
+    if not eff.is_file():
+        raise AutoFDPError(f"No {eff.name} beside {model.name} in {directory}")
+    checkpoint = status = None
+    report_path = directory / "report.json"
+    if report_path.is_file():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AutoFDPError(f"Cannot read {report_path}: {exc}") from exc
+        if isinstance(report, Mapping):
+            checkpoint = report.get("checkpoint") if isinstance(report.get("checkpoint"), str) else None
+            status = report.get("status") if isinstance(report.get("status"), str) else None
+            outputs = report.get("outputs")
+            recorded = outputs.get("model") if isinstance(outputs, Mapping) else None
+            if isinstance(recorded, str) and Path(recorded).name != model.name:
+                raise AutoFDPError(
+                    f"{report_path} records the model {Path(recorded).name}, not {model.name}"
+                )
+    try:
+        items = phil_text.scan(eff.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, phil_text.PhilSyntaxError) as exc:
+        raise AutoFDPError(f"Cannot read {eff}: {exc}") from exc
+    arrays = _eff_data_arrays(items)
+    files = list(dict.fromkeys(name for name, _ in arrays))
+    if not files:
+        raise AutoFDPError(f"{eff.name} names no reflection file with X-ray data (data_manager.miller_array)")
+    if len(files) > 1:
+        raise AutoFDPError(
+            f"{eff.name} names more than one reflection file with X-ray data: {'; '.join(files)}; "
+            "give the model and the MTZ instead"
+        )
+    mtz = Path(files[0]).expanduser()
+    if not mtz.is_file():
+        raise AutoFDPError(f"The reflection file {eff.name} refined against does not exist: {mtz}")
+    labels = tuple(label for name, group in arrays if name == files[0] for label in group)
+    return AutoRefineRound(
+        directory=directory,
+        model=model,
+        eff=eff,
+        mtz=mtz.resolve(),
+        observation_labels=labels,
+        checkpoint=checkpoint,
+        status=status,
+    )
+
+
+def _round_label_warnings(source: AutoRefineRound, reflections: ReflectionInputs) -> list[str]:
+    """A warning when the f'' rounds use other data labels than the .eff did."""
+    chosen = [label.strip() for group in source.observation_labels for label in group.split(",")
+              if label.strip() and label.strip() != reflections.free_r_label]
+    if not chosen or chosen == list(reflections.observation_labels):
+        return []
+    return [
+        f"{source.eff.name} refined against {','.join(chosen)}; the f'' rounds use "
+        f"{','.join(reflections.observation_labels)} (the first anomalous array in the MTZ), "
+        "the final round the .eff's"
+    ]
+
+
 @dataclass(frozen=True)
 class FinalSite:
     """One metal site in the final round: occupancy held, f' and f'' fixed."""
@@ -2590,6 +2789,7 @@ __all__ = [
     "AutoFDPError",
     "AutoFDPPlan",
     "AutoFDPResult",
+    "AutoRefineRound",
     "AutoFDPSettings",
     "DEFAULT_MAX_ITERATIONS",
     "BStart",
@@ -2629,6 +2829,7 @@ __all__ = [
     "plan_autofdp",
     "prepare_start_model",
     "propose_occupancy",
+    "read_autorefine_round",
     "read_final_eff",
     "read_reflections",
     "run_readyset",

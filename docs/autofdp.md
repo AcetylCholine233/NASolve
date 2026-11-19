@@ -3,8 +3,12 @@
 **Status: steps 1 to 3 implemented; the final round (`--final-eff`, step 6)
 partially implemented, and it serves as the B confirmation (step 5); the
 identity check (step 4) specified only (2026-11-18).**
-`nasolve autofdp MODEL.pdb DATA.mtz` needs only a starting model and an MTZ
-file; it reads no NASolve run report, AutoRefine round or checkpoint. Step 1
+`nasolve autofdp ROUND` starts from an AutoRefine round folder
+(`RUN/AutoRefine/round_NNN`): its `refined_NNN.pdb` is the starting model, the
+reflection file its `refined_NNN.eff` refined against is the MTZ, and that .eff
+gives the final round's settings (as `--final-eff` would). `nasolve autofdp
+MODEL.pdb DATA.mtz` needs only a starting model and an MTZ file; it reads no
+NASolve run report, AutoRefine round or checkpoint. Step 1
 (B start) copies the model and sets each metal's B to the mean B of its
 neighbouring nucleotides. Step 2 (f″ round) runs ReadySet on that copy (no
 hydrogens) for the restraint dictionaries, then one phenix.refine round with
@@ -60,7 +64,7 @@ occupancy and B and let f′ drift.
 ## Command line
 
 ```
-nasolve autofdp MODEL.pdb DATA.mtz
+nasolve autofdp ROUND | MODEL.pdb DATA.mtz
                 [--output DIR] [--site SITE]... [--wavelength A] [--cif FILE]...
                 [--element SITE=ELEMENT]... [--candidates ELEMENT[,ELEMENT...]]
                 [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
@@ -70,16 +74,21 @@ nasolve autofdp MODEL.pdb DATA.mtz
                 [--no-coot] [--coot PATH] [--phenix-root PATH]
 ```
 
-For 7CU_Ag, from the dataset folder:
+For 7CU_Ag, from the dataset folder, either of:
 
 ```
+nasolve autofdp AutoMR/run_001/AutoRefine/round_002
 nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_alldata-unique.mtz
 ```
 
+The first also ends a converged run with a final round from
+`round_002/refined_001.eff`; the second only with `--final-eff`.
+
 | Option | Default | Meaning |
 |---|---|---|
-| `MODEL.pdb` | required | the starting model, PDB format, for example an AutoRefine `refined_001.pdb`; never changed |
-| `DATA.mtz` | required | reflections with anomalous data and Free-R flags. The two files may be given in either order |
+| `ROUND` | | an AutoRefine round folder instead of the two files: its one `refined_NNN.pdb` (never changed), the one X-ray data file its `refined_NNN.eff` names in `data_manager.miller_array` (amplitude or intensity arrays; Free-R flags and phases are not data), and that .eff as the final round's. Its `report.json` gives the checkpoint and status, recorded in the run report (`inputs.autorefine_round`). Not with `--final-eff` |
+| `MODEL.pdb` | required without `ROUND` | the starting model, PDB format, for example an AutoRefine `refined_001.pdb`; never changed |
+| `DATA.mtz` | required without `ROUND` | reflections with anomalous data and Free-R flags. The two files may be given in either order |
 | `--output` | `AutoFDP` beside the MTZ | folder in which a new `run_NNN` is made |
 | `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable. Every metal site is still refined in the f″ round |
 | `--wavelength` | MTZ header | X-ray wavelength (Å), for an MTZ whose header has none; a disagreement with the header is recorded |
@@ -95,7 +104,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the separate B-only round (not used: the final round serves as the B confirmation for now) |
-| `--final-eff` | none | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; when every site converges, the final round (step 6) uses all of its settings |
+| `--final-eff` | none (with `ROUND`: its `refined_NNN.eff`) | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; when every site converges, the final round (step 6) uses all of its settings |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
 | `--no-coot` | open Coot | do not open the final round in Coot (only a final round opens Coot) |
 | `--coot` | configured Coot | Coot executable for the final round's view |
@@ -122,6 +131,12 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_al
   via the `phenix.python` beside `phenix.refine`), with `--theory` replacing an
   element's f″. Each theoretical f″ must be positive.
 - `--cif` files must exist. `phenix.ready_set` must be available (step 2).
+- **AutoRefine round** (`ROUND`, `read_autorefine_round`): one
+  `refined_NNN.pdb` with its `.eff`; the round's `report.json`, when present,
+  must name that model. The .eff must name exactly one reflection file with
+  X-ray data, which must exist. When the f″ rounds' anomalous array (the first
+  in the MTZ) differs from the data labels the .eff selected, a warning is
+  printed and recorded (`warnings`); the final round uses the .eff's.
 
 `--plan` stops here and prints the labels, Free-R flags, wavelength, theory,
 sites and planned B changes. It runs `phenix.mtz.dump` and `phenix.python`
