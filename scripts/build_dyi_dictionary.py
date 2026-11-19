@@ -20,6 +20,14 @@ Sources, both from the CCP4 Monomer Library (AceDRG dictionaries):
   torsions, the triazole plane and the ring-to-ring torsion (coplanar,
   period 2).
 
+The base plane: dC's base plane and TZF's triazole plane are merged into one
+plane (``plan-1``: both rings, C1', O2 and the ring hydrogens, e.s.d.
+0.020 A as in both sources), so refinement keeps the triazole in the plane of
+the pyrimidinone. Two planes that share only C4 and N4 leave the triazole free
+to turn about C4-N4 against the weak ring-to-ring torsion (e.s.d. 5 deg); in
+the first DYI refinement (Y-T nasolve, AutoMR run_002, refine-001) it turned
+38 deg out of the base plane. Merged at the user's request, 2026-11-19.
+
 One value is chosen here: C4-N4 = 1.411 +/- 0.015 A. AceDRG gives
 1.424 A for a triazol-1-yl on a carbon between two carbons (TZF, ZRS; 1.429 A
 on quinolin-4-yl, TQU) and 1.399 A on a carbon between two nitrogens
@@ -169,10 +177,24 @@ def assemble(dc: dict, tzf: dict) -> dict[str, list[dict]]:
         members = [row for row in dc_planes if row["plane_id"] == plane_id]
         if not DROPPED & {row["atom_id"] for row in members}:   # drop dC's NH2 plane
             planes.extend({**row, "comp_id": CODE} for row in members)
+    base_plane = {row["plane_id"] for row in planes}
+    if len(base_plane) != 1:
+        raise ValueError(f"expected one dC base plane, found {sorted(base_plane)}")
+    base_plane_id = base_plane.pop()
     tzf_planes = rows(tzf, "_chem_comp_plane_atom", PLANE)
     triazole_plane = [row for row in tzf_planes if row["atom_id"] == "NAI"][0]["plane_id"]
-    planes.extend({**row, "comp_id": CODE, "plane_id": "plan-2", "atom_id": TZF_MAP[row["atom_id"]]}
-                  for row in tzf_planes if row["plane_id"] == triazole_plane)
+    # One plane for both rings: the triazole atoms join dC's base plane (C4 and
+    # N4 are in both; their e.s.d. must agree).
+    in_base = {row["atom_id"]: row["dist_esd"] for row in planes}
+    for row in tzf_planes:
+        if row["plane_id"] != triazole_plane:
+            continue
+        name = TZF_MAP[row["atom_id"]]
+        if name in in_base:
+            if float(in_base[name]) != float(row["dist_esd"]):
+                raise ValueError(f"{name}: base and triazole plane e.s.d.s differ")
+            continue
+        planes.append({**row, "comp_id": CODE, "plane_id": base_plane_id, "atom_id": name})
     out["plane"] = planes
     return out
 
@@ -331,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  t/TZF.cif blob {git_blob_sha1(args.tzf)}: triazol-1-yl ring, angles at N1, ring torsions and plane",
         f"Chosen here: C4-N4 {C4_N4[0]:.3f} +/- {C4_N4[1]:.3f} A (AceDRG 1.424 on C(C,C), 1.399 on C(N,N));",
         "N4 energy type NR5. Coordinates: DC's for shared atoms; triazole fitted, coplanar, N2T on the C5 side.",
+        "One base plane (plan-1) over both rings: dC's base plane and TZF's triazole plane merged.",
     ]
     write(args.output, restraints, header)
     print(f"wrote {args.output}: {len(restraints['atom'])} atoms, {len(restraints['bond'])} bonds, "

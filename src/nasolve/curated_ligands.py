@@ -160,9 +160,9 @@ CURATED_LIGANDS: dict[str, CuratedLigand] = {
         # 1.33 A), so the triazole Coot overlays keeps its bond to N4.
         atom_substitutions=(AtomSubstitution("N4", "N4", "C4"),),
         reviewed_restraints=True,
+        # One plane for both rings, so the triazole stays in the base plane.
         required_planes=(
-            ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6"),
-            ("C4", "N4", "N2T", "C3T", "N4T", "C5T"),
+            ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6", "N2T", "C3T", "N4T", "C5T"),
         ),
     ),
 }

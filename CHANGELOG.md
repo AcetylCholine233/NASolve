@@ -54,6 +54,18 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- DYI dictionary: one base plane over both rings (user's request,
+  2026-11-19). dC's base plane and the triazole plane are merged into `plan-1`
+  (17 atoms: both rings, C1', O2, the ring hydrogens; e.s.d. 0.020 A), so
+  refinement keeps the triazole in the plane of the pyrimidinone. With a plane
+  per ring, sharing only C4 and N4, the triazole turned 38 deg out of the base
+  plane in Y-T nasolve AutoMR run_002 refine-001 (the ring-to-ring torsion,
+  e.s.d. 5 deg, was the largest dihedral residual). Built by
+  `scripts/build_dyi_dictionary.py` from the same Monomer Library files; ideal
+  coordinates move by at most 0.001 A. The curated check now requires one
+  plane holding both rings. Runs prepared before this keep the dictionary
+  PostMR recorded; rerun PostMR (`--force-overwrite`) or add a planarity edit
+  with `autorefine --restraints` to use it. Not yet run in phenix.refine.
 - Metal searches (`nasolve autosol RUN --metal ELEMENT`) are written inside the
   AutoMR run they come from, `AutoMR/run_NNN/AutoSolMetal/run_NNN` (numbered
   per AutoMR run), instead of `DATASET/AutoSolMetal/run_NNN` (user's request,
