@@ -380,7 +380,8 @@ dictionaries. An imported manual checkpoint can inherit an ancestor's map only
 when its observation data match; the output labels this map as not recalculated
 for the manual model. Missing or corrupt declared maps produce an error.
 
-If the selected MTZ contains `ANOM` and `PHANOM`, `show` also opens a named
+If the selected MTZ contains `ANOM` with `PANOM` (phenix.refine) or `PHANOM`
+(phenix.maps), `show` also opens a named
 **Anomalous difference** map at **3 sigma**. If Phenix wrote separate map and
 refinement MTZ files, it also checks the refinement MTZ recorded for that same
 checkpoint. Availability depends on the columns, so fixed-scattering and

@@ -743,7 +743,10 @@ checksums take precedence; ambiguity, corruption, or a missing declared map is
 an error. Legacy AutoSol runs retain bounded discovery within their own stage.
 
 Every view retains ordinary `--auto` map loading and adds a run-local Python
-startup script. In Coot, `valid_labels` checks the exact `ANOM`/`PHANOM` pair.
+startup script. In Coot, `valid_labels` checks the exact `ANOM`/`PANOM` pair
+(phenix.refine, Phenix 2.2.1), then `ANOM`/`PHANOM` (phenix.maps); its
+use-weights argument must be a Python bool (`False`), since Coot's SWIG
+wrapper rejects an int.
 The script uses `make_and_draw_map` with no weights and the difference-map flag,
 then names the overlay and sets its initial contour to 3 sigma. It adds no
 phase shift. Existing maps with the same MTZ and column pair are reused, and

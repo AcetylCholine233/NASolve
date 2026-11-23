@@ -786,27 +786,38 @@ def resolve_view_profile(
     raise CootViewError("No completed stage in this run can be opened in Coot")
 
 
+#: Anomalous difference map columns, in the order tried: phenix.refine
+#: (Phenix 2.2.1) writes ANOM/PANOM, phenix.maps ANOM/PHANOM.
+ANOMALOUS_LABEL_PAIRS = (("ANOM", "PANOM"), ("ANOM", "PHANOM"))
+
+
 def _anomalous_map_script(map_paths: tuple[Path, ...]) -> str:
-    """Use Coot's MTZ reader in the GUI process; no host crystallography dependency."""
+    """Use Coot's MTZ reader in the GUI process; no host crystallography dependency.
+
+    The anomalous map is ANOM with phases PANOM (phenix.refine, Phenix 2.2.1)
+    or PHANOM (phenix.maps), tried in that order. Coot's ``valid_labels`` takes
+    a real bool for its use-weights flag (an int raises a SWIG TypeError).
+    """
     return (
         "import coot\nimport json\nimport os\n\n"
         f"map_paths = {json.dumps([str(path) for path in map_paths])}\n"
+        f"label_pairs = {json.dumps([list(pair) for pair in ANOMALOUS_LABEL_PAIRS])}\n"
         '''
-def report_anomalous_map(status, **details):
+def report_anomalous_map(status, labels=None, **details):
     details["status"] = status
-    details["labels"] = ["ANOM", "PHANOM"]
+    details["labels"] = labels if labels is not None else label_pairs
     print("NASOLVE_ANOMALOUS_MAP " + json.dumps(details, sort_keys=True), flush=True)
 
 
-def existing_anomalous_map(path):
+def existing_anomalous_map(path, amplitude_label, phase_label):
     # --auto or the user's Coot configuration may already have opened it.
     for imol in range(coot.graphics_n_molecules()):
         source = coot.mtz_hklin_for_map(imol)
         if source and os.path.realpath(source) == os.path.realpath(path):
             amplitude = coot.mtz_fp_for_map(imol) or ""
             phase = coot.mtz_phi_for_map(imol) or ""
-            if (amplitude.rsplit("/", 1)[-1] == "ANOM"
-                    and phase.rsplit("/", 1)[-1] == "PHANOM"
+            if (amplitude.rsplit("/", 1)[-1] == amplitude_label
+                    and phase.rsplit("/", 1)[-1] == phase_label
                     and not coot.mtz_use_weight_for_map(imol)):
                 return imol
     return -1
@@ -814,30 +825,33 @@ def existing_anomalous_map(path):
 
 def load_anomalous_map():
     for path in map_paths:
-        if coot.valid_labels(path, "ANOM", "PHANOM", "", 0) != 1:
-            continue
-        refinement_map = coot.imol_refinement_map()
-        scroll_map = coot.scroll_wheel_map()
-        try:
-            imol = existing_anomalous_map(path)
-            reused = imol >= 0
-            if not reused:
-                # PHANOM already contains the map phase: no extra weights or shift.
-                imol = coot.make_and_draw_map(path, "ANOM", "PHANOM", "", 0, 1)
-            if imol < 0:
-                raise RuntimeError("Coot could not construct ANOM/PHANOM from " + path)
-            coot.set_map_is_difference_map(imol, 1)
-            coot.set_contour_level_in_sigma(imol, 3.0)
-            coot.set_molecule_name(imol, "Anomalous difference (ANOM/PHANOM)")
-        finally:
-            # An inspection overlay must not change real-space refinement/scrolling.
-            if refinement_map >= 0:
-                coot.set_imol_refinement_map(refinement_map)
-            if scroll_map >= 0:
-                coot.set_scroll_wheel_map(scroll_map)
-        report_anomalous_map("reused" if reused else "loaded", path=path,
-                             molecule=imol, contour_sigma=3.0)
-        return
+        for amplitude_label, phase_label in label_pairs:
+            if coot.valid_labels(path, amplitude_label, phase_label, "", False) != 1:
+                continue
+            refinement_map = coot.imol_refinement_map()
+            scroll_map = coot.scroll_wheel_map()
+            name = amplitude_label + "/" + phase_label
+            try:
+                imol = existing_anomalous_map(path, amplitude_label, phase_label)
+                reused = imol >= 0
+                if not reused:
+                    # The phase column already holds the map phase: no weights or shift.
+                    imol = coot.make_and_draw_map(path, amplitude_label, phase_label, "", 0, 1)
+                if imol < 0:
+                    raise RuntimeError("Coot could not construct " + name + " from " + path)
+                coot.set_map_is_difference_map(imol, 1)
+                coot.set_contour_level_in_sigma(imol, 3.0)
+                coot.set_molecule_name(imol, "Anomalous difference (" + name + ")")
+            finally:
+                # An inspection overlay must not change real-space refinement/scrolling.
+                if refinement_map >= 0:
+                    coot.set_imol_refinement_map(refinement_map)
+                if scroll_map >= 0:
+                    coot.set_scroll_wheel_map(scroll_map)
+            report_anomalous_map("reused" if reused else "loaded",
+                                 labels=[amplitude_label, phase_label], path=path,
+                                 molecule=imol, contour_sigma=3.0)
+            return
     report_anomalous_map("absent", paths=map_paths)
 
 
@@ -1065,8 +1079,8 @@ def launch_coot_files(
 
     Coot's working files (log, backups, map script) go to
     ``working_directory``. As for run views, Coot opens the 2mFo-DFc and
-    mFo-DFc maps with ``--auto`` and the ANOM/PHANOM anomalous map at 3 sigma
-    when the file has it.
+    mFo-DFc maps with ``--auto`` and the anomalous map (ANOM/PANOM or
+    ANOM/PHANOM) at 3 sigma when the file has it.
     """
     model = _required_file(model.expanduser().resolve(), "model")
     map_path = _required_file(map_coefficients.expanduser().resolve(), "map coefficients")
@@ -1164,7 +1178,7 @@ def _launch_profile(
                 "anomalous_map": {
                     "status": "check-in-coot",
                     "paths": [str(path) for path in anomalous_paths],
-                    "labels": ["ANOM", "PHANOM"],
+                    "labels": [list(pair) for pair in ANOMALOUS_LABEL_PAIRS],
                     "contour_sigma": 3.0,
                     "script": str(map_script),
                     "log_marker": "NASOLVE_ANOMALOUS_MAP",

@@ -1777,7 +1777,7 @@ def _show(args: argparse.Namespace) -> int:
     print(f"Model: {result.model_path}")
     print(f"Map source: {result.map_source}")
     print(f"Map: {result.map_path}")
-    print("Anomalous map: Coot will also open ANOM/PHANOM at 3 sigma when present")
+    print("Anomalous map: Coot will also open ANOM/PANOM (or ANOM/PHANOM) at 3 sigma when present")
     for extra in result.extra_model_paths:
         print(f"Additional model: {extra}")
     print(f"Coot working directory: {result.working_directory}")

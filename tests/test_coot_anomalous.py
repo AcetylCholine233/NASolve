@@ -1,4 +1,11 @@
-"""Exercise the Coot startup script with the documented Python map API."""
+"""Exercise the Coot startup script with the documented Python map API.
+
+The fake follows the Coot bundled with Phenix 2.2.1 (``coot.py`` SWIG
+wrappers): ``valid_labels`` takes ``bool use_weights_flag`` and rejects an
+int, and phenix.refine writes the anomalous map as ANOM/PANOM (phenix.maps
+writes ANOM/PHANOM). Before 2026-11-23 the script passed 0 and looked only for
+PHANOM, so the anomalous map never opened (U-Y_Ag run_004, every round).
+"""
 
 import io
 import json
@@ -18,7 +25,7 @@ from .test_coot_view import add_manual_checkpoint, add_review_checkpoint, make_v
 
 
 class FakeCoot:
-    def __init__(self, mtz, labels=("ANOM", "PHANOM")):
+    def __init__(self, mtz, labels=("ANOM", "PANOM")):
         self.labels = {str(mtz): set(labels)}
         self.maps = [None, (str(mtz), "2FOFCWT", "PH2FOFCWT", 0),
                      (str(mtz), "FOFCWT", "PHFOFCWT", 1)]
@@ -29,7 +36,10 @@ class FakeCoot:
         self.scroll = 1
 
     def valid_labels(self, mtz, amplitude, phase, weight, use_weights):
-        assert (amplitude, phase, weight, use_weights) == ("ANOM", "PHANOM", "", 0)
+        if not isinstance(use_weights, bool):   # SWIG: bool use_weights_flag
+            raise TypeError("in method 'valid_labels', argument 5 of type 'bool'")
+        assert (amplitude, phase, weight, use_weights) in (
+            ("ANOM", "PANOM", "", False), ("ANOM", "PHANOM", "", False))
         return int({amplitude, phase} <= self.labels.get(mtz, set()))
 
     def graphics_n_molecules(self):
@@ -121,21 +131,22 @@ class CootAnomalousTests(unittest.TestCase):
         coot = FakeCoot(self.mtz)
         normal_maps = coot.maps[:]
         output = self.execute_script(script, coot)
-        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PHANOM", "", 0, 1)])
+        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PANOM", "", 0, 1)])
         self.assertEqual(coot.maps[:3], normal_maps)
         self.assertEqual(coot.contours, {3: 3.0})
-        self.assertIn("ANOM/PHANOM", coot.names[3])
+        self.assertIn("ANOM/PANOM", coot.names[3])
         self.assertEqual((coot.refinement, coot.scroll), (1, 1))
-        self.assertIn("loaded", output)
+        self.assertIn('"status": "loaded"', output)
+        self.assertIn('"labels": ["ANOM", "PANOM"]', output)
         launch = json.loads((result.working_directory / "launch.json").read_text())
-        self.assertEqual(launch["anomalous_map"]["labels"], ["ANOM", "PHANOM"])
+        self.assertEqual(launch["anomalous_map"]["labels"], [["ANOM", "PANOM"], ["ANOM", "PHANOM"]])
         self.assertEqual(launch["anomalous_map"]["status"], "check-in-coot")
         self.assertEqual(registry.read_bytes(), before_registry)
         self.assertEqual(self.mtz.read_bytes(), before_mtz)
 
     def test_absent_or_incomplete_pair_does_not_construct_a_map(self):
         script, _ = self.launch()
-        for labels in ((), ("ANOM",), ("PHANOM",), ("HLA", "HLB", "HLC", "HLD")):
+        for labels in ((), ("ANOM",), ("PANOM",), ("PHANOM",), ("HLA", "HLB", "HLC", "HLD")):
             with self.subTest(labels=labels):
                 coot = FakeCoot(self.mtz, labels)
                 before = coot.maps[:]
@@ -145,11 +156,24 @@ class CootAnomalousTests(unittest.TestCase):
                 self.assertEqual((coot.refinement, coot.scroll), (1, 1))
                 self.assertIn('"status": "absent"', output)
 
+    def test_phenix_maps_labels_still_open(self):
+        # phenix.maps (and Phenix's own Coot GUI) use ANOM/PHANOM.
+        script, _ = self.launch()
+        coot = FakeCoot(self.mtz, ("ANOM", "PHANOM"))
+        output = self.execute_script(script, coot)
+        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PHANOM", "", 0, 1)])
+        self.assertIn("ANOM/PHANOM", coot.names[3])
+        self.assertIn('"labels": ["ANOM", "PHANOM"]', output)
+        # A file with both: phenix.refine's pair first.
+        coot = FakeCoot(self.mtz, ("ANOM", "PANOM", "PHANOM"))
+        self.execute_script(script, coot)
+        self.assertEqual([entry[2] for entry in coot.created], ["PANOM"])
+
     def test_existing_anomalous_overlay_is_reused_including_qualified_labels(self):
         script, _ = self.launch()
         coot = FakeCoot(self.mtz)
         coot.maps.append((str(self.mtz), "/crystal/dataset/ANOM",
-                          "/crystal/dataset/PHANOM", 1))
+                          "/crystal/dataset/PANOM", 1))
         for _ in range(2):
             output = self.execute_script(script, coot)
             self.assertIn('"status": "reused"', output)
@@ -160,7 +184,7 @@ class CootAnomalousTests(unittest.TestCase):
     def test_identical_labels_from_other_file_do_not_satisfy_selected_map(self):
         script, _ = self.launch()
         coot = FakeCoot(self.mtz)
-        coot.maps.append((str(self.root / self.mtz.name), "ANOM", "PHANOM", 1))
+        coot.maps.append((str(self.root / self.mtz.name), "ANOM", "PANOM", 1))
         self.execute_script(script, coot)
         self.assertEqual(len(coot.created), 1)
         self.assertEqual(coot.created[0][0], str(self.mtz))
@@ -198,13 +222,13 @@ class CootAnomalousTests(unittest.TestCase):
         reflections = self.add_reflections()
         script, result = self.launch()
         coot = FakeCoot(self.mtz, ())
-        coot.labels[str(reflections)] = {"ANOM", "PHANOM"}
+        coot.labels[str(reflections)] = {"ANOM", "PANOM"}
         self.execute_script(script, coot)
         self.assertEqual(coot.created[0][0], str(reflections))
         self.assertEqual(result.map_path, self.mtz)
         # If both files contain the pair, the selected map file has priority.
         coot = FakeCoot(self.mtz)
-        coot.labels[str(reflections)] = {"ANOM", "PHANOM"}
+        coot.labels[str(reflections)] = {"ANOM", "PANOM"}
         self.execute_script(script, coot)
         self.assertEqual([entry[0] for entry in coot.created], [str(self.mtz)])
 
@@ -213,7 +237,7 @@ class CootAnomalousTests(unittest.TestCase):
         _, review_map = add_review_checkpoint(self.run)
         script, _ = self.launch(checkpoint="refine-002")
         coot = FakeCoot(review_map, ())
-        coot.labels[str(self.mtz)] = coot.labels[str(reflections)] = {"ANOM", "PHANOM"}
+        coot.labels[str(self.mtz)] = coot.labels[str(reflections)] = {"ANOM", "PANOM"}
         output = self.execute_script(script, coot)
         self.assertEqual(coot.created, [])
         self.assertIn('"status": "absent"', output)
@@ -233,7 +257,7 @@ class CootAnomalousTests(unittest.TestCase):
         expected = self.run / reflections.relative_to(old_run)
         script, result = self.launch()
         coot = FakeCoot(result.map_path, ())
-        coot.labels[str(expected)] = {"ANOM", "PHANOM"}
+        coot.labels[str(expected)] = {"ANOM", "PANOM"}
         self.execute_script(script, coot)
         self.assertEqual(coot.created[0][0], str(expected))
         self.assertEqual(result.checkpoint_id, "manual-001")

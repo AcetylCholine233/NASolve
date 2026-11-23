@@ -195,6 +195,20 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- The anomalous difference map opens in Coot again (reported 2026-11-23:
+  after AutoRefine rounds only the 2mFo-DFc and mFo-DFc maps opened). Two
+  causes in the startup script: Coot (bundled with Phenix 2.2.1) requires a
+  Python bool for `valid_labels`' use-weights argument and raised "argument 5
+  of type 'bool'" on the 0 it was given, so the script stopped at once
+  (`NASOLVE_ANOMALOUS_MAP ... "status": "error"` in every U-Y_Ag run_004
+  `CootGUI/autorefine/*/coot_gui.log`); and it looked only for `ANOM`/`PHANOM`
+  (phenix.maps' labels), while phenix.refine writes `ANOM`/`PANOM`. It now
+  passes `False` and tries `ANOM`/`PANOM`, then `ANOM`/`PHANOM`; the map is
+  named after the pair found and the log line records it. `launch.json`
+  `anomalous_map.labels` is now the list of pairs tried. Applies to every
+  NASolve Coot view (show, AutoRefine, Refine Doctor's `i`, AutoFDP final
+  round). Checked against Phenix 2.2.1's `coot.py` signatures and the real
+  MTZ columns; not run in a live Coot here.
 - PostMR and AutoFDP give phenix.ready_set one dictionary file per curated
   residue (`ready_set.input.cif_file_name` repeated;
   `ligand_profiles.readyset_dictionary_files` splits a file defining several).
