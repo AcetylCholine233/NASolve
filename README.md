@@ -1034,14 +1034,29 @@ After a run reaches `MR_SUCCESS`, prepare it for refinement with:
 ./nasolve postmr my_dataset/AutoMR/run_004
 ```
 
-PostMR runs once per AutoMR run. To redo it (other options, a new merge),
-`./nasolve postmr "$RUN" --force-overwrite` deletes the existing PostMR and
-everything made from it: AutoRefine rounds and checkpoints, AutoSol, Refine
-Doctor and their Coot views. It then runs PostMR again, so refinement
-starts over. This cannot be undone. The Phaser outputs, metal searches and
-metal merges are kept, the Phaser/TFZ gate is applied again (give
-`--tfz-override` again if it was needed), and the run report records what was
-deleted (`postmr_overwrites`).
+An AutoMR run has one current PostMR result at a time. To redo PostMR (other
+options, another merge), `./nasolve postmr "$RUN" --force-overwrite` first
+keeps the current one: `PostMR/` and everything made from it (AutoRefine
+rounds and checkpoints, AutoSol, Refine Doctor and their Coot views) are moved,
+unchanged, to `PostMRHistory/postmr-NNN/`, with its report records. It then
+runs PostMR again, numbered `postmr-NNN+1`, and refinement starts again from
+it. Nothing is deleted. The Phaser outputs, metal searches and metal merges
+belong to the run and are shared by every result; the Phaser/TFZ gate is
+applied again (give `--tfz-override` again if it was needed), and the run
+report records each rerun (`postmr_overwrites`).
+
+```bash
+./nasolve postmr "$RUN" --history               # list the results, * = current
+./nasolve postmr "$RUN" --switch postmr-001     # make a kept result current again
+```
+
+`--switch` keeps the current result the same way and moves the chosen one
+back, records and all, so AutoRefine, `nasolve show`, AutoSol and Refine
+Doctor carry on from it as before (nothing is rerun). A kept result is always
+used from the run's own folders: the paths it recorded (including those inside
+phenix.refine's `.eff` files) are right again once it is current, so switch to
+it rather than opening files in `PostMRHistory/` directly. Close Coot views of
+the run before switching.
 
 `MR_REVIEW` runs stop unless the user explicitly supplies
 `--allow-mr-review`. Failed MR runs cannot enter PostMR, with one exception:

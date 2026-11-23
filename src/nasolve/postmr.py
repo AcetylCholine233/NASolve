@@ -35,6 +35,13 @@ from .ligand_profiles import (
     normalize_ccp4_torsion_alternates,
     frozen_reference, validate_model_phosphate_policy, write_linked_profile,
 )
+from .postmr_history import (
+    RESULT_FOLDERS,
+    RESULT_RECORDS,
+    PostMRHistoryError,
+    keep_current,
+    next_id,
+)
 from .phaser import (
     TFZOverrideError,
     check_tfz_override,
@@ -78,7 +85,8 @@ class PostMRResult:
     anomalous_scatterer_phil: Path | None = None
     tfz_override_record: Mapping[str, object] | None = None   # --tfz-override record
     narestraints_summary: str = ""
-    overwritten: tuple[str, ...] = ()   # --force-overwrite: folders deleted first
+    kept: tuple[str, ...] = ()          # --force-overwrite: folders kept in PostMRHistory/
+    kept_as: str | None = None          # ... as this numbered result
     merge_selected_by: str | None = None    # how the merged model was chosen
     merge_warnings: tuple[str, ...] = ()    # --merged-model: an unrecorded or changed file
     other_merges: tuple[str, ...] = ()      # recorded merges PostMR did not use
@@ -149,11 +157,10 @@ _REQUIRED_PARENT_ATOM_GROUPS = (
 
 #: Stages after PostMR; a --force-overwrite rerun starts from the Phaser result again.
 _DOWNSTREAM_STAGES = {"postmr", "autosol", "autorefine", "refine-doctor"}
-#: Folders built from PostMR (deleted by --force-overwrite), relative to the AutoMR run.
-_DOWNSTREAM_FOLDERS = ("PostMR", "AutoSol", "AutoRefine", "RefineDoctor",
-                       "CootGUI/postmr", "CootGUI/autosol", "CootGUI/autorefine")
-#: Run-report records written by those stages.
-_DOWNSTREAM_RECORDS = ("postmr", "autosol", "autorefine", "refine_doctor")
+#: Folders built from PostMR (kept in PostMRHistory/ by --force-overwrite) and
+#: the run-report records written by those stages.
+_DOWNSTREAM_FOLDERS = RESULT_FOLDERS
+_DOWNSTREAM_RECORDS = RESULT_RECORDS
 
 
 def _read_report(run_directory: Path, *, force_overwrite: bool = False) -> tuple[Path, dict[str, object]]:
@@ -174,7 +181,8 @@ def _read_report(run_directory: Path, *, force_overwrite: bool = False) -> tuple
     if stage in _DOWNSTREAM_STAGES and not force_overwrite:
         raise PostMRPreparationError(
             f"PostMR is already complete; refusing to overwrite {run / 'PostMR'} "
-            "(--force-overwrite deletes it and everything made from it, then reruns PostMR)"
+            "(--force-overwrite keeps it and everything made from it as a numbered result in "
+            "PostMRHistory/, then reruns PostMR; --switch goes back to it)"
         )
     if stage in _DOWNSTREAM_STAGES:
         execution = report.get("execution")
@@ -183,7 +191,8 @@ def _read_report(run_directory: Path, *, force_overwrite: bool = False) -> tuple
             raise PostMRPreparationError("PostMR requires a completed Phaser report")
         # Work from the Phaser result, as the first PostMR did.
         status, message = _recorded_phaser_result(report, record)
-        report = {key: value for key, value in report.items() if key not in _DOWNSTREAM_RECORDS}
+        report = {key: value for key, value in report.items()
+                  if key not in (*_DOWNSTREAM_RECORDS, "postmr_result")}
         report.update(stage="phaser", status=status, message=message)
         return run, report
     if stage != "phaser":
@@ -203,28 +212,23 @@ def _recorded_phaser_result(
     return classify_phaser_record(record)
 
 
-def _delete_downstream(run: Path, report: dict[str, object], previous: Mapping[str, object]) -> list[str]:
-    """Delete what was built from the old PostMR and reset the run report to the
-    Phaser result, recording what was removed (``postmr_overwrites``)."""
-    removed: list[str] = []
-    for relative in _DOWNSTREAM_FOLDERS:
-        path = run / relative
-        if path.is_symlink():
-            path.unlink()
-        elif path.is_dir():
-            if not path.resolve().is_relative_to(run.resolve()):
-                raise PostMRPreparationError(f"Refusing to delete {path}: it is outside the run")
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
-        else:
-            continue
-        removed.append(relative)
+def _keep_downstream(run: Path, report: dict[str, object], previous: Mapping[str, object]) -> dict | None:
+    """Keep the current PostMR and everything made from it as a numbered result
+    in ``PostMRHistory/`` (``postmr_history.keep_current``: moved, unchanged),
+    write ``report`` (the Phaser result) and record it (``postmr_overwrites``)."""
+    current = dict(previous)
+    try:
+        kept = keep_current(run, current, reason="nasolve postmr --force-overwrite")
+    except PostMRHistoryError as exc:
+        raise PostMRPreparationError(str(exc)) from exc
+    if kept is None:
+        return None
     history = list(previous.get("postmr_overwrites") or [])
     previous_postmr = previous.get("postmr")
     history.append({
-        "deleted_utc": datetime.now(timezone.utc).isoformat(),
-        "deleted": removed,
+        "kept_utc": kept["kept_utc"],
+        "kept_as": kept["id"],
+        "moved": list(kept["folders"]),
         "previous_stage": previous.get("stage"),
         "previous_status": previous.get("status"),
         "previous_postmr_created_utc": (
@@ -232,9 +236,9 @@ def _delete_downstream(run: Path, report: dict[str, object], previous: Mapping[s
         ),
     })
     report["postmr_overwrites"] = history   # carried into the new PostMR's report
-    report["updated_utc"] = history[-1]["deleted_utc"]
+    report["updated_utc"] = kept["kept_utc"]
     _write_json(run / "report.json", report)
-    return removed
+    return kept
 
 
 def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
@@ -1977,11 +1981,14 @@ def prepare_postmr(
     NARestraints does on its own (``no_narestraints`` skips that).
 
     ``force_overwrite`` reruns PostMR on a run that already has one: after every
-    check has passed, it deletes the old PostMR and everything made from it
+    check has passed, it keeps the old PostMR and everything made from it
     (AutoSol, AutoRefine rounds and checkpoints, Refine Doctor, their Coot
-    views), resets the run report to the Phaser result and records the
-    deletion in ``postmr_overwrites``. The Phaser outputs, metal searches and
-    metal merges are kept.
+    views) as a numbered result in ``PostMRHistory/postmr-NNN/`` (moved,
+    unchanged; ``postmr_history``), resets the run report to the Phaser result
+    and records it in ``postmr_overwrites``. The Phaser outputs, metal searches
+    and metal merges stay where they are. Each PostMR result is numbered
+    (``postmr_result.id``); ``postmr_history.switch_to`` makes a kept one
+    current again.
     """
     run, report = _read_report(run_directory, force_overwrite=force_overwrite)
     previous_report = (
@@ -2099,15 +2106,15 @@ def prepare_postmr(
         )
 
     postmr = run / "PostMR"
-    overwritten: list[str] = []
+    kept = None
     if force_overwrite:   # every check above has passed
-        overwritten = _delete_downstream(run, report, previous_report)
+        kept = _keep_downstream(run, report, previous_report)
     try:
         postmr.mkdir()
     except FileExistsError as exc:
         raise PostMRPreparationError(
             f"PostMR directory already exists; refusing to overwrite {postmr} "
-            "(--force-overwrite deletes it and everything made from it)"
+            "(--force-overwrite keeps it in PostMRHistory/ and reruns PostMR)"
         ) from exc
     model_dir = postmr / "Model"
     coot_dir = postmr / "Coot"
@@ -2532,6 +2539,7 @@ def prepare_postmr(
     report["message"] = postmr_payload["message"]
     report["updated_utc"] = postmr_payload["created_utc"]
     report["postmr"] = postmr_payload
+    report["postmr_result"] = {"id": next_id(run, report), "created_utc": postmr_payload["created_utc"]}
     _write_json(run / "report.json", report)
     return PostMRResult(
         status="POSTMR_READY",
@@ -2555,7 +2563,8 @@ def prepare_postmr(
         anomalous_scatterer_phil=metal_phil,
         tfz_override_record=tfz_override_record,
         narestraints_summary=describe_narestraints(narestraints_report),
-        overwritten=tuple(overwritten),
+        kept=tuple(kept["folders"]) if kept else (),
+        kept_as=str(kept["id"]) if kept else None,
     )
 
 

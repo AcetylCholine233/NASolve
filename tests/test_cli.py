@@ -346,7 +346,7 @@ class CLITests(unittest.TestCase):
             readyset_log=run / "PostMR" / "readyset.log", restraint_paths=(),
             report_path=run / "PostMR" / "report.json", tfz_override_record=record,
             narestraints_summary="NARestraints: 19 base pairs (guessed from the model) and stacking",
-            overwritten=(),
+            kept=(), kept_as=None,
         )
         metal_result = SimpleNamespace(
             status="AUTOSOL_METAL_NOT_FOUND", message="no sites", metals=("Ag",),
@@ -395,7 +395,7 @@ class CLITests(unittest.TestCase):
             readyset_log=run / "PostMR" / "readyset.log", restraint_paths=(),
             report_path=run / "PostMR" / "report.json", tfz_override_record=None,
             narestraints_summary="NARestraints: not run; no base-pair or stacking restraints",
-            overwritten=(),
+            kept=(), kept_as=None,
         )
         output = io.StringIO()
         with (patch("nasolve.cli.load_config", return_value=AppConfig()),

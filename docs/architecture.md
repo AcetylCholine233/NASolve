@@ -193,12 +193,21 @@ overwrite an existing `PostMR/` directory unless `--force-overwrite` is given.
 That option runs every PostMR check first (including the Phaser/TFZ gate, from
 the run report's `phaser_result`, or for older reports re-derived from
 `execution.phaser` with `phaser.classify_phaser_record`, the same function
-AutoMR uses), then deletes `PostMR/`, `AutoSol/`, `AutoRefine/` (rounds and
-checkpoints), `RefineDoctor/` and `CootGUI/{postmr,autosol,autorefine}`,
-removes their run-report records, resets the report to the Phaser result,
-appends the deletion to `postmr_overwrites`, and runs PostMR again. Phaser
-outputs, metal searches and metal merges are kept. A rerun that then fails
-leaves the run at its Phaser result. `MR_SUCCESS` is accepted;
+AutoMR uses), then keeps the current result (`postmr_history.keep_current`):
+`PostMR/`, `AutoSol/`, `AutoRefine/` (rounds and checkpoints), `RefineDoctor/`
+and `CootGUI/{postmr,autosol,autorefine}` are moved, unchanged and in the same
+layout, to `PostMRHistory/postmr-NNN/`, with their run-report records
+(`postmr`, `autosol`, `autorefine`, `refine_doctor`, and the stage, status and
+message) in its `result.json`. The report is reset to the Phaser result, the
+rerun appended to `postmr_overwrites`, and PostMR runs again; each result is
+numbered in `postmr_result.id`. `nasolve postmr RUN --switch postmr-NNN`
+(`postmr_history.switch_to`) keeps the current result the same way and moves
+the chosen one back with its records (`postmr_switches`); `--history` lists
+them. Results are only ever used from the run's own folders, so every path
+they recorded (absolute, run-anchored with checksums, inside phenix.refine
+`.eff` files) is valid whenever they are current. Phaser outputs, metal
+searches and metal merges belong to the run. A rerun that then fails leaves
+the run at its Phaser result, with the previous result kept. `MR_SUCCESS` is accepted;
 `MR_REVIEW` requires an explicit override; other statuses stop. The one
 exception is `--tfz-override`: a run that is `MR_REVIEW` or `MR_FAILED` only
 because of its TFZ (Phaser exit status 0, a reported TFZ, the requested

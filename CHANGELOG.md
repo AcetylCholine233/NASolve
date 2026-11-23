@@ -76,17 +76,25 @@ entries are reconstructed from repository history.
   PHIL files are kept. The two-file form now refuses extra arguments
   (a third path was ignored). phenix.refine, ReadySet and Coot simulated.
 - `nasolve postmr RUN --force-overwrite`: rerun PostMR on an AutoMR run that
-  already has one (user's request and choice, 2026-11-19: delete and
-  restart). After every check has passed, it deletes `PostMR/`, `AutoSol/`,
-  `AutoRefine/` (rounds and checkpoints), `RefineDoctor/` and
-  `CootGUI/{postmr,autosol,autorefine}`, removes their run-report records,
-  resets the report to the Phaser result and runs PostMR again; refinement
-  starts a new history. Phaser outputs, metal searches and merges are kept.
-  The Phaser/TFZ gate is applied again (so a refused rerun deletes nothing).
+  already has one. Since 2026-11-23 (user's request) it keeps the previous
+  result instead of deleting it (it deleted from 2026-11-19): after every
+  check has passed, `PostMR/`, `AutoSol/`, `AutoRefine/` (rounds and
+  checkpoints), `RefineDoctor/` and `CootGUI/{postmr,autosol,autorefine}` are
+  moved unchanged to `PostMRHistory/postmr-NNN/` (`nasolve.postmr_history`),
+  their run-report records saved in its `result.json`, the report reset to
+  the Phaser result and PostMR run again. Each PostMR result is numbered
+  (`postmr_result.id`, `postmr-001` onwards). `nasolve postmr RUN --history`
+  lists the results (time, starting model, AutoRefine rounds and current
+  checkpoint with R values, stage and status); `--switch postmr-NNN` keeps
+  the current result and moves the chosen one back with its records
+  (`postmr_switches`), so every path it recorded is valid again. Phaser
+  outputs, metal searches and merges belong to the run. The Phaser/TFZ gate
+  is applied again (so a refused rerun moves nothing).
   Schema: the run report gains `phaser_result` (the Phaser status and message
   PostMR replaces with POSTMR_READY; for older reports re-derived from
-  `execution.phaser`) and `postmr_overwrites` (what each overwrite deleted,
-  the previous stage, status and PostMR time). The AutoMR status logic is now
+  `execution.phaser`) and `postmr_overwrites` (each rerun: the number the
+  previous result was kept as, the folders moved, the previous stage, status
+  and PostMR time). The AutoMR status logic is now
   `phaser.classify_phaser_result` / `classify_phaser_record` (same rules and
   messages). A rerun that fails leaves the run at its Phaser result. ReadySet
   simulated in tests.

@@ -211,12 +211,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="guess base pairs and restrain only pairs containing a modified nucleotide",
     )
-    postmr.add_argument(
+    results = postmr.add_mutually_exclusive_group()
+    results.add_argument(
         "--force-overwrite", action="store_true",
-        help=("rerun PostMR on a run that already has one: first DELETE its PostMR and "
-              "everything made from it (AutoRefine rounds and checkpoints, AutoSol, Refine "
-              "Doctor, their Coot views); cannot be undone. Phaser outputs, metal searches "
-              "and metal merges are kept"),
+        help=("rerun PostMR on a run that already has one. The current PostMR and everything "
+              "made from it (AutoRefine rounds and checkpoints, AutoSol, Refine Doctor, their "
+              "Coot views) are kept, unchanged, as a numbered result in "
+              "PostMRHistory/postmr-NNN/; go back with --switch. Phaser outputs, metal "
+              "searches and metal merges are shared by all results"),
+    )
+    results.add_argument(
+        "--history", action="store_true",
+        help="list this run's PostMR results (current and kept) and exit",
+    )
+    results.add_argument(
+        "--switch", metavar="ID",
+        help=("make a kept PostMR result current again, e.g. postmr-001 (see --history); "
+              "the current one is kept first. Nothing is rerun"),
     )
     postmr.add_argument(
         "--no-narestraints", action="store_true",
@@ -949,7 +960,48 @@ def _automr(args: argparse.Namespace) -> int:
     return 0
 
 
+def _postmr_results(args: argparse.Namespace) -> int:
+    """``nasolve postmr RUN --history`` / ``--switch ID``."""
+    from .postmr_history import PostMRHistoryError, history, switch_to
+
+    try:
+        run = _workspace_run(args.run, load_config())
+        if args.switch:
+            kept, restored = switch_to(run, args.switch)
+        rows = history(run)
+    except (ConfigError, PostMRHistoryError) as exc:
+        print(f"PostMR results error: {exc}", file=sys.stderr)
+        return 1
+    if args.switch:
+        print(_color(f"Current PostMR result: {restored['id']}", "32"))
+        if kept is not None:
+            print(f"Kept {kept['id']} in {run / 'PostMRHistory' / str(kept['id'])}")
+        print()
+    print(f"PostMR results of {run} (* current):")
+    if not rows:
+        print("  none")
+    for row in rows:
+        created = str(row.get("postmr_created_utc") or "")[:16].replace("T", " ") or "no PostMR record"
+        model = row.get("merged_model") or row.get("starting_model") or "-"
+        rounds = int(row.get("autorefine_rounds") or 0)
+        refine = (f"AutoRefine {rounds} round{'s' if rounds != 1 else ''}, current "
+                  f"{row.get('current_checkpoint')}" if rounds else "no AutoRefine rounds")
+        metrics = row.get("current_metrics") or {}
+        if rounds and isinstance(metrics, dict) and metrics.get("r_free") is not None:
+            refine += f" (Rwork {metrics.get('r_work'):.3f} / Rfree {metrics.get('r_free'):.3f})"
+        fields = row.get("fields") or {}
+        marker = "*" if row.get("current") else " "
+        print(f"{marker} {row.get('id') or '(unnumbered)'}  {created}  from {model}  {refine}  "
+              f"[{fields.get('stage')} {fields.get('status')}]")
+    others = [row["id"] for row in rows if not row.get("current") and row.get("id")]
+    if others:
+        print("Switch with: ./nasolve postmr " + shlex.quote(str(run)) + f" --switch {others[-1]}")
+    return 0
+
+
 def _postmr(args: argparse.Namespace) -> int:
+    if args.history or args.switch:
+        return _postmr_results(args)
     try:
         config = load_config()
         run = _workspace_run(args.run, config)
@@ -988,9 +1040,11 @@ def _postmr(args: argparse.Namespace) -> int:
         print(f"PostMR preparation error: {exc}", file=sys.stderr)
         return 2
     print(f"{result.status}: {result.message}")
-    if result.overwritten:
-        print(_color("Deleted before rerunning (--force-overwrite): "
-                     + ", ".join(result.overwritten), "33"))
+    if result.kept_as:
+        print(_color(f"Kept the previous PostMR result as {result.kept_as} "
+                     f"({result.run_directory / 'PostMRHistory' / result.kept_as}: "
+                     + ", ".join(result.kept) + "); go back with: ./nasolve postmr "
+                     + shlex.quote(str(result.run_directory)) + f" --switch {result.kept_as}", "33"))
     if result.tfz_override_record is not None:
         print(_color(tfz_override_warning(result.tfz_override_record), "33"))
     print(f"Run directory: {result.run_directory}")
