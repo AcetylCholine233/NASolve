@@ -344,7 +344,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Hold coordinates, B and occupancy, fix f' at theory for the collection "
             "wavelength, refine f'' alone, and adjust occupancy until refined f'' is "
-            "within the tolerance of theory. Give an AutoRefine round folder "
+            "within 10% of theory (--acceptance_absolute: within a fixed number of "
+            "electrons). Give an AutoRefine round folder "
             "(RUN/AutoRefine/round_NNN): its refined_NNN.pdb is the starting model, "
             "the reflection file its refined_NNN.eff refined against is the MTZ, and "
             "that .eff is the final round's (as --final-eff). Or give a starting "
@@ -358,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
             "theory, f'' refined from 0) (step 2); then, one site at a time and the "
             "one furthest from theory first, lower the occupancy if f'' is below "
             "theory or raise it if above, and run the same round again, until f'' is "
-            "within the tolerance or the site has had --max-iterations adjustments "
+            "accepted or the site has had --max-iterations adjustments "
             "(step 3). Coot is not opened for these rounds: the maps of an "
             "f''-only round are not diagnostic. With --final-eff, a converged run "
             "ends with a final round that uses every setting of that manual .eff, "
@@ -408,8 +409,10 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: cctbx Henke at the MTZ wavelength)",
     )
     autofdp.add_argument(
-        "--tolerance", type=float, default=1.0, metavar="E",
-        help="refined f'' within E electrons of theory counts as matching (default: 1.0)",
+        "--acceptance_absolute", "--acceptance-absolute", dest="acceptance_absolute",
+        type=float, metavar="E",
+        help="refined f'' within E electrons of theory counts as matching "
+             "(default: within 10%% of the theoretical f'' of each site's element)",
     )
     autofdp.add_argument(
         "--max-iterations", type=int, default=5, metavar="N",
@@ -1883,7 +1886,6 @@ def _print_autofdp_plan(plan) -> None:
 
 def _print_fdp_table(round_result) -> None:
     """Every site of one f'' round: occupancy, B, f', refined f'' and theory."""
-    tolerance = round_result.tolerance
     print(
         f"\n{'Site':<14}{'Occ':>6}{'B':>9}{'f-prime':>9}{'fdp':>9}"
         f"{'theory':>9}{'deviation':>11}"
@@ -1894,9 +1896,9 @@ def _print_fdp_table(round_result) -> None:
         occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
         b_factor = "-" if site.b_factor is None else f"{site.b_factor:.2f}"
         verdict = (
-            "" if site.within_tolerance is None
-            else f"  within +/-{tolerance:g}" if site.within_tolerance
-            else f"  outside +/-{tolerance:g}"
+            "" if site.within_acceptance is None
+            else f"  within +/-{site.acceptance:.2f}" if site.within_acceptance
+            else f"  outside +/-{site.acceptance:.2f}"
         )
         label = f"{site.site} {site.atom_name}"
         print(
@@ -1907,7 +1909,7 @@ def _print_fdp_table(round_result) -> None:
 
 def _print_fdp_round(result, max_iterations: int) -> None:
     """Print AutoFDP steps 2 and 3: every round's f'' against theory."""
-    from .autofdp import STATUS_CONVERGED, STATUS_ROUND_DONE
+    from .autofdp import STATUS_CONVERGED, STATUS_ROUND_DONE, acceptance_rule
 
     rounds = result.rounds or (result.round,)
     first = rounds[0]
@@ -1939,7 +1941,8 @@ def _print_fdp_round(result, max_iterations: int) -> None:
     for warning in first.warnings:
         print(f"Warning: {warning}")
 
-    tolerance = first.tolerance
+    rule = acceptance_rule(first.acceptance_absolute)
+    print(f"Acceptance: refined f'' within {rule} of theory (each site's window in e- is in its row)")
     if first.status == STATUS_ROUND_DONE:
         print(
             "\nAutoFDP step 3: occupancy adjustment (one site at a time, furthest from theory "
@@ -1958,10 +1961,10 @@ def _print_fdp_round(result, max_iterations: int) -> None:
                     f"({adjustment.method})"
                 )
             if site is not None and site.f_double_prime_refined is not None:
-                verdict = "within" if site.within_tolerance else "outside"
+                verdict = "within" if site.within_acceptance else "outside"
                 line += (
                     f"  f'' {site.f_double_prime_refined:.2f} vs {site.f_double_prime_theory:.2f} "
-                    f"({site.deviation:+.2f}, {verdict} +/-{tolerance:g})"
+                    f"({site.deviation:+.2f}, {verdict} +/-{site.acceptance:.2f})"
                 )
             print(line)
             if adjustment is not None and adjustment.note:
@@ -1972,8 +1975,7 @@ def _print_fdp_round(result, max_iterations: int) -> None:
                 print(f"      Warning: {warning}")
         if not result.adjustments:
             if all(outcome.converged for outcome in result.outcomes):
-                print(f"  every site already within +/-{tolerance:g} e- of theory; "
-                      "no occupancy changed")
+                print(f"  every site already within {rule} of theory; no occupancy changed")
             for outcome in result.outcomes:
                 if not outcome.converged:
                     print(f"  {outcome.site} {outcome.atom_name}: {outcome.reason}")
@@ -2063,6 +2065,8 @@ def _autofdp(args: argparse.Namespace) -> int:
         STATUS_CONVERGED,
         STATUS_REVIEW,
         AutoFDPError,
+        acceptance_windows_text,
+        checked_acceptance_absolute,
         execute_autofdp,
         parse_b_start,
         parse_theory_overrides,
@@ -2090,8 +2094,7 @@ def _autofdp(args: argparse.Namespace) -> int:
         theory = parse_theory_overrides(args.theory)
         if args.cycles < 1:
             raise AutoFDPError("--cycles must be at least 1")
-        if not math.isfinite(args.tolerance) or args.tolerance <= 0:
-            raise AutoFDPError("--tolerance must be a positive number of electrons")
+        acceptance_absolute = checked_acceptance_absolute(args.acceptance_absolute)
         if args.max_iterations < 0:
             raise AutoFDPError("--max-iterations must be 0 or more")
         if not (math.isfinite(args.occupancy_floor) and 0 < args.occupancy_floor < 1):
@@ -2126,7 +2129,8 @@ def _autofdp(args: argparse.Namespace) -> int:
                 "(every strategy off except the anomalous scatterers; f' fixed at theory, "
                 f"f'' from 0), in a new run folder of {plan.output_root}; then up to "
                 f"{args.max_iterations} occupancy adjustment(s) per site outside "
-                f"+/-{args.tolerance:g} e- of theory, one site at a time (furthest first), "
+                f"{acceptance_windows_text(plan.theory, acceptance_absolute)}, "
+                "one site at a time (furthest first), "
                 f"with the same round after each (occupancy floor {args.occupancy_floor:g})"
             )
             if plan.final_eff is not None:
@@ -2141,7 +2145,7 @@ def _autofdp(args: argparse.Namespace) -> int:
         result = execute_autofdp(
             plan, refine, ready_set,
             phenix_version=phenix.version, b_start=b_start, sites=tuple(args.site),
-            cycles=args.cycles, tolerance=args.tolerance,
+            cycles=args.cycles, acceptance_absolute=acceptance_absolute,
             max_iterations=args.max_iterations, occupancy_floor=args.occupancy_floor,
             environment=phenix.environment,
         )

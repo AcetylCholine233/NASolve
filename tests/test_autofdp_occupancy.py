@@ -219,7 +219,7 @@ class OccupancyLoopTests(unittest.TestCase):
             model, mtz = make_inputs(root)            # Ag B:101 at occupancy 0.90
             refine = make_scaling_refine(root, {SILVER: (0.5, 0.6)})
             result = _execute(_plan(root, model, mtz, refine=refine), root,
-                              refine=refine, tolerance=0.1)
+                              refine=refine, acceptance_absolute=0.1)
             self.assertEqual(result.status, STATUS_CONVERGED, result.message)
             run = result.run_directory
             self.assertEqual([item.directory.name for item in result.rounds],
@@ -230,7 +230,7 @@ class OccupancyLoopTests(unittest.TestCase):
             )
             self.assertEqual([item.sites[0].f_double_prime_refined for item in result.rounds],
                              [1.167, 1.654, 2.038])
-            self.assertTrue(result.round.sites[0].within_tolerance)
+            self.assertTrue(result.round.sites[0].within_acceptance)
             self.assertIn("after 2 occupancy adjustment(s) in 3 f'' round(s)", result.message)
 
             # Each round gets its own copy of the previous model with only the
@@ -283,7 +283,7 @@ class OccupancyLoopTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.0, 2.436)})   # needs q = 1.2
             result = _execute(_plan(root, model, mtz, refine=refine), root,
-                              refine=refine, tolerance=0.1)
+                              refine=refine, acceptance_absolute=0.1)
             self.assertEqual(result.status, STATUS_REVIEW)
             self.assertEqual([(a.occupancy_after, a.bound) for a in result.adjustments],
                              [(1.0, "ceiling")])
@@ -313,7 +313,7 @@ class OccupancyLoopTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.5, 0.6)})
             result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
-                              tolerance=0.1, max_iterations=1)
+                              acceptance_absolute=0.1, max_iterations=1)
             self.assertEqual(result.status, STATUS_REVIEW)
             self.assertEqual(len(result.rounds), 2)
             self.assertEqual(
@@ -328,7 +328,7 @@ class OccupancyLoopTests(unittest.TestCase):
             # Ag needs q = 0.60 (f'' 1.35, -0.68); Hg needs q = 0.30 (f'' 6.06, -4.04).
             refine = make_scaling_refine(root, {SILVER: (0.0, 1.218), MERCURY: (0.0, 3.03)})
             result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
-                              tolerance=0.3)
+                              acceptance_absolute=0.3)
             self.assertEqual(result.status, STATUS_CONVERGED, result.message)
             self.assertEqual([(a.selection, a.occupancy_after) for a in result.adjustments],
                              [(MERCURY, 0.3), (SILVER, 0.6)])
@@ -361,7 +361,7 @@ class OccupancyLoopTests(unittest.TestCase):
                 MERCURY: {"S": 2.02, "peak": 0.35, "peak_while": (SILVER, 0.7)},
             })
             result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
-                              tolerance=0.3)
+                              acceptance_absolute=0.3)
             self.assertEqual(result.status, STATUS_CONVERGED, result.message)
             self.assertEqual(
                 [(a.round, a.selection, a.occupancy_before, a.occupancy_after, a.method)
@@ -398,7 +398,7 @@ class OccupancyLoopTests(unittest.TestCase):
                 SILVER: (0.0, 1.218), MERCURY: {"S": 3.03, "peak": 0.35},
             })
             result = _execute(_plan(root, model, mtz, refine=refine), root, refine=refine,
-                              tolerance=0.3)
+                              acceptance_absolute=0.3)
             self.assertEqual(result.status, STATUS_REVIEW)
             self.assertEqual(
                 [(a.selection, a.occupancy_after, a.method) for a in result.adjustments],
@@ -446,7 +446,7 @@ class OccupancyLoopTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.5, 0.6)}, fail_below=0.6)
             result = _execute(_plan(root, model, mtz, refine=refine), root,
-                              refine=refine, tolerance=0.1)
+                              refine=refine, acceptance_absolute=0.1)
             self.assertEqual(result.status, STATUS_FAILED)
             self.assertEqual([item.status for item in result.rounds], [STATUS_ROUND_DONE, STATUS_FAILED])
             self.assertTrue(result.message.startswith("round_002: phenix.refine failed"))
@@ -467,16 +467,16 @@ class OccupancyCommandTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.5, 0.6)})
             code, out, err, coot_lookup = self._main(
-                root, [str(model), str(mtz), "--tolerance", "0.1"], refine=refine
+                root, [str(model), str(mtz), "--acceptance_absolute", "0.1"], refine=refine
             )
             self.assertEqual(code, 0, err)
             for text in (
                 "AutoFDP step 3: occupancy adjustment (one site at a time, furthest from theory "
                 "first; up to 5 adjustment(s) per site",
                 "round_002  B:101 AG  occupancy 0.90 -> 0.52 (proportional)  "
-                "f'' 1.65 vs 2.03 (-0.38, outside +/-0.1)",
+                "f'' 1.65 vs 2.03 (-0.38, outside +/-0.10)",
                 "round_003  B:101 AG  occupancy 0.52 -> 0.39 (secant)  "
-                "f'' 2.04 vs 2.03 (+0.01, within +/-0.1)",
+                "f'' 2.04 vs 2.03 (+0.01, within +/-0.10)",
                 "Result (round_003)",
                 "AUTOFDP_CONVERGED",
             ):
@@ -498,7 +498,7 @@ class OccupancyCommandTests(unittest.TestCase):
                 SILVER: (0.0, 1.218), MERCURY: {"S": 3.03, "peak": 0.35},
             })
             code, out, err, _ = self._main(
-                root, [str(model), str(mtz), "--tolerance", "0.3"], refine=refine
+                root, [str(model), str(mtz), "--acceptance_absolute", "0.3"], refine=refine
             )
             self.assertEqual(code, 2, err)
             self.assertIn("round_004  C:1 HG  occupancy 0.17 -> 0.30 (restore)", out)
@@ -511,7 +511,7 @@ class OccupancyCommandTests(unittest.TestCase):
             model, mtz = make_inputs(root)
             refine = make_scaling_refine(root, {SILVER: (0.0, 2.436)})
             code, out, err, _ = self._main(
-                root, [str(model), str(mtz), "--tolerance", "0.1"], refine=refine
+                root, [str(model), str(mtz), "--acceptance_absolute", "0.1"], refine=refine
             )
             self.assertEqual(code, 2, err)
             self.assertIn("AUTOFDP_REVIEW", out)

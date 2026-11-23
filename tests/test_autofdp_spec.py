@@ -19,7 +19,7 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         help_text = build_parser()._subparsers._group_actions[0].choices["autofdp"].format_help()
         for option in ("MODEL.pdb", "DATA.mtz", "--output", "--wavelength", "--cif",
                        "--site", "--element", "--candidates", "--theory",
-                       "--tolerance", "--max-iterations", "--cycles", "--b-start",
+                       "--acceptance_absolute", "--max-iterations", "--cycles", "--b-start",
                        "--b-step", "--occupancy-floor", "--map-sigma",
                        "--no-confirm-b", "--final-eff", "--plan", "--no-coot", "--coot",
                        "--phenix-root"):
@@ -54,7 +54,8 @@ class AutoFDPSpecificationTests(unittest.TestCase):
 
     def test_default_settings_match_the_specification(self):
         settings = autofdp.AutoFDPSettings()
-        self.assertEqual(settings.tolerance, 1.0)
+        # f'' within 10% of theory (2026-11-23; it was a fixed 1 e-).
+        self.assertEqual((settings.acceptance_fraction, settings.acceptance_absolute), (0.1, None))
         self.assertEqual(settings.cycles, 3)
         self.assertEqual(settings.max_iterations, 5)
         self.assertEqual(settings.occupancy_floor, 0.05)

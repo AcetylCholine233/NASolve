@@ -38,12 +38,22 @@ from nasolve.phil_text import scan, starred, unquote
 from .test_autofdp_round import (
     ENV,
     SILVER,
-    _execute,
     _plan,
     make_inputs,
     make_ready_set,
 )
+from .test_autofdp_round import _execute as _execute_round
 from .test_autorefine import PHENIX_21, make_mtz_dump
+
+#: These fixtures refine f'' to 2.6 against theory 2.03 (+0.57): inside the
+#: fixed 1 e- window the tests were written for, outside the default 10%
+#: (0.20 e-, 2026-11-23). They test the final round, so they keep that window.
+FIXED_WINDOW = 1.0
+
+
+def _execute(plan, root, **keywords):
+    keywords.setdefault("acceptance_absolute", FIXED_WINDOW)
+    return _execute_round(plan, root, **keywords)
 
 
 def write_manual_eff(root: Path, model: Path, mtz: Path, *, reflection: Path | None = None,
@@ -234,7 +244,7 @@ def silver_site(fdp: float | None = 2.6) -> FdpSiteResult:
         selection=SILVER, site="B:101", atom_name="AG", element="AG", calibrated=True,
         occupancy=0.9, b_factor=50.0, f_prime=-0.12, f_double_prime_start=0.0,
         f_double_prime_refined=fdp, f_double_prime_theory=2.03, theory_source="cctbx-henke",
-        deviation=None if fdp is None else round(fdp - 2.03, 3), within_tolerance=True,
+        deviation=None if fdp is None else round(fdp - 2.03, 3), acceptance=1.0, within_acceptance=True,
     )
 
 
@@ -493,7 +503,9 @@ class FinalCommandTests(unittest.TestCase):
             patch("nasolve.cli.launch_coot_files", side_effect=launch) as launched,
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
         ):
-            code = main(["autofdp", *arguments])
+            window = [] if any(item.startswith("--acceptance") for item in arguments) else [
+                "--acceptance_absolute", f"{FIXED_WINDOW:g}"]
+            code = main(["autofdp", *arguments, *window])
         return code, out.getvalue(), err.getvalue(), launched
 
     def test_final_round_is_printed_and_opened_in_coot(self):

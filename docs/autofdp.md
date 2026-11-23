@@ -16,8 +16,8 @@ every strategy off except the anomalous scatterers, and compares each refined
 f″ with its theoretical value. Step 3 (occupancy adjustment) takes the sites
 one at a time, the one furthest from theory first, lowers the occupancy when
 f″ is below theory or raises it when above, and runs the same round again,
-until f″ is within the tolerance or the site has had `--max-iterations`
-adjustments (default 5). Coot is not opened for these rounds: the maps of an
+until f″ is accepted (within ±10% of theory by default) or the site has had
+`--max-iterations` adjustments (default 5). Coot is not opened for these rounds: the maps of an
 f″-only round are not diagnostic. With `--final-eff MANUAL.eff`, a converged
 run ends with a final round that uses every setting of that manual
 phenix.refine run, with AutoFDP's model, the metal occupancies held and f′/f″
@@ -43,8 +43,9 @@ product occupancy × f″ (reduced by the B factor), not the two separately.
 2. Compare the refined f″ with the theoretical f″ of the metal at that
    wavelength (about 2.0 e⁻ for Ag and 10 e⁻ for Hg near 1.0074 Å).
 3. If f″ is too high, the site holds more metal than modelled: raise the
-   occupancy. If too low, lower it. Repeat until refined f″ is within ±1 e⁻ of
-   theory.
+   occupancy. If too low, lower it. Repeat until refined f″ matches theory:
+   the papers used ±1 e⁻; AutoFDP accepts ±10% of the theoretical f″ by
+   default (see *Acceptance* below).
 4. The occupancy at that point is the measured occupancy, and the f″ value
    supports or contradicts the metal's identity.
 
@@ -67,7 +68,7 @@ occupancy and B and let f′ drift.
 nasolve autofdp ROUND | MODEL.pdb DATA.mtz
                 [--output DIR] [--site SITE]... [--wavelength A] [--cif FILE]...
                 [--element SITE=ELEMENT]... [--candidates ELEMENT[,ELEMENT...]]
-                [--theory ELEMENT=FDP]... [--tolerance E] [--max-iterations N]
+                [--theory ELEMENT=FDP]... [--acceptance_absolute E] [--max-iterations N]
                 [--cycles N] [--b-start surrounding|model|VALUE] [--b-step A2]
                 [--nudge Q] [--occupancy-floor Q] [--map-sigma S]
                 [--no-confirm-b] [--final-eff MANUAL.eff] [--plan]
@@ -96,7 +97,7 @@ The first also ends a converged run with a final round from
 | `--element` | element in the model | treat a site as another element, e.g. `B:101=HG` |
 | `--candidates` | `AG,HG` plus the model's elements *(to confirm)* | elements compared for the identity check |
 | `--theory` | cctbx Henke value at the wavelength | override theoretical f″, e.g. `HG=10.17`; repeatable. f′ stays the Henke value |
-| `--tolerance` | 1.0 e⁻ | a site matches theory when \|refined f″ − theory\| ≤ tolerance |
+| `--acceptance_absolute` (also `--acceptance-absolute`) | none: ±10% of theory | a site matches theory when \|refined f″ − theory\| ≤ E electrons. Without it, the window is 10% of the theoretical f″ of the site's element (Ag 2.03 e⁻ → ±0.20 e⁻; Hg 10.1 e⁻ → ±1.01 e⁻) |
 | `--max-iterations` | 5 | occupancy adjustments (one f″ round each) per site before the site goes to review; 0 runs round_001 only |
 | `--cycles` | 3 | phenix.refine macrocycles per f″ round |
 | `--b-start` | `surrounding` | site B at the start: mean of the neighbouring nucleotides, the model's own (`model`), or a number |
@@ -244,13 +245,24 @@ secondary-structure file is passed.
 After the round, for each group:
 
 - refined f″ (from the phenix.refine log), occupancy and B;
-- deviation = refined f″ − theoretical f″, and whether it is within
-  `--tolerance`;
+- deviation = refined f″ − theoretical f″, the site's acceptance window
+  (e⁻) and whether the deviation is within it;
 - a check that coordinates, occupancy and B did not change (largest change
   recorded; a warning above 0.01 Å, 0.01 or 0.1 Å²).
 
 A round's status is `AUTOFDP_FDP_ROUND_DONE` when phenix.refine reported a
 refined f″ for every group, otherwise `AUTOFDP_FAILED` (and the run stops).
+
+**Acceptance.** A refined f″ matches theory when \|f″ref − f″th\| is at most
+10% of f″th, the theoretical f″ of the site's element (since 2026-11-23, at
+the lab's request). Each element gets its own window: Ag (2.03 e⁻ at
+1.0074 Å) ±0.20 e⁻, Hg (10.1 e⁻) ±1.01 e⁻. `--acceptance_absolute E` gives a
+fixed window of E electrons for every site instead. Before, the window was a
+fixed ±1 e⁻ (`--tolerance`, now removed), as in the papers, which worked for
+Hg (about ±10% in occupancy) but not for Ag: ±1 e⁻ of about 2 e⁻ accepted any
+Ag occupancy from about 0.5 up, so runs started at 1.00 ended at 1.00
+whatever the data said (7CUA, 2026-11-19: the same data were accepted at
+occupancy 0.75 and at 1.00).
 
 Not yet implemented in this step: the mFo-DFc and anomalous map values at each
 site (`map_value_at_site`).
@@ -264,10 +276,10 @@ lower *q*. Above theory: raise *q*.
 
 **Order.** One site at a time. After round_001, the calibrated site (every
 metal site, or those given with `--site`) whose \|f″ref − f″th\| is largest,
-among those outside `--tolerance`, is adjusted until it is within the
-tolerance, has had `--max-iterations` adjustments (default 5), or is at the
+among those outside their acceptance window, is adjusted until it is within
+it, has had `--max-iterations` adjustments (default 5), or is at the
 occupancy bound it would have to pass. Then the next site, ranked again by the
-latest round. Sites already within the tolerance are not touched. Metal sites
+latest round. Sites already within their window are not touched. Metal sites
 left out with `--site` are refined in every round but never adjusted.
 
 **Each adjustment** (`propose_occupancy`):
@@ -296,7 +308,7 @@ left out with `--site` are refined in every round but never adjusted.
   to the earlier occupancy with the highest *f″ref* (the lowest, when *q* was
   raised), over all its rounds, in a "restore" round. It is then held there,
   its occupancy fixed, while the other sites are adjusted. When no other site
-  can be adjusted (all within the tolerance or stopped), it is taken up again
+  can be adjusted (all accepted or stopped), it is taken up again
   from that occupancy, with the same per-site limit (restore rounds do not
   count). A second such response stops it at its best occupancy, again with
   a restore round, and it goes to review: "f″ fell again when occupancy was
@@ -313,10 +325,10 @@ the same `--cycles` and ReadySet dictionaries. Its model,
 `round_NNN/input_model.pdb`, is the previous round's model with only that
 site's occupancy changed (adjusted or restored); B stays as set in step 1.
 
-**The end.** `AUTOFDP_CONVERGED` when every calibrated site is within the
-tolerance in the last round; `AUTOFDP_REVIEW` when one is not (at a bound, out
-of adjustments, f″ moving with occupancy twice, not adjusted with
-`--max-iterations 0`, or moved out of the tolerance while another site was
+**The end.** `AUTOFDP_CONVERGED` when every calibrated site is within its
+acceptance window in the last round; `AUTOFDP_REVIEW` when one is not (at a
+bound, out of adjustments, f″ moving with occupancy twice, not adjusted with
+`--max-iterations 0`, or moved out of its window while another site was
 adjusted). The last round's model is copied to
 `final_model.pdb` in both cases; its occupancies are the measured ones only for
 converged sites.
@@ -334,7 +346,7 @@ Not implemented in this step: the mFo-DFc check that would change B instead of
 occupancy (`--b-step`, `--map-sigma`), and the "unresponsive" flag. Sites
 closer than 3.5 Å to each other (for example the N3 and O4 metals of a
 bimetallic pair) have correlated f″ values; they are adjusted one after the
-other like any other sites, and a site that leaves the tolerance while its
+other like any other sites, and a site that leaves its window while its
 neighbour is adjusted is reported for review, not adjusted again.
 
 ### 4. Identity check
@@ -469,15 +481,18 @@ same level as `AutoMR/` in a NASolve dataset), or inside
   `autofdp_final.params`, `command.json`, the phenix.refine logs and outputs
   (`final_001.pdb`, `final_001.mtz`, ...);
 - `CootGUI/`: Coot's log, backups and map script for the final round's view;
-- `report.json`, with `workflow: "autofdp"` and schema 2:
+- `report.json`, with `workflow: "autofdp"` and schema 3 (3 since
+  2026-11-23: `settings.acceptance` and each site's `acceptance` /
+  `within_acceptance` replace `settings.tolerance` and `within_tolerance`):
   - `inputs`: the model, the MTZ and any `--cif` files, each as a portable
     reference (anchored to the dataset folder when the run is in
     `DATASET/AutoFDP/`), with checksum and size; the absolute path at creation
     is kept as provenance only;
   - `reflections`: labels, Free-R label and test value, wavelength and its
     source, resolution;
-  - `settings`, `phenix_version`, and `theory` (per element: Henke f′, the f″
-    used and its source, Henke f″);
+  - `settings` (with `acceptance`: `rule` `relative` with `fraction` 0.1, or
+    `absolute` with `absolute_electrons`), `phenix_version`, and `theory` (per
+    element: Henke f′, the f″ used and its source, Henke f″);
   - `b_start`: the two model files and, per site, occupancy, B before and
     after, and the neighbours used;
   - `readyset`: the command, mode, log, model, generated and input
@@ -487,8 +502,9 @@ same level as `AutoMR/` in a NASolve dataset), or inside
     its occupancy before and after and the method (proportional or secant, and
     a note), strategy, starting groups, cycles, R-work and R-free, the
     held-parameter check, the refined model and map coefficients, and per site
-    the occupancy, B, fixed f′, refined f″, theory, deviation and whether it
-    is within tolerance;
+    the occupancy, B, fixed f′, refined f″, theory, deviation, acceptance
+    window (`acceptance`, e⁻) and whether it is within it
+    (`within_acceptance`);
   - `occupancy`: the method and limits (`max_iterations`, `floor`, `ceiling`,
     `max_ratio`), every adjustment in order, and per calibrated site the start
     and final occupancy, number of adjustments, final f″ and deviation,
@@ -520,8 +536,8 @@ PDB files do not store f″; the refined values are in `report.json`.
 | `AUTOFDP_PREPARED` | - | in `report.json` between step 1 and the end of round_001 |
 | `AUTOFDP_FDP_ROUND_DONE` | - | status of each finished round, and of `report.json` between rounds |
 | `AUTOFDP_FINAL_DONE` | - | status of a finished final round (`report.json` `final_round.status`); the run stays `AUTOFDP_CONVERGED` |
-| `AUTOFDP_CONVERGED` | 0 | every calibrated site within tolerance in the last round (later: and B confirmation passed) |
-| `AUTOFDP_REVIEW` | 2 | a calibrated site not within tolerance: at an occupancy bound, out of adjustments, not adjusted (`--max-iterations 0`), or moved while another site was adjusted (later also: ambiguous in identity, B drift); per-site reasons are in the report |
+| `AUTOFDP_CONVERGED` | 0 | every calibrated site within its acceptance window in the last round (later: and B confirmation passed) |
+| `AUTOFDP_REVIEW` | 2 | a calibrated site not within its acceptance window: at an occupancy bound, out of adjustments, not adjusted (`--max-iterations 0`), or moved while another site was adjusted (later also: ambiguous in identity, B drift); per-site reasons are in the report |
 | `AUTOFDP_FAILED` | 1 | phenix.refine failed or reported no f″ in any round, or the final round failed; the run folder is kept |
 | preflight error | 1 | before any folder is written |
 

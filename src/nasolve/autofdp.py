@@ -24,7 +24,7 @@ Implemented:
 - Step 3 (occupancy adjustment): the site furthest from theory first, one
   site at a time, its occupancy changed (``propose_occupancy``: lower when
   f'' is below theory, higher when above) and the same f''-only round run
-  again, until its f'' is within the tolerance or it has had
+  again, until its f'' is accepted (``acceptance_window``) or it has had
   ``max_iterations`` adjustments; then the next site.
 
 ``plan_autofdp`` is the preflight; ``execute_autofdp`` runs steps 1 to 3
@@ -38,7 +38,10 @@ full contract, defaults and open questions are in docs/autofdp.md.
 Method (supplements of the mmDNA papers, after Liu & Hendrickson 2013):
 hold coordinates, B and occupancy; fix f' at its theoretical value for the
 collection wavelength; refine f'' alone; adjust occupancy until refined f''
-is within +/-1 e- of the theoretical f'' of the metal.
+matches the theoretical f'' of the metal. The papers used +/-1 e- (for Hg,
+f'' about 10 e-). AutoFDP accepts +/-10% of the theoretical f'' by default,
+so a weak anomalous scatterer such as Ag (about 2 e-) is judged on the same
+relative scale; ``--acceptance_absolute E`` gives a fixed window of E e-.
 """
 
 from __future__ import annotations
@@ -59,12 +62,14 @@ from .model_assessment import file_sha256
 from .run_context import artifact_reference
 
 WORKFLOW = "autofdp"
+# 3: settings.acceptance and each site's acceptance / within_acceptance
+#    replace settings.tolerance and within_tolerance (2026-11-23).
 # 2: standalone (a model and an MTZ). 1 was the AutoRefine-checkpoint layout.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 STATUS_PREPARED = "AUTOFDP_PREPARED"           # step 1 written, round not yet run
 STATUS_ROUND_DONE = "AUTOFDP_FDP_ROUND_DONE"    # one f''-only round finished
-STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0: every site within tolerance
+STATUS_CONVERGED = "AUTOFDP_CONVERGED"          # exit 0: every site's f'' accepted
 STATUS_REVIEW = "AUTOFDP_REVIEW"                # exit 2: a site did not converge
 STATUS_FAILED = "AUTOFDP_FAILED"                # exit 1
 STATUS_FINAL_DONE = "AUTOFDP_FINAL_DONE"        # a finished final round (--final-eff)
@@ -73,6 +78,10 @@ STATUS_FINAL_DONE = "AUTOFDP_FINAL_DONE"        # a finished final round (--fina
 OCCUPANCY_MAX_RATIO = 4.0
 #: Default number of occupancy adjustments per site (``--max-iterations``).
 DEFAULT_MAX_ITERATIONS = 5
+#: A refined f'' matches theory when it is within this fraction of the
+#: theoretical f'' of the site's element, unless ``--acceptance_absolute``
+#: gives a window in electrons (user's request, 2026-11-23; it was 1 e-).
+ACCEPTANCE_FRACTION = 0.10
 
 NOT_IMPLEMENTED_MESSAGE = (
     "this AutoFDP step is specified but not implemented yet; see docs/autofdp.md "
@@ -103,7 +112,8 @@ class AutoFDPSettings:
     elements: Mapping[str, str] = field(default_factory=dict)   # SITE -> ELEMENT
     candidates: tuple[str, ...] = ("AG", "HG")        # plus the model's elements
     theory: Mapping[str, float] = field(default_factory=dict)   # ELEMENT -> f''
-    tolerance: float = 1.0                            # e-
+    acceptance_fraction: float = ACCEPTANCE_FRACTION  # of the theoretical f''
+    acceptance_absolute: float | None = None          # e-; replaces the fraction
     max_iterations: int = DEFAULT_MAX_ITERATIONS     # occupancy adjustments per site
     cycles: int = 3
     b_start: str = "surrounding"                      # surrounding | model | number
@@ -220,6 +230,59 @@ def theoretical_scattering(
             "source": "user (--theory)" if element in overrides else "cctbx-henke",
         }
     return result
+
+
+def checked_acceptance_absolute(value: float | None) -> float | None:
+    """``--acceptance_absolute``: None (the default rule) or a positive number."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not math.isfinite(value) or value <= 0:
+        raise AutoFDPError("--acceptance_absolute must be a positive number of electrons")
+    return float(value)
+
+
+def acceptance_window(theory: float, absolute: float | None = None) -> float:
+    """How far (e-) a refined f'' may be from ``theory`` and still match it:
+    ``ACCEPTANCE_FRACTION`` of ``theory``, or ``absolute`` electrons when
+    given (``--acceptance_absolute``)."""
+    absolute = checked_acceptance_absolute(absolute)
+    return absolute if absolute is not None else ACCEPTANCE_FRACTION * float(theory)
+
+
+def acceptance_rule(absolute: float | None = None) -> str:
+    """``+/-10%`` or ``+/-1 e-`` (followed by "of theory" where used)."""
+    absolute = checked_acceptance_absolute(absolute)
+    if absolute is None:
+        return f"+/-{ACCEPTANCE_FRACTION * 100:g}%"
+    return f"+/-{absolute:g} e-"
+
+
+def acceptance_settings(absolute: float | None = None) -> dict[str, object]:
+    """The rule as recorded in report.json ``settings.acceptance``."""
+    absolute = checked_acceptance_absolute(absolute)
+    if absolute is None:
+        return {"rule": "relative", "fraction": ACCEPTANCE_FRACTION, "absolute_electrons": None}
+    return {"rule": "absolute", "fraction": None, "absolute_electrons": absolute}
+
+
+def acceptance_windows_text(theory: Mapping[str, Mapping[str, object]],
+                            absolute: float | None = None) -> str:
+    """``+/-10% of theory (AG +/-0.20 e-)``, or ``+/-1 e- of theory``."""
+    text = f"{acceptance_rule(absolute)} of theory"
+    if absolute is None and theory:
+        text += " (" + ", ".join(
+            f"{element} +/-{acceptance_window(float(values['f_double_prime'])):.2f} e-"
+            for element, values in sorted(theory.items())
+        ) + ")"
+    return text
+
+
+def _site_acceptance_text(window: float | None, absolute: float | None) -> str:
+    """``+/-10% (0.20 e-)`` or ``+/-1 e-``."""
+    if absolute is not None or window is None:
+        return acceptance_rule(absolute)
+    return f"{acceptance_rule(None)} ({window:.2f} e-)"
 
 
 @dataclass(frozen=True)
@@ -937,7 +1000,8 @@ class FdpSiteResult:
     f_double_prime_theory: float
     theory_source: str
     deviation: float | None       # refined - theory
-    within_tolerance: bool | None
+    acceptance: float             # e-: |deviation| up to this matches theory
+    within_acceptance: bool | None
     alternate: str | None = None  # altloc of the site atom, if any
 
 
@@ -947,7 +1011,7 @@ class FdpRoundResult:
 
     directory: Path
     cycles: int
-    tolerance: float
+    acceptance_absolute: float | None   # None: ACCEPTANCE_FRACTION of each theory
     returncode: int
     r_work: float | None
     r_free: float | None
@@ -1013,7 +1077,7 @@ def fdp_round(
     theory: Mapping[str, Mapping[str, object]],
     calibrated: Sequence[str] = (),
     cycles: int = 3,
-    tolerance: float = 1.0,
+    acceptance_absolute: float | None = None,
     restraints: Sequence[Path] = (),
     environment: Mapping[str, str] | None = None,
     processor_count: int | None = None,
@@ -1029,8 +1093,10 @@ def fdp_round(
     data-manager handling are the same as in AutoRefine. ``restraints`` are
     extra dictionaries (CIF) for residues phenix.refine does not know.
 
-    Afterwards each refined f'' is compared with its theoretical value, and
-    coordinates, occupancy and B are checked to be unchanged. Status
+    Afterwards each refined f'' is compared with its theoretical value (it
+    matches within ``acceptance_window``: 10% of that value, or
+    ``acceptance_absolute`` e-), and coordinates, occupancy and B are checked
+    to be unchanged. Status
     ``AUTOFDP_FDP_ROUND_DONE`` when phenix.refine reported a refined f'' for
     every group, otherwise ``AUTOFDP_FAILED``.
     """
@@ -1046,8 +1112,7 @@ def fdp_round(
 
     if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
         raise AutoFDPError("--cycles must be a whole number of at least 1")
-    if not math.isfinite(tolerance) or tolerance <= 0:
-        raise AutoFDPError("--tolerance must be a positive number of electrons")
+    acceptance_absolute = checked_acceptance_absolute(acceptance_absolute)
     sites, _ = _metal_sites(start_model, ())
     groups: dict[str, dict[str, float]] = {}
     described: dict[str, tuple[str, str, str, str | None]] = {}
@@ -1134,6 +1199,7 @@ def fdp_round(
         refined = refined_values.get(selection)
         theory_fdp = float(theory[element]["f_double_prime"])
         deviation = None if refined is None else round(refined - theory_fdp, 3)
+        window = acceptance_window(theory_fdp, acceptance_absolute)
         results.append(FdpSiteResult(
             selection=selection,
             site=site,
@@ -1148,7 +1214,9 @@ def fdp_round(
             f_double_prime_theory=theory_fdp,
             theory_source=str(theory[element]["source"]),
             deviation=deviation,
-            within_tolerance=None if deviation is None else abs(deviation) <= tolerance,
+            acceptance=round(window, 4),
+            # The deviation is rounded to 0.001 e-; a hair's margin for the boundary.
+            within_acceptance=None if deviation is None else abs(deviation) <= window + 1e-9,
             alternate=alternate,
         ))
 
@@ -1162,16 +1230,17 @@ def fdp_round(
         )
     else:
         status = STATUS_ROUND_DONE
-        outside = [site for site in results if site.within_tolerance is False]
+        outside = [site for site in results if site.within_acceptance is False]
+        rule = acceptance_rule(acceptance_absolute)
         message = (
-            f"refined f'' within {tolerance:g} e- of theory for every site"
+            f"refined f'' within {rule} of theory for every site"
             if not outside else
-            f"{len(outside)} of {len(results)} site(s) more than {tolerance:g} e- from theory"
+            f"{len(outside)} of {len(results)} site(s) outside {rule} of theory"
         )
     return FdpRoundResult(
         directory=directory,
         cycles=cycles,
-        tolerance=tolerance,
+        acceptance_absolute=acceptance_absolute,
         returncode=returncode,
         r_work=statistics.get("r_work"),
         r_free=statistics.get("r_free"),
@@ -1560,10 +1629,13 @@ def _site_lines(round_result: FdpRoundResult) -> list[str]:
         refined = "none" if site.f_double_prime_refined is None else f"{site.f_double_prime_refined:.2f}"
         deviation = "n/a" if site.deviation is None else f"{site.deviation:+.2f}"
         occupancy = "-" if site.occupancy is None else f"{site.occupancy:.2f}"
+        verdict = "" if site.within_acceptance is None else (
+            f" ({'within' if site.within_acceptance else 'outside'} +/-{site.acceptance:.2f} e-)")
         lines.append(
             f"{site.site} {site.atom_name} ({site.element}): occupancy {occupancy}; "
             f"f' {site.f_prime:.2f} fixed; f'' {refined} vs theory "
             f"{site.f_double_prime_theory:.2f} ({site.theory_source}); deviation {deviation}"
+            f"{verdict}"
         )
     return lines
 
@@ -1616,6 +1688,8 @@ def _log_lines(
     if rounds:
         first = rounds[0]
         lines.extend(["", f"Step 2 (f''-only round, round_001): {first.status}: {first.message}",
+                      "Acceptance: refined f'' within "
+                      + acceptance_windows_text(plan.theory, first.acceptance_absolute),
                       f"R-work {first.r_work}, R-free {first.r_free}"])
         lines.extend(_site_lines(first))
         lines.extend(f"Warning: {warning}" for warning in first.warnings)
@@ -1715,7 +1789,7 @@ def _site_outcomes(
     rounds: Sequence[FdpRoundResult],
     adjustments: Sequence[OccupancyAdjustment],
     stopped: Mapping[str, str],
-    tolerance: float,
+    acceptance_absolute: float | None = None,
 ) -> list[SiteOutcome]:
     """Each calibrated site in the last round, with its history and why it stopped."""
     last = rounds[-1]
@@ -1732,15 +1806,16 @@ def _site_outcomes(
                     if adjustment.selection == site.selection and adjustment.method != "restore")
         held = sum(1 for adjustment in adjustments
                    if adjustment.selection == site.selection and adjustment.method == "restore")
-        converged = bool(site.within_tolerance)
+        converged = bool(site.within_acceptance)
+        window = _site_acceptance_text(site.acceptance, acceptance_absolute)
         if converged:
-            reason = (f"within +/-{tolerance:g} e- of theory"
+            reason = (f"within {window} of theory"
                       + (f" after {count} adjustment(s)" if count else " without adjustment")
                       + (f", held back {held} time(s)" if held else ""))
         elif site.selection in stopped and not stopped[site.selection].startswith("within"):
             reason = stopped[site.selection]
         elif site.selection in stopped:
-            reason = (f"was within +/-{tolerance:g} e-, then moved to "
+            reason = (f"was within {window}, then moved to "
                       f"{site.deviation:+.2f} while other sites were adjusted")
         else:
             reason = "not adjusted"
@@ -1772,7 +1847,7 @@ def execute_autofdp(
     b_start: str | float = "surrounding",
     sites: Sequence[str] = (),
     cycles: int = 3,
-    tolerance: float = 1.0,
+    acceptance_absolute: float | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     occupancy_floor: float = 0.05,
     environment: Mapping[str, str] | None = None,
@@ -1785,13 +1860,16 @@ def execute_autofdp(
     dictionaries, then the f''-only round on ReadySet's model in
     ``round_001``.
 
+    A refined f'' matches theory within ``acceptance_window``: 10% of the
+    theoretical f'' of the site's element, or ``acceptance_absolute`` e-.
+
     Step 3 adjusts occupancy, one calibrated site at a time: the site whose
-    refined f'' is furthest from theory (outside ``tolerance``) first. Its
+    refined f'' is furthest from theory (and not accepted) first. Its
     occupancy is changed (``propose_occupancy``; lower when f'' is below
     theory, higher when above, within [``occupancy_floor``, 1]) in a copy of
     the previous round's model (``round_NNN/input_model.pdb``; nothing else
     changes), and the same f''-only round is run again on it. This repeats
-    until the site is within ``tolerance``, has had ``max_iterations``
+    until the site's f'' is accepted, it has had ``max_iterations``
     adjustments, or is at the occupancy bound it would have to pass; then the
     next site, ranked again by the latest round. Every round refines every
     site's f'' from 0 with the same parameters. ``max_iterations=0`` runs
@@ -1804,15 +1882,16 @@ def execute_autofdp(
     be adjusted, it is taken up again (same per-site limit). A second such
     response stops it at that occupancy, again with a restore round.
 
-    Status ``AUTOFDP_CONVERGED`` when every calibrated site is within
-    ``tolerance`` in the last round (written as ``final_model.pdb``),
+    Status ``AUTOFDP_CONVERGED`` when every calibrated site's f'' is accepted
+    in the last round (written as ``final_model.pdb``),
     ``AUTOFDP_REVIEW`` when one is not, ``AUTOFDP_FAILED`` when a round
-    fails. ``report.json`` (workflow ``autofdp``, schema 2) and
+    fails. ``report.json`` (workflow ``autofdp``, schema 3) and
     ``autofdp.log`` record the inputs (paths and checksums), what was read
     from the MTZ, the theory, the B changes, every round and the occupancy
     history of every site. Nothing outside the new folder is written. The
     identity check, B confirmation and final round are not implemented.
     """
+    acceptance_absolute = checked_acceptance_absolute(acceptance_absolute)
     if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 0:
         raise AutoFDPError("--max-iterations must be a whole number of at least 0")
     if not (math.isfinite(occupancy_floor) and 0 < occupancy_floor < 1):
@@ -1853,7 +1932,8 @@ def execute_autofdp(
             "resolution_limit": reflections.resolution_limit,
         },
         "settings": {
-            "sites": list(sites), "b_start": b_start, "cycles": cycles, "tolerance": tolerance,
+            "sites": list(sites), "b_start": b_start, "cycles": cycles,
+            "acceptance": acceptance_settings(acceptance_absolute),
             "max_iterations": max_iterations, "occupancy_floor": occupancy_floor,
             "final_eff": str(plan.final_eff.source) if plan.final_eff else None,
             "nudge": plan.nudge,
@@ -1922,7 +2002,7 @@ def execute_autofdp(
             theory=plan.theory,
             calibrated=plan.calibrated,
             cycles=cycles,
-            tolerance=tolerance,
+            acceptance_absolute=acceptance_absolute,
             restraints=readyset.dictionaries,
             environment=environment,
             processor_count=processor_count,
@@ -1999,8 +2079,9 @@ def execute_autofdp(
         if active is not None:
             site = latest[active]
             response = wrong_response(history[active])
-            if site.within_tolerance:
-                stopped[active] = f"within +/-{tolerance:g} e- of theory"
+            if site.within_acceptance:
+                stopped[active] = (
+                    f"within {_site_acceptance_text(site.acceptance, acceptance_absolute)} of theory")
                 active = None
             elif response is not None:
                 # f'' moved with occupancy: back to the earlier occupancy with
@@ -2038,7 +2119,7 @@ def execute_autofdp(
             pending = [
                 site for site in rounds[-1].sites
                 if site.calibrated and site.selection not in stopped
-                and site.selection not in holding and not site.within_tolerance
+                and site.selection not in holding and not site.within_acceptance
             ]
             if pending:
                 if max_iterations == 0:
@@ -2055,8 +2136,9 @@ def execute_autofdp(
                 ).selection
                 holding.discard(active)
                 resumed = True
-                if latest[active].within_tolerance:
-                    stopped[active] = f"within +/-{tolerance:g} e- of theory"
+                if latest[active].within_acceptance:
+                    stopped[active] = "within " + _site_acceptance_text(
+                        latest[active].acceptance, acceptance_absolute) + " of theory"
                     active = None
                     continue
                 if used[active] >= max_iterations:
@@ -2086,7 +2168,8 @@ def execute_autofdp(
         change(site, step.occupancy, step.method, step.bound, note)
 
     finished = [result for result in rounds if result.status == STATUS_ROUND_DONE]
-    outcomes = _site_outcomes(finished, adjustments, stopped, tolerance) if finished else []
+    outcomes = (_site_outcomes(finished, adjustments, stopped, acceptance_absolute)
+                if finished else [])
     final_model: Path | None = None
     if failure is not None:
         status, message = STATUS_FAILED, failure
@@ -2099,7 +2182,7 @@ def execute_autofdp(
         if not open_sites:
             status = STATUS_CONVERGED
             message = (
-                f"every site within +/-{tolerance:g} e- of theory after "
+                f"every site within {acceptance_rule(acceptance_absolute)} of theory after "
                 f"{len(adjustments)} occupancy adjustment(s) in {len(rounds)} f'' round(s)"
             )
             report["steps"]["occupancy_adjustment"] = "done"
@@ -2865,6 +2948,7 @@ def final_round(
 
 
 __all__ = [
+    "ACCEPTANCE_FRACTION",
     "ANOMALOUS_LABEL_SETS",
     "AutoFDPError",
     "AutoFDPPlan",
@@ -2896,6 +2980,11 @@ __all__ = [
     "STATUS_REVIEW",
     "STATUS_ROUND_DONE",
     "WORKFLOW",
+    "acceptance_rule",
+    "acceptance_settings",
+    "acceptance_window",
+    "acceptance_windows_text",
+    "checked_acceptance_absolute",
     "checked_model",
     "confirm_b_round",
     "execute_autofdp",

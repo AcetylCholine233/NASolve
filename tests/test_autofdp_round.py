@@ -242,8 +242,10 @@ class FdpRoundTests(unittest.TestCase):
             root = Path(directory)
             model, mtz = make_inputs(root)
             original = model.read_bytes()
-            result = _execute(_plan(root, model, mtz), root)
-            # Within tolerance in round_001: converged without adjustment.
+            # f'' 2.6 vs theory 2.03 (+0.57) is inside a fixed 1 e- window
+            # (outside the default 10%, test_autofdp_acceptance): converged in
+            # round_001 without adjustment.
+            result = _execute(_plan(root, model, mtz), root, acceptance_absolute=1.0)
             self.assertEqual(result.status, STATUS_CONVERGED, result.message)
             self.assertEqual(result.rounds, (result.round,))
             self.assertEqual(result.round.status, STATUS_ROUND_DONE)
@@ -293,12 +295,12 @@ class FdpRoundTests(unittest.TestCase):
             self.assertEqual(site.f_double_prime_refined, 2.6)
             self.assertEqual(site.f_double_prime_theory, 2.03)
             self.assertAlmostEqual(site.deviation, 0.57)
-            self.assertTrue(site.within_tolerance)
+            self.assertTrue(site.within_acceptance)
             self.assertEqual(result.round.warnings, ())
             self.assertEqual(result.round.map_coefficients.name, "refined_001_map_coeffs.mtz")
 
             report = json.loads(result.report_path.read_text())
-            self.assertEqual((report["workflow"], report["schema_version"]), ("autofdp", 2))
+            self.assertEqual((report["workflow"], report["schema_version"]), ("autofdp", 3))
             self.assertEqual(report["status"], STATUS_CONVERGED)
             self.assertEqual(report["steps"]["occupancy_adjustment"], "done")
             self.assertEqual(report["occupancy"]["sites"][0]["reason"],
@@ -349,14 +351,14 @@ class FdpRoundTests(unittest.TestCase):
                          "Step 2", "deviation +0.57"):
                 self.assertIn(text, log)
 
-            # --max-iterations 0: round_001 only; a site outside tolerance is for review.
+            # --max-iterations 0: round_001 only; a site outside the window is for review.
             again = _execute(_plan(root, model, mtz), root, refine=make_fdp_refine(root, {SILVER: 5.0}),
-                             max_iterations=0)
+                             max_iterations=0, acceptance_absolute=1.0)
             self.assertEqual(again.run_directory.name, "run_002")
             self.assertEqual(len(again.rounds), 1)
             self.assertAlmostEqual(again.round.sites[0].deviation, 2.97)
-            self.assertFalse(again.round.sites[0].within_tolerance)
-            self.assertIn("1 of 1 site(s) more than 1 e- from theory", again.round.message)
+            self.assertFalse(again.round.sites[0].within_acceptance)
+            self.assertIn("1 of 1 site(s) outside +/-1 e- of theory", again.round.message)
             self.assertEqual(again.status, STATUS_REVIEW)
             self.assertEqual(again.message, "B:101 AG: not adjusted (--max-iterations 0)")
 
@@ -382,18 +384,18 @@ class FdpRoundTests(unittest.TestCase):
                     self.assertTrue(str(path).startswith(str(moved.resolve())))
                     self.assertEqual(file_sha256(path), reference["sha256"])
 
-    def test_theory_override_tolerance_and_output_folder(self):
+    def test_theory_override_acceptance_and_output_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
             plan = _plan(root, model, mtz, theory_overrides={"AG": 4.5}, output_root=root / "elsewhere")
             result = _execute(plan, root, refine=make_fdp_refine(root, {SILVER: 5.0}),
-                              tolerance=0.4, cycles=2)
+                              acceptance_absolute=0.4, cycles=2)
             self.assertEqual(result.run_directory, (root / "elsewhere" / "run_001").resolve())
             site = result.rounds[0].sites[0]
             self.assertEqual((site.f_double_prime_theory, site.theory_source), (4.5, "user (--theory)"))
             self.assertAlmostEqual(site.deviation, 0.5)
-            self.assertFalse(site.within_tolerance)
+            self.assertFalse(site.within_acceptance)
             self.assertIn("number_of_macro_cycles = 2", result.round.parameters.read_text())
             report = json.loads(result.report_path.read_text())
             self.assertEqual(report["theory"]["AG"]["f_double_prime_henke"], 2.03)
@@ -479,7 +481,8 @@ class ReadySetStepTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
-            result = _execute(_plan(root, model, mtz), root, ready_set=make_ready_set(root, mode="noop"))
+            result = _execute(_plan(root, model, mtz), root, ready_set=make_ready_set(root, mode="noop"),
+                              acceptance_absolute=1.0)
             self.assertEqual(result.status, STATUS_CONVERGED)
             self.assertEqual(result.readyset.mode, "no unknown residues")
             self.assertIsNone(result.readyset.generated)
@@ -531,7 +534,8 @@ class AutoFDPCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
-            code, out, err, coot_lookup = self._main(root, [str(model), str(mtz)])
+            code, out, err, coot_lookup = self._main(
+                root, [str(model), str(mtz), "--acceptance_absolute", "1"])
             self.assertEqual(code, 0, err)
             for text in (
                 "Observations: F(+),SIGF(+),F(-),SIGF(-); Free-R FreeR_flag (test value 0)",
@@ -551,7 +555,7 @@ class AutoFDPCommandTests(unittest.TestCase):
             ):
                 self.assertIn(text, out)
             row = next(line for line in out.splitlines() if line.startswith("B:101 AG"))
-            for value in ("0.90", "50.00", "-0.12", "2.60", "2.03", "+0.57", "within +/-1"):
+            for value in ("0.90", "50.00", "-0.12", "2.60", "2.03", "+0.57", "within +/-1.00"):
                 self.assertIn(value, row)
             # The maps of an f''-only round are not diagnostic: no Coot without a
             # final round.
@@ -563,7 +567,8 @@ class AutoFDPCommandTests(unittest.TestCase):
             # Either order, with a theory override: a new run folder. --coot
             # without --final-eff does not open Coot either.
             code, out, err, coot_lookup = self._main(
-                root, [str(mtz), str(model), "--coot", "/opt/coot", "--theory", "AG=2.06"]
+                root, [str(mtz), str(model), "--coot", "/opt/coot", "--theory", "AG=2.06",
+                       "--acceptance_absolute", "1"]
             )
             self.assertEqual(code, 0, err)
             coot_lookup.assert_not_called()

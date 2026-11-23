@@ -127,6 +127,25 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- AutoFDP accepts a refined f'' within +/-10% of the theoretical f'' of the
+  site's element by default (user's request, 2026-11-23), instead of a fixed
+  +/-1 e- (`--tolerance`, removed). `--acceptance_absolute E` (also spelled
+  `--acceptance-absolute`) gives a fixed window of E electrons for every
+  site. Each element now has its own window: Ag (2.03 e- at 1.0074 A)
+  +/-0.20 e-, Hg (10.1 e-) +/-1.01 e-. With +/-1 e-, an Ag site (f'' about
+  2 e-) was accepted at any occupancy from about 0.5 up, so runs that started
+  at 1.00 ended at 1.00 (7CUA: the same data were accepted at 0.75 and at
+  1.00); Hg runs are judged about as before. The plan, the command's tables
+  ("within +/-0.20", per site in e-), `autofdp.log` ("Acceptance: refined
+  f'' within +/-10% of theory (AG +/-0.20 e-)") and the run reasons ("within
+  +/-10% (0.20 e-) of theory") show the window. **Schema:** AutoFDP
+  `report.json` schema 3: `settings.acceptance` (`rule` `relative` with
+  `fraction` 0.1, or `absolute` with `absolute_electrons`) replaces
+  `settings.tolerance`, and each round site's `acceptance` (e-) and
+  `within_acceptance` replace `within_tolerance`; earlier runs are not
+  rewritten. **Compatibility:** scripts passing `--tolerance E` must use
+  `--acceptance_absolute E`; `fdp_round` and `execute_autofdp` take
+  `acceptance_absolute` instead of `tolerance`. phenix.refine simulated.
 - PostMR keeps the bases of metal-mediated pairs stacked on their chain
   neighbours (user's request, 2026-11-19): NARestraints still writes no
   base-pair restraints for such a pair, but each base keeps its stacking
