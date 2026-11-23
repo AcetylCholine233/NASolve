@@ -17,16 +17,17 @@ Sources, both from the CCP4 Monomer Library (AceDRG dictionaries):
   its two hydrogens are dropped.
 - ``t/TZF.cif`` (4-(1,2,4-triazol-1-yl)phenol): the triazole ring, its two
   hydrogens, the angles at N1 including those to the ring carbon, the ring
-  torsions, the triazole plane and the ring-to-ring torsion (coplanar,
-  period 2).
+  torsions and the triazole plane.
 
-The base plane: dC's base plane and TZF's triazole plane are merged into one
-plane (``plan-1``: both rings, C1', O2 and the ring hydrogens, e.s.d.
-0.020 A as in both sources), so refinement keeps the triazole in the plane of
-the pyrimidinone. Two planes that share only C4 and N4 leave the triazole free
-to turn about C4-N4 against the weak ring-to-ring torsion (e.s.d. 5 deg); in
-the first DYI refinement (Y-T nasolve, AutoMR run_002, refine-001) it turned
-38 deg out of the base plane. Merged at the user's request, 2026-11-19.
+The central bond C4-N4 is free to rotate (user, 2026-11-23): each ring has its
+own plane (``plan-1``, dC's base plane with N4; ``plan-2``, the triazole with
+C4), which keeps each ring flat and its bond to the other ring in its plane
+but does not restrain rotation about C4-N4, and TZF's ring-to-ring torsion
+(CAE-CAK-NAL-CAG, 180 deg, period 2, e.s.d. 5) is left out. From 2026-11-19
+to 2026-11-23 the two planes were merged into one and that torsion kept, which
+held the triazole in the base plane. The ideal coordinates still have the
+triazole coplanar (one conformation, N2T on the C5 side); refinement does not
+keep it there.
 
 One value is chosen here: C4-N4 = 1.411 +/- 0.015 A. AceDRG gives
 1.424 A for a triazol-1-yl on a carbon between two carbons (TZF, ZRS; 1.429 A
@@ -69,8 +70,9 @@ TRIAZOLE = ("N2T", "C3T", "N4T", "C5T")
 MOVING = ("N4", *TRIAZOLE, "H3T", "H5T")
 DROPPED = {"H41", "H42"}
 #: The one TZF torsion that also names a phenol atom: CAE CAK NAL CAG (ortho
-#: carbon, ring carbon, N1, C5). DYI's ortho carbon is C5.
-INTER_RING = ("C5", "C4", "N4", "C5T")
+#: carbon, ring carbon, N1, C5), about the central bond. Left out: the
+#: central bond is free to rotate.
+INTER_RING = ("CAE", "CAK", "NAL", "CAG")
 SMILES = "n3cncn3C1=NC(=O)N(C=C1)[C@H]2C[C@H](O)[C@@H](CO[P](O)(O)=O)O2"
 
 
@@ -159,9 +161,9 @@ def assemble(dc: dict, tzf: dict) -> dict[str, list[dict]]:
                 if not DROPPED & set(names(row, ("atom_id_1", "atom_id_2", "atom_id_3", "atom_id_4")))]
     for row in rows(tzf, "_chem_comp_tor", TOR):
         quad = names(row, ("atom_id_1", "atom_id_2", "atom_id_3", "atom_id_4"))
-        if quad == ["CAE", "CAK", "NAL", "CAG"]:
-            mapped = list(INTER_RING)
-        elif all(atom in TZF_MAP for atom in quad):
+        if quad == list(INTER_RING):
+            continue   # rotation about C4-N4 is not restrained
+        if all(atom in TZF_MAP for atom in quad):
             mapped = [TZF_MAP[atom] for atom in quad]
         else:
             continue
@@ -178,23 +180,13 @@ def assemble(dc: dict, tzf: dict) -> dict[str, list[dict]]:
         if not DROPPED & {row["atom_id"] for row in members}:   # drop dC's NH2 plane
             planes.extend({**row, "comp_id": CODE} for row in members)
     base_plane = {row["plane_id"] for row in planes}
-    if len(base_plane) != 1:
-        raise ValueError(f"expected one dC base plane, found {sorted(base_plane)}")
-    base_plane_id = base_plane.pop()
+    if base_plane != {"plan-1"}:
+        raise ValueError(f"expected dC's base plane plan-1, found {sorted(base_plane)}")
     tzf_planes = rows(tzf, "_chem_comp_plane_atom", PLANE)
     triazole_plane = [row for row in tzf_planes if row["atom_id"] == "NAI"][0]["plane_id"]
-    # One plane for both rings: the triazole atoms join dC's base plane (C4 and
-    # N4 are in both; their e.s.d. must agree).
-    in_base = {row["atom_id"]: row["dist_esd"] for row in planes}
-    for row in tzf_planes:
-        if row["plane_id"] != triazole_plane:
-            continue
-        name = TZF_MAP[row["atom_id"]]
-        if name in in_base:
-            if float(in_base[name]) != float(row["dist_esd"]):
-                raise ValueError(f"{name}: base and triazole plane e.s.d.s differ")
-            continue
-        planes.append({**row, "comp_id": CODE, "plane_id": base_plane_id, "atom_id": name})
+    # Its own plane for the triazole (with C4): rotation about C4-N4 stays free.
+    planes.extend({**row, "comp_id": CODE, "plane_id": "plan-2", "atom_id": TZF_MAP[row["atom_id"]]}
+                  for row in tzf_planes if row["plane_id"] == triazole_plane)
     out["plane"] = planes
     return out
 
@@ -262,6 +254,9 @@ def place_triazole(xyz: dict[str, np.ndarray], restraints: dict[str, list[dict]]
                  float(r["value_angle_esd"]), int(r["period"]))
                 for r in restraints["tor"]
                 if moving & {r[f"atom_id_{i}"] for i in range(1, 5)}]
+    # For the coordinates only (not written as a restraint): the ideal
+    # coordinates keep the triazole coplanar, N2T on the C5 side.
+    torsions.append((("C5", "C4", "N4", "C5T"), 180.0, 5.0, 2))
     planes = {}
     for r in restraints["plane"]:
         planes.setdefault(r["plane_id"], []).append((r["atom_id"], float(r["dist_esd"])))
@@ -353,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  t/TZF.cif blob {git_blob_sha1(args.tzf)}: triazol-1-yl ring, angles at N1, ring torsions and plane",
         f"Chosen here: C4-N4 {C4_N4[0]:.3f} +/- {C4_N4[1]:.3f} A (AceDRG 1.424 on C(C,C), 1.399 on C(N,N));",
         "N4 energy type NR5. Coordinates: DC's for shared atoms; triazole fitted, coplanar, N2T on the C5 side.",
-        "One base plane (plan-1) over both rings: dC's base plane and TZF's triazole plane merged.",
+        "Each ring its own plane (plan-1 base with N4, plan-2 triazole with C4); no torsion restraint about C4-N4 (free to rotate).",
     ]
     write(args.output, restraints, header)
     print(f"wrote {args.output}: {len(restraints['atom'])} atoms, {len(restraints['bond'])} bonds, "

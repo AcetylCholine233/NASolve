@@ -6,7 +6,7 @@
 #   t/TZF.cif blob 6c477e8aa6a5d667efb18e8b6137a5e017a8c03f: triazol-1-yl ring, angles at N1, ring torsions and plane
 # Chosen here: C4-N4 1.411 +/- 0.015 A (AceDRG 1.424 on C(C,C), 1.399 on C(N,N));
 # N4 energy type NR5. Coordinates: DC's for shared atoms; triazole fitted, coplanar, N2T on the C5 side.
-# One base plane (plan-1) over both rings: dC's base plane and TZF's triazole plane merged.
+# Each ring its own plane (plan-1 base with N4, plan-2 triazole with C4); no torsion restraint about C4-N4 (free to rotate).
 data_comp_list
 loop_
 _chem_comp.id
@@ -48,7 +48,7 @@ DYI C4     C CR6  0  4.961 -0.779 -3.274
 DYI N4     N NR5  0  5.634 0.461  -3.250
 DYI C5     C CR16 0  5.371 -1.854 -2.432
 DYI C6     C CR16 0  4.683 -3.007 -2.507
-DYI N2T    N NRD5 0  6.695 0.677  -2.424
+DYI N2T    N NRD5 0  6.696 0.677  -2.424
 DYI C3T    C CR15 0  7.010 1.919  -2.712
 DYI N4T    N NRD5 0  6.243 2.516  -3.649
 DYI C5T    C CR15 0  5.390 1.565  -3.960
@@ -62,8 +62,8 @@ DYI "H2''" H H    0  4.648 -5.546 -3.691
 DYI "H1'"  H H    0  2.063 -4.358 -3.951
 DYI H5     H H    0  6.097 -1.763 -1.841
 DYI H6     H H    0  4.929 -3.731 -1.969
-DYI H3T    H H    0  7.721 2.360  -2.293
-DYI H5T    H H    0  4.702 1.649  -4.597
+DYI H3T    H H    0  7.722 2.360  -2.293
+DYI H5T    H H    0  4.701 1.650  -4.597
 loop_
 _chem_comp_bond.comp_id
 _chem_comp_bond.atom_id_1
@@ -218,7 +218,6 @@ DYI const_sp2_sp2_8 N4    C4    N3    C2     180.000 5.0    2
 DYI const_11        N4    C4    C5    C6     180.000 10.0   2
 DYI const_13        C4    C5    C6    N1     0.000   10.0   2
 DYI tz_const_29     N4T   C3T   N2T   N4     0.000   10.0   2
-DYI tz_sp2_sp2_3    C5    C4    N4    C5T    180.000 5.0    2
 DYI tz_const_36     C3T   N2T   N4    C4     180.000 10.0   2
 DYI tz_const_22     N4T   C5T   N4    C4     180.000 10.0   2
 DYI tz_const_25     N4    C5T   N4T   C3T    0.000   10.0   2
@@ -251,12 +250,14 @@ DYI plan-1 N1    0.020
 DYI plan-1 N3    0.020
 DYI plan-1 N4    0.020
 DYI plan-1 O2    0.020
-DYI plan-1 C3T   0.020
-DYI plan-1 C5T   0.020
-DYI plan-1 H5T   0.020
-DYI plan-1 H3T   0.020
-DYI plan-1 N4T   0.020
-DYI plan-1 N2T   0.020
+DYI plan-2 C3T   0.020
+DYI plan-2 C5T   0.020
+DYI plan-2 C4    0.020
+DYI plan-2 H5T   0.020
+DYI plan-2 H3T   0.020
+DYI plan-2 N4T   0.020
+DYI plan-2 N2T   0.020
+DYI plan-2 N4    0.020
 loop_
 _pdbx_chem_comp_descriptor.comp_id
 _pdbx_chem_comp_descriptor.type

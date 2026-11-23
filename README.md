@@ -888,7 +888,9 @@ its parent is `DC` and the triazole's N1 is named `N4` (ring atoms `N2T`, `C3T`,
 by `scripts/build_dyi_dictionary.py` from the CCP4 Monomer Library AceDRG
 entries for `DC` (every shared atom, unchanged) and `TZF`
 (4-(1,2,4-triazol-1-yl)phenol: the triazole ring), with C4-N4 1.411 +/- 0.015 A.
-Like `1AP`'s, it is used for refinement in place of ReadySet's. ReadySet
+Each ring has its own plane, and rotation about the central C4-N4 bond is not
+restrained (no torsion about it, no plane across it), since that bond is free
+to rotate. Like `1AP`'s, it is used for refinement in place of ReadySet's. ReadySet
 (Phenix 2.2.1 eLBOW) reads one component from each supplied dictionary file,
 so NASolve gives it one file per curated residue. (Before 2026-11-19 it gave
 one combined file: ReadySet then used only the first residue's dictionary,

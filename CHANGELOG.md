@@ -132,8 +132,19 @@ entries are reconstructed from repository history.
   parallelity edits). NARestraints fork `feature/anomalous-scatterers`
   b6993e9 makes the same the default there. Runs already prepared keep their
   restraints; rerun PostMR (`--force-overwrite`) to get it.
-- DYI dictionary: one base plane over both rings (user's request,
-  2026-11-19). dC's base plane and the triazole plane are merged into `plan-1`
+- DYI dictionary: the central C4-N4 bond is free to rotate (user,
+  2026-11-23): each ring has its own plane again (`plan-1`, dC's base plane
+  with N4; `plan-2`, the triazole with C4), and TZF's ring-to-ring torsion
+  (C5-C4-N4-C5T, 180 deg, period 2, e.s.d. 5) is left out, so nothing
+  restrains rotation about C4-N4. The curated check enforces it
+  (`CuratedLigand.free_rotation`: no torsion about the bond, no plane with
+  atoms on both sides). The ideal coordinates still have the triazole
+  coplanar (one conformation; moved by at most 0.001 A). Reverses the merged
+  plane below. Runs prepared earlier keep the dictionary PostMR recorded;
+  rerun PostMR (`--force-overwrite`) to use this one, and do not pass
+  `Y-T nasolve/DYI_A12_coplanar.eff` any more.
+- DYI dictionary (superseded on 2026-11-23, see above): one base plane over
+  both rings (user's request, 2026-11-19). dC's base plane and the triazole plane are merged into `plan-1`
   (17 atoms: both rings, C1', O2, the ring hydrogens; e.s.d. 0.020 A), so
   refinement keeps the triazole in the plane of the pyrimidinone. With a plane
   per ring, sharing only C4 and N4, the triazole turned 38 deg out of the base

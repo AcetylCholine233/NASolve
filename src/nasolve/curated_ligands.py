@@ -47,6 +47,9 @@ class CuratedLigand:
     # Each group in ``required_planes`` must lie in one of its planes.
     reviewed_restraints: bool = False
     required_planes: tuple[tuple[str, ...], ...] = ()
+    # Bonds about which a reviewed dictionary must not restrain rotation: no
+    # torsion about the bond, and no plane with atoms on both sides of it.
+    free_rotation: tuple[tuple[str, str], ...] = ()
 
 
 CURATED_LIGANDS: dict[str, CuratedLigand] = {
@@ -160,10 +163,13 @@ CURATED_LIGANDS: dict[str, CuratedLigand] = {
         # 1.33 A), so the triazole Coot overlays keeps its bond to N4.
         atom_substitutions=(AtomSubstitution("N4", "N4", "C4"),),
         reviewed_restraints=True,
-        # One plane for both rings, so the triazole stays in the base plane.
+        # Each ring flat, with its bond to the other ring in its plane; the
+        # central bond C4-N4 is free to rotate (user, 2026-11-23).
         required_planes=(
-            ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6", "N2T", "C3T", "N4T", "C5T"),
+            ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6"),
+            ("C4", "N4", "N2T", "C3T", "N4T", "C5T"),
         ),
+        free_rotation=(("C4", "N4"),),
     ),
 }
 
@@ -463,6 +469,34 @@ def _validate_reviewed_restraints(ligand: CuratedLigand, path: Path) -> None:
     for required in ligand.required_planes:
         if not any(set(required) <= members for members in planes.values()):
             raise ValueError(f"{code} plane definition is incomplete: {', '.join(required)}")
+    if ligand.free_rotation:
+        neighbours: dict[str, set[str]] = {}
+        for first, second in zip(values.get("_chem_comp_bond.atom_id_1", []),
+                                 values.get("_chem_comp_bond.atom_id_2", [])):
+            neighbours.setdefault(first, set()).add(second)
+            neighbours.setdefault(second, set()).add(first)
+
+        def side(start: str, blocked: str) -> set[str]:
+            found, todo = {start}, [start]
+            while todo:
+                for atom in neighbours.get(todo.pop(), ()):
+                    if atom != blocked and atom not in found:
+                        found.add(atom)
+                        todo.append(atom)
+            return found
+
+        torsions = list(zip(values.get("_chem_comp_tor.atom_id_2", []),
+                            values.get("_chem_comp_tor.atom_id_3", [])))
+        for first, second in ligand.free_rotation:
+            if any({b, c} == {first, second} for b, c in torsions):
+                raise ValueError(
+                    f"{code} must not restrain rotation about {first}-{second}: torsion about it")
+            one, other = side(first, second) - {first}, side(second, first) - {second}
+            for plane_id, members in planes.items():
+                if members & one and members & other:
+                    raise ValueError(
+                        f"{code} must not restrain rotation about {first}-{second}: "
+                        f"plane {plane_id} spans both sides")
     signs = dict(zip(values.get("_chem_comp_chir.atom_id_centre", []),
                      values.get("_chem_comp_chir.volume_sign", [])))
     unsigned = [atom for atom in _SUGAR_CHIRAL_CENTRES

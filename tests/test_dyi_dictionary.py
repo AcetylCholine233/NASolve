@@ -113,7 +113,8 @@ class DYIEntryTests(unittest.TestCase):
                                    values["_chem_comp_angle.atom_id_3"], values["_chem_comp_angle.value_angle"]):
             with self.subTest(angle=(a, b, c)):
                 self.assertAlmostEqual(angle(xyz[a], xyz[b], xyz[c]), float(target), delta=2.0)
-        # The triazole is coplanar with the base, N2T on the C5 side.
+        # The ideal coordinates have the triazole coplanar with the base, N2T on
+        # the C5 side (one conformation; rotation about C4-N4 is not restrained).
         self.assertAlmostEqual(abs(dihedral(*(xyz[n] for n in ("C5", "C4", "N4", "N2T")))), 0.0, delta=1.0)
         self.assertAlmostEqual(abs(dihedral(*(xyz[n] for n in ("N3", "C4", "N4", "C5T")))), 0.0, delta=1.0)
         self.assertGreater(math.dist(xyz["H5"], xyz["H5T"]), 3.5)
@@ -131,10 +132,11 @@ class DYIEntryTests(unittest.TestCase):
                             np.cross(np.array(xyz[b]) - origin, np.array(xyz[c]) - origin))
             self.assertEqual(volume < 0, sign == "negative", centre)
 
-    def test_one_plane_holds_both_rings(self):
-        """The triazole and the pyrimidinone are restrained to one plane (user,
-        2026-11-19): with a plane per ring, sharing only C4 and N4, the triazole
-        turned 38 deg out of the base plane in the first DYI refinement."""
+    def test_each_ring_is_planar_and_the_central_bond_free_to_rotate(self):
+        """Each ring keeps its own plane, and nothing restrains rotation about
+        C4-N4 (user, 2026-11-23: the central bond is free to rotate). From
+        2026-11-19 to 2026-11-23 one plane over both rings held the triazole
+        in the base plane, on top of TZF's ring-to-ring torsion (period 2)."""
         values = component()
         planes: dict[str, set[str]] = {}
         for plane_id, atom, esd in zip(values["_chem_comp_plane_atom.plane_id"],
@@ -142,19 +144,22 @@ class DYIEntryTests(unittest.TestCase):
                                        values["_chem_comp_plane_atom.dist_esd"]):
             planes.setdefault(plane_id, set()).add(atom)
             self.assertEqual(float(esd), 0.020, atom)
-        self.assertEqual(list(planes), ["plan-1"])
-        self.assertEqual(planes["plan-1"], {
-            "C1'", "N1", "C2", "O2", "N3", "C4", "C5", "C6", "H5", "H6",
-            "N4", "N2T", "C3T", "N4T", "C5T", "H3T", "H5T",
+        self.assertEqual(planes, {
+            "plan-1": {"C1'", "N1", "C2", "O2", "N3", "C4", "C5", "C6", "H5", "H6", "N4"},
+            "plan-2": {"C4", "N4", "N2T", "C3T", "N4T", "C5T", "H3T", "H5T"},
         })
-        self.assertEqual(len(values["_chem_comp_plane_atom.atom_id"]), 17)   # no repeats
-        # The ideal coordinates lie in it.
+        central = [
+            (a, b, c, d) for a, b, c, d in zip(*(values[f"_chem_comp_tor.atom_id_{i}"] for i in range(1, 5)))
+            if {b, c} == {"C4", "N4"}
+        ]
+        self.assertEqual(central, [])
+        # The ideal coordinates keep each ring flat.
         import numpy as np
         xyz = coordinates(values)
-        points = np.array([xyz[name] for name in sorted(planes["plan-1"])])
-        centred = points - points.mean(axis=0)
-        deviations = centred @ np.linalg.svd(centred)[2][-1]
-        self.assertLess(float(np.abs(deviations).max()), 0.01)
+        for members in planes.values():
+            points = np.array([xyz[name] for name in sorted(members)])
+            centred = points - points.mean(axis=0)
+            self.assertLess(float(np.abs(centred @ np.linalg.svd(centred)[2][-1]).max()), 0.01)
 
     def test_validation_rejects_an_incomplete_or_wrong_dictionary(self):
         text = DICTIONARY.read_text(encoding="utf-8")
@@ -163,14 +168,12 @@ class DYIEntryTests(unittest.TestCase):
             "chirality": text.replace('"C1\'" "O4\'" N1    "C2\'" negative',
                                       '"C1\'" "O4\'" N1    "C2\'" both'),
             "triazole plane": "".join(line for line in text.splitlines(keepends=True)
-                                      if not line.startswith("DYI plan-1 N2T ")),
-            # The triazole in a plane of its own (as before 2026-11-19): it can
-            # turn about C4-N4 out of the base plane.
-            "two ring planes": "".join(
-                line.replace("DYI plan-1", "DYI plan-2", 1)
-                if line.split()[2:3] and line.startswith("DYI plan-1 ")
-                and line.split()[2] in {"N2T", "C3T", "N4T", "C5T", "H3T", "H5T"} else line
-                for line in text.splitlines(keepends=True)),
+                                      if not line.startswith("DYI plan-2 N2T ")),
+            # Restraints on rotation about C4-N4 (free since 2026-11-23): one
+            # plane over both rings, or a torsion about the central bond.
+            "one plane over both rings": text.replace("DYI plan-2 ", "DYI plan-1 "),
+            "ring-to-ring torsion": text.replace(
+                "DYI tz_", "DYI tz_inter C5 C4 N4 C5T 180.000 5.0 2\nDYI tz_", 1),
             "energy types": text.replace("_chem_comp_atom.type_energy", "_chem_comp_atom.not_energy"),
             "group": text.replace(" DNA 36 24 .", " NON-POLYMER 36 24 ."),
             # dC's amino group instead of the triazole.
