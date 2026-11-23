@@ -382,7 +382,7 @@ for the manual model. Missing or corrupt declared maps produce an error.
 
 If the selected MTZ contains `ANOM` with `PANOM` (phenix.refine) or `PHANOM`
 (phenix.maps), `show` also opens it as an ordinary (not difference) map named
-**Anomalous**, contoured at **3 sigma**. If Phenix wrote separate map and
+**Anomalous**, in gold, contoured at **3 sigma**. If Phenix wrote separate map and
 refinement MTZ files, it also checks the refinement MTZ recorded for that same
 checkpoint. Availability depends on the columns, so fixed-scattering and
 refined-anomalous results both work; a mean-only result without this pair opens

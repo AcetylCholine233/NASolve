@@ -5,8 +5,8 @@ wrappers): ``valid_labels`` takes ``bool use_weights_flag`` and rejects an
 int, and phenix.refine writes the anomalous map as ANOM/PANOM (phenix.maps
 writes ANOM/PHANOM). Before 2026-11-23 the script passed 0 and looked only for
 PHANOM, so the anomalous map never opened (U-Y_Ag run_004, every round).
-The anomalous map opens as an ordinary map, not a difference map (user,
-2026-11-23).
+The anomalous map opens as an ordinary map, not a difference map, in gold
+(user, 2026-11-23).
 """
 
 import io
@@ -33,6 +33,7 @@ class FakeCoot:
                      (str(mtz), "FOFCWT", "PHFOFCWT", 1)]
         self.created = []
         self.contours = {}
+        self.colours = {}
         self.names = {}
         self.refinement = 1
         self.scroll = 1
@@ -73,6 +74,10 @@ class FakeCoot:
 
     def set_molecule_name(self, imol, name):
         self.names[imol] = name
+
+    def set_map_colour(self, imol, red, green, blue):
+        assert all(isinstance(value, float) for value in (red, green, blue))
+        self.colours[imol] = (red, green, blue)
 
     def imol_refinement_map(self):
         return self.refinement
@@ -138,6 +143,7 @@ class CootAnomalousTests(unittest.TestCase):
         self.assertEqual(coot.maps[:3], normal_maps)
         self.assertEqual(coot.contours, {3: 3.0})
         self.assertEqual(coot.names[3], "Anomalous (ANOM/PANOM)")
+        self.assertEqual(coot.colours, {3: (1.0, 0.84, 0.0)})   # gold
         self.assertEqual((coot.refinement, coot.scroll), (1, 1))
         self.assertIn('"status": "loaded"', output)
         self.assertIn('"labels": ["ANOM", "PANOM"]', output)
@@ -182,6 +188,7 @@ class CootAnomalousTests(unittest.TestCase):
             self.assertIn('"status": "reused"', output)
         self.assertEqual(coot.created, [])
         self.assertEqual(coot.maps[3][3], 0)   # an earlier difference-map copy is switched
+        self.assertEqual(coot.colours, {3: (1.0, 0.84, 0.0)})
         self.assertEqual(coot.contours, {3: 3.0})
         self.assertEqual((coot.refinement, coot.scroll), (1, 1))
 

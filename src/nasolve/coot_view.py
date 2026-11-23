@@ -789,6 +789,8 @@ def resolve_view_profile(
 #: Anomalous map columns, in the order tried: phenix.refine
 #: (Phenix 2.2.1) writes ANOM/PANOM, phenix.maps ANOM/PHANOM.
 ANOMALOUS_LABEL_PAIRS = (("ANOM", "PANOM"), ("ANOM", "PHANOM"))
+#: Colour of the anomalous map in Coot (red, green, blue; user: gold).
+ANOMALOUS_MAP_COLOUR = (1.0, 0.84, 0.0)
 
 
 def _anomalous_map_script(map_paths: tuple[Path, ...]) -> str:
@@ -797,12 +799,14 @@ def _anomalous_map_script(map_paths: tuple[Path, ...]) -> str:
     The anomalous map is ANOM with phases PANOM (phenix.refine, Phenix 2.2.1)
     or PHANOM (phenix.maps), tried in that order. Coot's ``valid_labels`` takes
     a real bool for its use-weights flag (an int raises a SWIG TypeError).
-    It opens as an ordinary map, not a difference map (user, 2026-11-23).
+    It opens as an ordinary map, not a difference map, coloured
+    ``ANOMALOUS_MAP_COLOUR`` (gold) (user, 2026-11-23).
     """
     return (
         "import coot\nimport json\nimport os\n\n"
         f"map_paths = {json.dumps([str(path) for path in map_paths])}\n"
         f"label_pairs = {json.dumps([list(pair) for pair in ANOMALOUS_LABEL_PAIRS])}\n"
+        f"map_colour = {json.dumps([float(value) for value in ANOMALOUS_MAP_COLOUR])}\n"
         '''
 def report_anomalous_map(status, labels=None, **details):
     details["status"] = status
@@ -843,6 +847,7 @@ def load_anomalous_map():
                     raise RuntimeError("Coot could not construct " + name + " from " + path)
                 coot.set_map_is_difference_map(imol, 0)
                 coot.set_contour_level_in_sigma(imol, 3.0)
+                coot.set_map_colour(imol, *[float(value) for value in map_colour])
                 coot.set_molecule_name(imol, "Anomalous (" + name + ")")
             finally:
                 # An inspection overlay must not change real-space refinement/scrolling.

@@ -749,7 +749,8 @@ use-weights argument must be a Python bool (`False`), since Coot's SWIG
 wrapper rejects an int.
 The script uses `make_and_draw_map` with no weights and without the
 difference-map flag (an ordinary map, user's choice 2026-11-23), then names
-the overlay and sets its initial contour to 3 sigma. It adds no phase shift.
+the overlay, colours it gold (`set_map_colour` 1.0, 0.84, 0.0) and sets its
+initial contour to 3 sigma. It adds no phase shift.
 Existing maps with the same MTZ and column pair are reused, and the original
 refinement-map and scroll-wheel selections are restored.
 
