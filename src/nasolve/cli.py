@@ -315,6 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
             "rounds from this round's checkpoint"
         ),
     )
+    autorefine.add_argument(
+        "--coordination", action="append", default=[], metavar="METAL=DONOR,DONOR",
+        help=(
+            "restrain a metal site to its binding partners, e.g. B:101=B:4/N2T,A:12/O4 "
+            "(metal CHAIN:RESID[/ATOM], donors CHAIN:RESID/ATOM); repeatable, one per "
+            "metal. Bond lengths from the lab table (Ag-O 2.5, Ag-N 2.3, Hg-O 2.1, "
+            "Hg-N 2.1 A), sigma 0.2 A; with two donors also the angle donor-donor-metal "
+            "0 deg, sigma 3 (keeps it linear); no angle for more donors. Kept by later "
+            "rounds from this round's checkpoint"
+        ),
+    )
     autofdp = subparsers.add_parser(
         "autofdp",
         help="measure metal occupancy by f'' refinement from an AutoRefine round, or "
@@ -1290,6 +1301,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             recipe=args.recipe,
             macro_cycles=args.cycles,
             user_restraints=args.restraints,
+            coordination=args.coordination,
             progress=progress,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
@@ -1317,6 +1329,16 @@ def _autorefine(args: argparse.Namespace) -> int:
             if isinstance(item, dict):
                 print(f"Extra restraints: {Path(str(item.get('copy'))).name} "
                       f"(copy of {item.get('source')})")
+        coordination = inputs.get("metal_coordination")
+        if isinstance(coordination, dict):
+            for item in coordination.get("sites") or []:
+                if isinstance(item, dict):
+                    print(f"Coordination: {item.get('summary')}")
+                    for warning in item.get("warnings") or []:
+                        print(_color(f"  Warning: {warning}", "33"))
+            for item in coordination.get("inherited") or []:
+                if isinstance(item, dict):
+                    print(f"Coordination (kept from the parent checkpoint): {item.get('summary')}")
     stats = result.statistics
     print("\n                 Initial    Final")
     print(

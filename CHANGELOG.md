@@ -10,6 +10,25 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine RUN --coordination METAL=DONOR,DONOR` (user's
+  specification, 2026-11-23): restrains a heavy-atom site to its binding
+  partners with phenix.refine `geometry_restraints.edits`
+  (`nasolve.metal_coordination`). One bond per donor with the lab's lengths
+  for now (Ag-O 2.5, Ag-N 2.3, Hg-O 2.1, Hg-N 2.1 A), sigma 0.2 A; with two
+  donors (linear) also the angle donor-donor-metal (vertex at the first
+  donor) 0 degrees, sigma 3, a non-physical angle that keeps the metal on the
+  donor-donor line; no angle for three or more donors. Written to
+  `round_NNN/metal_coordination.eff`, passed to phenix.refine, recorded in the
+  round report (`inputs.metal_coordination`: sites, current distances and
+  angle, warnings) and the checkpoint (`metal_coordination`), and kept by
+  later rounds; restraining a metal the parent checkpoint already restrains
+  is refused before a round exists. Atoms are checked in the round's starting
+  model (first model; alternate conformations and quoted atom names refused
+  for now). The file format was parsed against Phenix 2.2.1's own edits
+  definition; cctbx handles the 0-degree angle (its gradient guard for
+  collinear atoms). Phenix's `phenix.metal_coordination` writes the same
+  format but its lengths (Harding 2006) do not cover Ag or Hg. phenix.refine
+  simulated.
 - `nasolve autofdp --nudge Q` (user's request, 2026-11-19): the metal site
   starts the f'' rounds at its occupancy in the model (AutoRefine's) plus Q
   (two decimals; negative lowers it; must stay within `--occupancy-floor` and

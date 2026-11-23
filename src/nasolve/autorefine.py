@@ -25,6 +25,13 @@ from .checkpoints import (
     next_checkpoint_id,
     resolve_checkpoint,
 )
+from .metal_coordination import (
+    CoordinationError,
+    coordination_phil,
+    coordination_record,
+    parse_coordination,
+    plan_coordination,
+)
 from .model_assessment import file_sha256
 from .run_context import artifact_reference, resolve_artifact_path
 
@@ -1659,6 +1666,7 @@ def execute_autorefine(
     anomalous_groups: Mapping[str, Mapping[str, object]] | None = None,
     extra_restraints: Sequence[Path] = (),
     user_restraints: Sequence[Path] = (),
+    coordination: Sequence[str] = (),
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
@@ -1670,6 +1678,14 @@ def execute_autorefine(
     checkpoint records them (run-anchored, checksummed), and later rounds from
     that checkpoint keep them. A file whose contents are already in the parent
     checkpoint's restraints is refused, so nothing is applied twice.
+
+    ``coordination`` (``--coordination METAL=DONOR,...``) restrains metal
+    sites to their donors (``metal_coordination``: bonds from the lab table,
+    a 0-degree donor-donor-metal angle for two donors), written to
+    ``round_NNN/metal_coordination.eff``, passed to phenix.refine and kept by
+    later rounds like ``--restraints``. The checkpoint records the sites
+    (``metal_coordination``); a metal the parent checkpoint already restrains
+    is refused, since Phenix stops on a bond added twice.
     """
     xyz_wxc_scale = (
         0.1
@@ -1794,6 +1810,26 @@ def execute_autorefine(
             )
 
     validate_refined_model(model, report)
+    parent_coordination = parent.get("metal_coordination") or []
+    if not isinstance(parent_coordination, list):
+        raise AutoRefineError("Parent checkpoint metal-coordination record is malformed")
+    coordination_sites = []
+    if coordination:
+        try:
+            coordination_sites = plan_coordination(
+                model, [parse_coordination(text) for text in coordination])
+        except CoordinationError as exc:
+            raise AutoRefineError(str(exc)) from exc
+        restrained = {tuple(item.get("metal_key") or ()): item for item in parent_coordination
+                      if isinstance(item, Mapping)}
+        for site in coordination_sites:
+            key = (site.metal.chain, site.metal.resid, site.metal.name)
+            if key in restrained:
+                raise AutoRefineError(
+                    f"{site.metal.label} already has coordination restraints from checkpoint "
+                    f"{parent.get('id')} ({restrained[key].get('spec')}); start from an earlier "
+                    "checkpoint (--from) to restrain it differently"
+                )
     plan = build_reflection_plan(
         report,
         observations,
@@ -1843,6 +1879,14 @@ def execute_autorefine(
             user_restraint_records.append(
                 {"source": str(source), "sha256": digest, "copy": str(copy)}
             )
+
+    coordination_path: Path | None = None
+    coordination_records = [coordination_record(site) for site in coordination_sites]
+    if coordination_sites:
+        coordination_path = round_directory / "metal_coordination.eff"
+        coordination_path.write_text(coordination_phil(coordination_sites), encoding="utf-8")
+        resolved_extra_restraints.append(coordination_path)
+        restraints.append(coordination_path)
 
     pre_refinement_geometry: Path | None = None
     pre_refinement_geometry_log: Path | None = None
@@ -2195,6 +2239,15 @@ def execute_autorefine(
             if terminal_protection_record is not None
             else {}
         ),
+        **(
+            {"metal_coordination": [
+                *parent_coordination,
+                *({**record, "restraint": file_reference(coordination_path)}
+                  for record in coordination_records),
+            ]}
+            if parent_coordination or coordination_records
+            else {}
+        ),
         "metrics": {
             key: value
             for key, value in statistics.items()
@@ -2242,6 +2295,11 @@ def execute_autorefine(
                 str(path) for path in resolved_extra_restraints
             ],
             "user_restraints": user_restraint_records,   # --restraints: original and copy
+            "metal_coordination": {   # --coordination
+                "file": str(coordination_path) if coordination_path else None,
+                "sites": coordination_records,
+                "inherited": list(parent_coordination),
+            },
         },
         "refinement": {
             "target": "automatic",

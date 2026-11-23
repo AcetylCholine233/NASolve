@@ -285,6 +285,35 @@ by hand does nothing: AutoRefine uses only the restraints PostMR recorded.
 ./nasolve autorefine "$RUN" --restraints secondary_structure.eff
 ```
 
+To restrain a heavy-atom site to its binding partners, give
+`--coordination METAL=DONOR,DONOR` (repeatable, one per metal): the metal as
+`CHAIN:RESID` (add `/ATOM` if its residue has more than one atom) and each
+donor atom as `CHAIN:RESID/ATOM`. NASolve writes phenix.refine
+`geometry_restraints.edits` to `AutoRefine/round_NNN/metal_coordination.eff`:
+
+| Restraint | Ideal | Sigma |
+|---|---|---|
+| Ag-O bond | 2.5 A | 0.2 A |
+| Ag-N bond | 2.3 A | 0.2 A |
+| Hg-O bond | 2.1 A | 0.2 A |
+| Hg-N bond | 2.1 A | 0.2 A |
+| two donors (linear): angle donor-donor-metal, vertex at the first donor | 0 deg | 3 deg |
+
+The 0-degree angle is not a physical angle; it keeps the metal on the line
+through the two donors. With three or more donors there is no angle
+restraint. These are the lab's values for now (2026-11-23); another metal or
+donor element is refused until it is in the table
+(`nasolve.metal_coordination.COORDINATION_LENGTHS`). NASolve checks every atom
+in the round's starting model, prints the current distances and angle, warns
+about a donor far from its metal, and records the sites in the round report
+and checkpoint; later rounds from that checkpoint keep the restraints, and
+restraining the same metal again is refused (start from an earlier checkpoint
+with `--from` to change it).
+
+```bash
+./nasolve autorefine "$RUN" --coordination "B:101=B:4/N2T,A:12/O4"
+```
+
 Bookmark, select, or import a manually corrected model with:
 
 ```bash
@@ -1196,8 +1225,8 @@ candidate sites and whether AutoSol is required are written to `report.json`.
 `nasolve autorefine RUN` performs one five-macrocycle default refinement. It
 uses the current checkpoint model, the original STARANISO observations and
 unchanged Free-R flags, the ReadySet-generated ligand dictionary when present,
-and the PostMR PHIL/EFF restraint stack, plus any `--restraints` files given
-to this or an earlier round of the branch. A validated AutoSol MTZ contributes
+and the PostMR PHIL/EFF restraint stack, plus any `--restraints` files and
+`--coordination` restraints given to this or an earlier round of the branch. A validated AutoSol MTZ contributes
 only its Hendrickson-Lattman coefficients; its HA coordinates never replace
 known model atoms.
 
