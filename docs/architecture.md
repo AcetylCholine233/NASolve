@@ -747,10 +747,11 @@ startup script. In Coot, `valid_labels` checks the exact `ANOM`/`PANOM` pair
 (phenix.refine, Phenix 2.2.1), then `ANOM`/`PHANOM` (phenix.maps); its
 use-weights argument must be a Python bool (`False`), since Coot's SWIG
 wrapper rejects an int.
-The script uses `make_and_draw_map` with no weights and the difference-map flag,
-then names the overlay and sets its initial contour to 3 sigma. It adds no
-phase shift. Existing maps with the same MTZ and column pair are reused, and
-the original refinement-map and scroll-wheel selections are restored.
+The script uses `make_and_draw_map` with no weights and without the
+difference-map flag (an ordinary map, user's choice 2026-11-23), then names
+the overlay and sets its initial contour to 3 sigma. It adds no phase shift.
+Existing maps with the same MTZ and column pair are reused, and the original
+refinement-map and scroll-wheel selections are restored.
 
 Candidates are the selected map MTZ followed, for refinement checkpoints, by
 the explicitly recorded `refinement_reflections` MTZ if different. Both follow

@@ -5,6 +5,8 @@ wrappers): ``valid_labels`` takes ``bool use_weights_flag`` and rejects an
 int, and phenix.refine writes the anomalous map as ANOM/PANOM (phenix.maps
 writes ANOM/PHANOM). Before 2026-11-23 the script passed 0 and looked only for
 PHANOM, so the anomalous map never opened (U-Y_Ag run_004, every round).
+The anomalous map opens as an ordinary map, not a difference map (user,
+2026-11-23).
 """
 
 import io
@@ -131,10 +133,11 @@ class CootAnomalousTests(unittest.TestCase):
         coot = FakeCoot(self.mtz)
         normal_maps = coot.maps[:]
         output = self.execute_script(script, coot)
-        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PANOM", "", 0, 1)])
+        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PANOM", "", 0, 0)])
+        self.assertEqual(coot.maps[3][3], 0)              # not a difference map
         self.assertEqual(coot.maps[:3], normal_maps)
         self.assertEqual(coot.contours, {3: 3.0})
-        self.assertIn("ANOM/PANOM", coot.names[3])
+        self.assertEqual(coot.names[3], "Anomalous (ANOM/PANOM)")
         self.assertEqual((coot.refinement, coot.scroll), (1, 1))
         self.assertIn('"status": "loaded"', output)
         self.assertIn('"labels": ["ANOM", "PANOM"]', output)
@@ -161,7 +164,7 @@ class CootAnomalousTests(unittest.TestCase):
         script, _ = self.launch()
         coot = FakeCoot(self.mtz, ("ANOM", "PHANOM"))
         output = self.execute_script(script, coot)
-        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PHANOM", "", 0, 1)])
+        self.assertEqual(coot.created, [(str(self.mtz), "ANOM", "PHANOM", "", 0, 0)])
         self.assertIn("ANOM/PHANOM", coot.names[3])
         self.assertIn('"labels": ["ANOM", "PHANOM"]', output)
         # A file with both: phenix.refine's pair first.
@@ -178,6 +181,7 @@ class CootAnomalousTests(unittest.TestCase):
             output = self.execute_script(script, coot)
             self.assertIn('"status": "reused"', output)
         self.assertEqual(coot.created, [])
+        self.assertEqual(coot.maps[3][3], 0)   # an earlier difference-map copy is switched
         self.assertEqual(coot.contours, {3: 3.0})
         self.assertEqual((coot.refinement, coot.scroll), (1, 1))
 

@@ -127,6 +127,10 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- The anomalous map opens in Coot as an ordinary map, named "Anomalous
+  (ANOM/PANOM)", not as a difference map (user's request, 2026-11-23): one
+  colour, positive contour at 3 sigma. An anomalous map already open (from
+  the user's Coot settings) is switched the same way. All NASolve Coot views.
 - AutoFDP accepts a refined f'' within +/-10% of the theoretical f'' of the
   site's element by default (user's request, 2026-11-23), instead of a fixed
   +/-1 e- (`--tolerance`, removed). `--acceptance_absolute E` (also spelled

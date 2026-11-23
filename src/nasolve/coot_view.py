@@ -786,7 +786,7 @@ def resolve_view_profile(
     raise CootViewError("No completed stage in this run can be opened in Coot")
 
 
-#: Anomalous difference map columns, in the order tried: phenix.refine
+#: Anomalous map columns, in the order tried: phenix.refine
 #: (Phenix 2.2.1) writes ANOM/PANOM, phenix.maps ANOM/PHANOM.
 ANOMALOUS_LABEL_PAIRS = (("ANOM", "PANOM"), ("ANOM", "PHANOM"))
 
@@ -797,6 +797,7 @@ def _anomalous_map_script(map_paths: tuple[Path, ...]) -> str:
     The anomalous map is ANOM with phases PANOM (phenix.refine, Phenix 2.2.1)
     or PHANOM (phenix.maps), tried in that order. Coot's ``valid_labels`` takes
     a real bool for its use-weights flag (an int raises a SWIG TypeError).
+    It opens as an ordinary map, not a difference map (user, 2026-11-23).
     """
     return (
         "import coot\nimport json\nimport os\n\n"
@@ -835,13 +836,14 @@ def load_anomalous_map():
                 imol = existing_anomalous_map(path, amplitude_label, phase_label)
                 reused = imol >= 0
                 if not reused:
-                    # The phase column already holds the map phase: no weights or shift.
-                    imol = coot.make_and_draw_map(path, amplitude_label, phase_label, "", 0, 1)
+                    # The phase column already holds the map phase: no weights or shift;
+                    # an ordinary map, not a difference map.
+                    imol = coot.make_and_draw_map(path, amplitude_label, phase_label, "", 0, 0)
                 if imol < 0:
                     raise RuntimeError("Coot could not construct " + name + " from " + path)
-                coot.set_map_is_difference_map(imol, 1)
+                coot.set_map_is_difference_map(imol, 0)
                 coot.set_contour_level_in_sigma(imol, 3.0)
-                coot.set_molecule_name(imol, "Anomalous difference (" + name + ")")
+                coot.set_molecule_name(imol, "Anomalous (" + name + ")")
             finally:
                 # An inspection overlay must not change real-space refinement/scrolling.
                 if refinement_map >= 0:
