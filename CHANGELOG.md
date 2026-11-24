@@ -242,6 +242,15 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- A restraint file phenix.refine does not load no longer passes silently
+  (2026-11-24): U-Y_Ag run_004 rounds 002-004 were given `planarity.eff`
+  with the closing brace of `refinement {` missing; phenix.refine logged "not
+  a recognized phil file" and listed it under "Files not used by program",
+  and the rounds were READY without the restraint. `--restraints` now checks
+  PHIL files (.eff, .phil, .params) with `nasolve.phil_text` and refuses one
+  that does not parse, before anything is created; and a round whose log
+  lists any file under "Files not used by program" is AUTOREFINE_REVIEW,
+  naming the files (round report `phenix_unused_files`, empty otherwise).
 - AutoRefine output for a round phenix.refine stopped before writing a model
   (2026-11-24, U-Y_Ag run_004 round_010): it now says "Nothing to inspect:
   phenix.refine stopped before writing a model." instead of the Coot-view

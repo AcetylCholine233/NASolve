@@ -38,6 +38,8 @@ from .metal_coordination import (
     read_model_atoms,
 )
 from .model_assessment import file_sha256
+from .phil_text import PhilSyntaxError
+from .phil_text import scan as scan_phil
 from .run_context import artifact_reference, resolve_artifact_path
 
 
@@ -1272,6 +1274,24 @@ def _validate_terminal_geometry_protection(
     return record
 
 
+def phenix_unused_files(log_text: str) -> list[str]:
+    """The files phenix.refine lists under "Files not used by program:" (it
+    could not read them, e.g. a PHIL file with a missing brace)."""
+    lines = log_text.splitlines()
+    unused: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() != "Files not used by program:":
+            continue
+        position = index + 1
+        if position < len(lines) and lines[position].strip() and set(lines[position].strip()) <= {"-"}:
+            position += 1
+        while position < len(lines) and lines[position].strip():
+            if lines[position].strip() not in unused:
+                unused.append(lines[position].strip())
+            position += 1
+    return unused
+
+
 def parse_refinement_statistics(log_text: str, model_text: str = "") -> dict[str, object]:
     pairs = [(float(a), float(b)) for a, b in _R_PAIR.findall(log_text)]
     # Logs repeat some summaries; preserve changes while collapsing immediate duplicates.
@@ -1828,6 +1848,14 @@ def execute_autorefine(
                 f"--restraints takes PHIL (.eff, .phil, .params) or CIF (.cif) restraint "
                 f"files, not {source.name}"
             )
+        if source.suffix.lower() != ".cif":
+            try:
+                scan_phil(source.read_text(encoding="utf-8", errors="replace"))
+            except PhilSyntaxError as exc:
+                raise AutoRefineError(
+                    f"--restraints {source.name} is not valid PHIL ({exc}); "
+                    "phenix.refine would not load it"
+                ) from exc
         digest = file_sha256(source)
         if digest in in_use:
             raise AutoRefineError(
@@ -2144,6 +2172,7 @@ def execute_autorefine(
         if output_model is not None else ""
     )
     statistics = parse_refinement_statistics(log_text, model_text)
+    unused_files = phenix_unused_files(log_text)
     statistics["terminal_geometry_audit"] = terminal_geometry_audit
     statistics["anomalous_scatterers"] = anomalous_scatterer_diagnostics(
         log_text,
@@ -2287,6 +2316,14 @@ def execute_autorefine(
         checkpoint_status = "REVIEW"
         usable = True
         exit_code = 2
+    elif unused_files:
+        status = "AUTOREFINE_REVIEW"
+        message = ("Refinement completed, but phenix.refine did not use "
+                   + ", ".join(Path(path).name for path in unused_files)
+                   + ' (see "Files not used by program" in the log)')
+        checkpoint_status = "REVIEW"
+        usable = True
+        exit_code = 0
     elif moved_fixed:
         status = "AUTOREFINE_REVIEW"
         message = ("Refinement completed, but atoms fixed with --fix-xyz moved: "
@@ -2399,6 +2436,7 @@ def execute_autorefine(
         "command": command,
         "preflight_command": preflight_command,
         "fixed_xyz": fixed_records,   # --fix-xyz atoms: start and final coordinates
+        "phenix_unused_files": unused_files,   # "Files not used by program" in the log
         "parameters": str(parameters),
         "terminal_geometry_protection": terminal_protection_record,
         "inputs": {

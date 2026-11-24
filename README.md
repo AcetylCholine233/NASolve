@@ -298,6 +298,11 @@ for review. It applies to that round only: give it again for the next one.
 ./nasolve autorefine "$RUN" --fix-xyz B:101
 ```
 
+A `--restraints` PHIL file that does not parse (e.g. a missing closing
+brace) is refused, since phenix.refine would skip it; and if phenix.refine
+still lists any file under "Files not used by program" in its log, the
+round is for review and the message names the file.
+
 **Restraints are inherited along a branch.** A round uses every restraint
 file of the checkpoint it starts from: PostMR's (NARestraints pairs and
 stacking, linked phosphate, ReadySet supplement, curated dictionaries) and

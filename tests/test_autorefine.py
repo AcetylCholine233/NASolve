@@ -2,6 +2,7 @@ import json
 import shutil
 import shlex
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -602,6 +603,64 @@ class AutoRefineTests(unittest.TestCase):
                         macro_cycles=1, user_restraints=(path,),
                     )
             self.assertEqual(list((run / "AutoRefine").glob("round_*")), [])
+
+    def test_restraints_option_refuses_a_file_phenix_would_not_load(self):
+        # U-Y_Ag run_004 rounds 002-004 (2026-11-24): planarity.eff lacked the
+        # closing brace of "refinement {", phenix.refine listed it under "Files
+        # not used by program", and the round still passed.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            broken = root / "planarity.eff"
+            broken.write_text("refinement {\n  geometry_restraints.edits {\n    planarity {\n"
+                              "      action = add\n    }\n}\n")
+            with self.assertRaisesRegex(
+                    AutoRefineError, "--restraints planarity.eff is not valid PHIL "
+                                     r"\(scope 'refinement' is never closed\); phenix.refine would not load it"):
+                execute_autorefine(
+                    run, make_refine(root, final_work=0.244, final_free=0.267), make_mtz_dump(root),
+                    phenix_version=PHENIX_21, environment={"PATH": "/usr/bin:/bin"},
+                    macro_cycles=1, user_restraints=(broken,),
+                )
+            self.assertEqual(list((run / "AutoRefine").glob("round_*")), [])
+
+    def test_a_file_phenix_did_not_use_sends_the_round_to_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_refine_run(root)
+            source = root / "extra.eff"
+            source.write_text("refinement.geometry_restraints.edits {}\n")
+            inner = make_refine(root, final_work=0.244, final_free=0.267)
+            wrapper = root / "phenix.refine.unused"
+            wrapper.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess, sys\n"
+                f"code = subprocess.call([{str(inner)!r}, *sys.argv[1:]])\n"
+                "unused = [arg for arg in sys.argv[1:] if arg.endswith('extra.eff')]\n"
+                "print('  Files not used by program:')\n"
+                "print('  --------------------------')\n"
+                "for arg in unused: print('  ' + arg)\n"
+                "print('')\n"
+                "sys.exit(code)\n"
+            )
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+            result = execute_autorefine(
+                run, wrapper, make_mtz_dump(root), phenix_version=PHENIX_21,
+                environment={"PATH": "/usr/bin:/bin"}, macro_cycles=1, auto_select_success=False,
+                user_restraints=(source,),
+            )
+            self.assertEqual(result.status, "AUTOREFINE_REVIEW")
+            self.assertEqual(result.message, "Refinement completed, but phenix.refine did not use "
+                                             "extra.eff (see \"Files not used by program\" in the log)")
+            payload = json.loads(result.report_path.read_text())
+            copy = str((result.report_path.parent / "extra_restraints" / "extra.eff").resolve())
+            self.assertEqual(payload["phenix_unused_files"], [copy])
+            # A normal round has none.
+            plain = execute_autorefine(
+                run, inner, make_mtz_dump(root), phenix_version=PHENIX_21,
+                environment={"PATH": "/usr/bin:/bin"}, macro_cycles=1, auto_select_success=False,
+            )
+            self.assertEqual(json.loads(plain.report_path.read_text())["phenix_unused_files"], [])
 
     def test_terminal_protection_metadata_is_frozen_and_inherited(self):
         with tempfile.TemporaryDirectory() as directory:
