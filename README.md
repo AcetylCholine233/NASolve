@@ -272,6 +272,30 @@ starts from that improved model, while `--from` creates a deliberate branch:
 ./nasolve autorefine "$RUN" --from refine-001
 ```
 
+To start a round from a model of your own, for example one edited in Coot,
+give `--model FILE` (a PDB). The round still continues the checkpoint you
+start from (`--from`, or the current one): its data, phases and restraints are
+used, and it is the round's parent; only the starting coordinates are yours.
+NASolve checks the file like any starting model (the requested residues, the
+phosphate policy, `--coordination` donors), copies it to
+`AutoRefine/round_NNN/start_model.pdb`, gives phenix.refine the copy and
+records the original path and checksum; the original file is not changed.
+
+```bash
+./nasolve autorefine "$RUN" --from refine-002 --model "edited.pdb"
+```
+
+**Restraints are inherited along a branch.** A round uses every restraint
+file of the checkpoint it starts from: PostMR's (NARestraints pairs and
+stacking, linked phosphate, ReadySet supplement, curated dictionaries) and
+every `--restraints` and `--coordination` file added in earlier rounds on the
+way to that checkpoint, so you give each of them once. Rounds on other
+branches add nothing. An inherited restraint cannot be removed; start from an
+earlier checkpoint that does not have it. A model imported with `checkpoints
+add` (or given with `--model`) keeps the restraints of its parent checkpoint.
+Per-round settings (`--cycles`, `--geometry` without `--coordination`) are not
+inherited, and the anomalous groups are written afresh for each round.
+
 To add restraints PostMR did not make, give them with `--restraints FILE`
 (repeatable): a PHIL file (`.eff`, `.phil`, `.params`), for example a
 secondary-structure `.eff`, or a CIF dictionary (`.cif`). Each file is copied

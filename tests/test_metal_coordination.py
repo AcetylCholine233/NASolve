@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nasolve.autorefine import AutoRefineError, execute_autorefine
+from nasolve.checkpoints import add_checkpoint
 from nasolve.metal_coordination import (
     CoordinationError,
     coordination_phil,
@@ -390,6 +391,51 @@ class AutoRefineCoordinationTests(unittest.TestCase):
                     refine(**kwargs)
             self.assertEqual(sorted((run / "AutoRefine").glob("round_*")), rounds)
 
+    def test_restraints_are_planned_on_the_given_starting_model(self):
+        # --model: the current distances are those of the given model.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = self.run_with_metal(root)
+            model = run / "PostMR" / "Model" / "readyset_model.pdb"
+            edited = root / "edited.pdb"
+            edited.write_text("".join(
+                (line[:30] + "%8.3f" % 0.5 + line[38:] if line.startswith("HETATM") and line[12:16].strip() == "AG"
+                 else line) + "\n" for line in model.read_text().splitlines()))
+            result = execute_autorefine(
+                run, make_refine(root), make_mtz_dump(root), phenix_version=PHENIX_21,
+                environment={"PATH": "/usr/bin:/bin"}, macro_cycles=1, auto_select_success=False,
+                coordination=("Z:1=C:1/N3,C:2/O4",), start_model=edited,
+            )
+            site = json.loads(result.report_path.read_text())["inputs"]["metal_coordination"]["sites"][0]
+            self.assertEqual([bond["current"] for bond in site["bonds"]], [2.7, 2.138])
+
+    def test_an_imported_model_keeps_the_coordination_record(self):
+        # Before 2026-11-24 a checkpoints-add import kept the coordination file
+        # but not its record, so a second --coordination for the same metal was
+        # not refused and phenix.refine got both (Y-T run_002 refine-005).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = self.run_with_metal(root)
+            first = execute_autorefine(
+                run, make_refine(root), make_mtz_dump(root), phenix_version=PHENIX_21,
+                environment={"PATH": "/usr/bin:/bin"}, macro_cycles=1, auto_select_success=False,
+                coordination=("Z:1=C:1/N3,C:2/O4",),
+            )
+            imported = add_checkpoint(run, name="hand edited", parent=first.checkpoint_id,
+                                      model=first.report_path.parent / "refined_001.pdb")
+            registry = json.loads((run / "AutoRefine" / "checkpoints.json").read_text())
+            by_id = {item["id"]: item for item in registry["checkpoints"]}
+            self.assertEqual(by_id[imported.checkpoint_id]["metal_coordination"],
+                             by_id[first.checkpoint_id]["metal_coordination"])
+            with self.assertRaisesRegex(
+                    AutoRefineError, f"AG Z:1 AG already has coordination restraints from checkpoint "
+                                     f"{imported.checkpoint_id}"):
+                execute_autorefine(
+                    run, make_refine(root), make_mtz_dump(root), phenix_version=PHENIX_21,
+                    environment={"PATH": "/usr/bin:/bin"}, macro_cycles=1, auto_select_success=False,
+                    from_checkpoint="hand edited", coordination=("Z:1=C:2/O4",),
+                )
+
     def test_square_planar_round(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -437,7 +483,9 @@ class AutoRefineCoordinationTests(unittest.TestCase):
             executables={"phenix.refine": Path("/phenix/phenix.refine"),
                          "phenix.mtz.dump": Path("/phenix/phenix.mtz.dump")},
         )
-        payload = {"inputs": {"observation_labels": [], "metal_coordination": {
+        payload = {"inputs": {"observation_labels": [], "start_model": {
+            "source": "/data/edited.pdb", "copy": "/r/start_model.pdb",
+            "instead_of": "/r/round_001/refined_001.pdb"}, "metal_coordination": {
             "file": "/r/metal_coordination.eff", "inherited": [], "sites": [{
                 "metal": "AG B:101 AG", "geometry": "linear",
                 "summary": "AG B:101 AG: B:4 N2T 2.3 A (now 2.17), A:12 O4 2.5 A (now 2.84); "
@@ -454,8 +502,12 @@ class AutoRefineCoordinationTests(unittest.TestCase):
               patch("nasolve.cli.resolve_view_profile", side_effect=CootViewError("no view")),
               redirect_stdout(output)):
             code = main(["autorefine", str(run), "--coordination", "B:101=B:4/N2T,A:12/O4",
-                         "--coordination", "B:102=B:3/O6", "--geometry", "B:102=sqp"])
+                         "--coordination", "B:102=B:3/O6", "--geometry", "B:102=sqp",
+                         "--model", "/data/edited.pdb"])
         self.assertEqual(code, 0)
+        self.assertEqual(call.call_args.kwargs["start_model"], Path("/data/edited.pdb"))
+        self.assertIn("Starting model: /data/edited.pdb (instead of the model of refine-001)",
+                      output.getvalue())
         self.assertEqual(call.call_args.kwargs["coordination"],
                          ["B:101=B:4/N2T,A:12/O4", "B:102=B:3/O6"])
         self.assertEqual(call.call_args.kwargs["coordination_geometry"], ["B:102=sqp"])

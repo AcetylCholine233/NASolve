@@ -338,6 +338,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     autorefine.add_argument(
+        "--model", type=Path, metavar="FILE",
+        help=(
+            "start this round from FILE (a PDB, e.g. a model edited in Coot) instead of "
+            "the model of the checkpoint it continues (--from, or the current one); data, "
+            "phases and restraints still come from that checkpoint. FILE is copied into "
+            "the round and left unchanged"
+        ),
+    )
+    autorefine.add_argument(
         "--geometry", action="append", default=[], metavar="[METAL=]PRESET",
         help=(
             "preset coordination geometry for a --coordination site: sqp = square planar "
@@ -1371,6 +1380,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             user_restraints=args.restraints,
             coordination=args.coordination,
             coordination_geometry=args.geometry,
+            start_model=args.model,
             progress=progress,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
@@ -1388,6 +1398,10 @@ def _autorefine(args: argparse.Namespace) -> int:
     inputs = payload.get("inputs", {})
     refinement = payload.get("refinement", {})
     if isinstance(inputs, dict) and isinstance(refinement, dict):
+        start = inputs.get("start_model")
+        if isinstance(start, dict):
+            print(f"Starting model: {start.get('source')} "
+                  f"(instead of the model of {result.parent_checkpoint})")
         print("Target: Automatic")
         print("Observations: " + ",".join(inputs.get("observation_labels", [])))
         phase_labels = inputs.get("phase_labels", [])

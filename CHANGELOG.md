@@ -10,6 +10,17 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine RUN --model FILE` (user's request, 2026-11-24): the
+  round starts from FILE (a PDB, e.g. edited in Coot) instead of the model of
+  the checkpoint it continues (`--from`, or the current one), whose data,
+  phases and restraints are still used and which stays the round's parent.
+  The file is checked like any starting model (requested residues, phosphate
+  policy, `--coordination` donors are measured on it) before anything is
+  created, copied to `round_NNN/start_model.pdb` (what phenix.refine gets)
+  and recorded: round report `inputs.start_model` (source, sha256, copy, the
+  model it replaced; null without `--model`) and checkpoint `start_model`
+  (source plus run-anchored reference to the copy). The original is not
+  changed. phenix.refine simulated.
 - `nasolve autorefine --geometry [METAL=]PRESET` (user's specification,
   2026-11-24): a preset coordination geometry for a `--coordination` site.
   For now `sqp`, square planar: four donors, given in order around the
@@ -218,6 +229,13 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- A model imported with `nasolve checkpoints add --model` keeps its parent
+  checkpoint's `metal_coordination` record as well as its restraint files.
+  Before, only the files came along, so a later `--coordination` for the same
+  metal was not refused and phenix.refine applied both sets: Y-T run_002
+  refine-005 (from an import of refine-002) had Ag-N4T and Ag-N2T together
+  and ended with Ag-N4T 1.29 A and Ag-O4 1.83 A. Existing imports are not
+  rewritten; restrain a metal only once along such a branch.
 - The anomalous difference map opens in Coot again (reported 2026-11-23:
   after AutoRefine rounds only the 2mFo-DFc and mFo-DFc maps opened). Two
   causes in the startup script: Coot (bundled with Phenix 2.2.1) requires a

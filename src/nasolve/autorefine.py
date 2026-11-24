@@ -1669,6 +1669,7 @@ def execute_autorefine(
     user_restraints: Sequence[Path] = (),
     coordination: Sequence[str] = (),
     coordination_geometry: Sequence[str] = (),
+    start_model: Path | None = None,
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
@@ -1691,6 +1692,13 @@ def execute_autorefine(
     ``coordination_geometry`` (``--geometry [METAL=]PRESET``) gives a site a
     preset geometry, e.g. ``sqp``: square planar, 90-degree angles between
     donors listed next to each other.
+
+    ``start_model`` (``--model FILE``) starts the round from that PDB instead
+    of the parent checkpoint's model; data, phases and restraints still come
+    from the parent, which stays the round's parent. It is checked like the
+    parent's model before anything is created, then copied to
+    ``round_NNN/start_model.pdb`` (what phenix.refine gets) and recorded
+    (``inputs.start_model``, checkpoint ``start_model``) with its checksum.
     """
     xyz_wxc_scale = (
         0.1
@@ -1814,6 +1822,17 @@ def execute_autorefine(
                 "extra refinement restraint"
             )
 
+    start_source: Path | None = None
+    start_digest: str | None = None
+    parent_model = model
+    if start_model is not None:
+        start_source = Path(start_model).expanduser().resolve()
+        if not start_source.is_file():
+            raise AutoRefineError(f"Starting model does not exist: {start_source}")
+        if start_source.suffix.lower() != ".pdb":
+            raise AutoRefineError(f"--model takes a PDB file (.pdb), not {start_source.name}")
+        start_digest = file_sha256(start_source)
+        model = start_source
     validate_refined_model(model, report)
     parent_coordination = parent.get("metal_coordination") or []
     if not isinstance(parent_coordination, list):
@@ -1870,6 +1889,16 @@ def execute_autorefine(
         raise AutoRefineError(
             f"Refinement round already exists; refusing to overwrite {round_directory}"
         ) from exc
+
+    start_model_record: dict[str, object] | None = None
+    if start_source is not None:
+        copy = round_directory / "start_model.pdb"
+        shutil.copyfile(start_source, copy)
+        if file_sha256(copy) != start_digest:
+            raise AutoRefineError(f"{start_source} changed while it was being copied")
+        model = copy.resolve()
+        start_model_record = {"source": str(start_source), "sha256": start_digest,
+                              "copy": str(model), "instead_of": str(parent_model)}
 
     user_restraint_records: list[dict[str, object]] = []
     if user_sources:
@@ -2248,6 +2277,12 @@ def execute_autorefine(
             else {}
         ),
         **(
+            {"start_model": {"source": start_model_record["source"],
+                             **file_reference(model)}}
+            if start_model_record is not None
+            else {}
+        ),
+        **(
             {"metal_coordination": [
                 *parent_coordination,
                 *({**record, "restraint": file_reference(coordination_path)}
@@ -2290,6 +2325,7 @@ def execute_autorefine(
         "terminal_geometry_protection": terminal_protection_record,
         "inputs": {
             "model": str(model),
+            "start_model": start_model_record,   # --model: original, copy, the model it replaced
             "authoritative_observations": str(observations),
             "observation_labels": list(plan.observation_labels),
             "free_r_label": plan.free_r_label,

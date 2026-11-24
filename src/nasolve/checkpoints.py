@@ -606,6 +606,13 @@ def add_checkpoint(
             if "terminal_geometry_protection" in base
             else {}
         ),
+        # The coordination restraints come with the restraint files; their
+        # record too, so the same metal cannot be restrained twice (2026-11-24).
+        **(
+            {"metal_coordination": base["metal_coordination"]}
+            if base.get("metal_coordination")
+            else {}
+        ),
         "metrics": {},
         "compatibility": {
             "validated": False,
