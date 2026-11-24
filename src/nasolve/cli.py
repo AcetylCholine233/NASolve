@@ -342,7 +342,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "preset coordination geometry for a --coordination site: sqp = square planar "
             "(4 donors, listed in order around the square; each donor-metal-donor angle "
-            "between neighbours, the last with the first, 90 deg, sigma 6). A bare PRESET "
+            "between neighbours, the last with the first, 90 deg, sigma 6; the metal and "
+            "its donors in one plane, sigma 0.2 A). A bare PRESET "
             "applies to the only --coordination; with several, name the metal, e.g. "
             "B:101=sqp"
         ),

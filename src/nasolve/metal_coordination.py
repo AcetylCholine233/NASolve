@@ -16,8 +16,10 @@ heavy-atom site to its binding partners (donors) in phenix.refine's own form,
   For now ``sqp``, square planar: four donors listed in order around the
   square, and one ``angle`` donor-metal-donor (metal at the vertex) for each
   pair listed next to each other, the last with the first, ideal 90 degrees,
-  sigma 6. The pairs across the square are not restrained; four 90-degree
-  angles add up to 360 degrees only when the donors are coplanar.
+  sigma 6. The pairs across the square are not restrained. A ``planarity``
+  restraint keeps the metal and its four donors in one plane (sigma 0.2 A:
+  NASolve's choice, the user gave none; like the bond sigma, and about what
+  6 degrees is at a 2.4 A bond).
 
 Values chosen by the lab for now (user, 2026-11-23). Phenix adds custom bonds
 to its bonding list, so the metal and its donors are no longer treated as
@@ -57,11 +59,12 @@ class GeometryPreset:
     donors: int          # number of donors, listed in order
     angle_ideal: float   # each donor-metal-donor angle between neighbours
     angle_sigma: float
+    plane_sigma: float | None = None   # metal + donors in one plane (A); None: no plane
 
 
 #: ``--geometry`` presets (user, 2026-11-24).
 GEOMETRY_PRESETS: dict[str, GeometryPreset] = {
-    "sqp": GeometryPreset("sqp", "square planar", 4, 90.0, 6.0),
+    "sqp": GeometryPreset("sqp", "square planar", 4, 90.0, 6.0, plane_sigma=0.2),
 }
 #: Neighbouring donors this far apart (deg) look like a pair across the
 #: square (donors not listed in order): reported.
@@ -137,6 +140,13 @@ class CoordinationAngle:
 
 
 @dataclass(frozen=True)
+class CoordinationPlane:
+    atoms: tuple[ModelAtom, ...]   # the metal, then its donors
+    sigma: float
+    current_rms: float             # A from the best plane through them
+
+
+@dataclass(frozen=True)
 class CoordinationSite:
     spec: CoordinationSpec
     metal: ModelAtom
@@ -144,6 +154,7 @@ class CoordinationSite:
     angles: tuple[CoordinationAngle, ...]
     warnings: tuple[str, ...]
     preset: GeometryPreset | None = None
+    plane: CoordinationPlane | None = None
 
     @property
     def angle(self) -> CoordinationAngle | None:
@@ -280,6 +291,29 @@ def _angle(vertex, first, second) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
 
 
+def _plane_rms(points: Sequence[tuple[float, float, float]]) -> float:
+    """RMS distance of ``points`` from their best (least-squares) plane: the
+    square root of the smallest eigenvalue of the scatter matrix over n
+    (closed form for a symmetric 3x3 matrix; no numpy)."""
+    count = len(points)
+    centre = [sum(point[axis] for point in points) / count for axis in range(3)]
+    shifted = [[point[axis] - centre[axis] for axis in range(3)] for point in points]
+    a = [[sum(row[i] * row[j] for row in shifted) for j in range(3)] for i in range(3)]
+    off = a[0][1] ** 2 + a[0][2] ** 2 + a[1][2] ** 2
+    if off == 0.0:
+        smallest = min(a[0][0], a[1][1], a[2][2])
+    else:
+        q = (a[0][0] + a[1][1] + a[2][2]) / 3
+        p = math.sqrt(((a[0][0] - q) ** 2 + (a[1][1] - q) ** 2 + (a[2][2] - q) ** 2 + 2 * off) / 6)
+        b = [[(a[i][j] - (q if i == j else 0.0)) / p for j in range(3)] for i in range(3)]
+        determinant = (b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1])
+                       - b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0])
+                       + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]))
+        phi = math.acos(max(-1.0, min(1.0, determinant / 2))) / 3
+        smallest = q + 2 * p * math.cos(phi + 2 * math.pi / 3)
+    return math.sqrt(max(smallest, 0.0) / count)
+
+
 def _geometries(residues, specs, metals, geometries) -> list[GeometryPreset | None]:
     """The --geometry preset of each --coordination site (None: no preset)."""
     if geometries and not specs:
@@ -343,6 +377,7 @@ def plan_coordination(model: Path, specs: Sequence[CoordinationSpec],
                 )
             bonds.append(CoordinationBond(metal, donor, ideal, BOND_SIGMA, round(current, 3)))
         angles = []
+        plane = None
         if preset is not None:
             if len(bonds) != preset.donors:
                 raise CoordinationError(
@@ -361,13 +396,18 @@ def plan_coordination(model: Path, specs: Sequence[CoordinationSpec],
                         f"{metal.label}: {preset.name} takes the donors in order around the square, "
                         "each next to the one before"
                     )
+            if preset.plane_sigma is not None:
+                atoms = (metal, *donors)
+                plane = CoordinationPlane(atoms=atoms, sigma=preset.plane_sigma,
+                                          current_rms=round(_plane_rms([atom.xyz for atom in atoms]), 3))
         elif len(bonds) == 2:
             first, second = bonds[0].donor, bonds[1].donor
             angles.append(CoordinationAngle(
                 atoms=(second, first, metal), ideal=LINEAR_ANGLE_IDEAL, sigma=LINEAR_ANGLE_SIGMA,
                 current=round(_angle(first.xyz, second.xyz, metal.xyz), 2),
             ))
-        sites.append(CoordinationSite(spec, metal, tuple(bonds), tuple(angles), tuple(warnings), preset))
+        sites.append(CoordinationSite(spec, metal, tuple(bonds), tuple(angles), tuple(warnings),
+                                      preset, plane))
     return sites
 
 
@@ -383,7 +423,9 @@ def coordination_phil(sites: Sequence[CoordinationSite]) -> str:
         lines.append(
             f"# {preset.name.capitalize()} (--geometry {preset.code}): angle donor-metal-donor "
             "between donors listed next to each other (and the last with the first), "
-            f"{preset.angle_ideal:g} deg, sigma {preset.angle_sigma:g}."
+            f"{preset.angle_ideal:g} deg, sigma {preset.angle_sigma:g}"
+            + (f"; the metal and its donors in one plane, sigma {preset.plane_sigma:g} A."
+               if preset.plane_sigma is not None else ".")
         )
     lines += [
         "refinement {",
@@ -413,6 +455,14 @@ def coordination_phil(sites: Sequence[CoordinationSite]) -> str:
                 f"      sigma = {angle.sigma:g}",
                 "    }",
             ]
+        if site.plane is not None:
+            lines += [
+                "    planarity {",
+                "      action = add",
+                "      atom_selection = " + " or ".join(f"({atom.selection})" for atom in site.plane.atoms),
+                f"      sigma = {site.plane.sigma:g}",
+                "    }",
+            ]
     lines += ["  }", "}", ""]
     return "\n".join(lines)
 
@@ -440,6 +490,10 @@ def coordination_record(site: CoordinationSite) -> dict[str, object]:
              "ideal": angle.ideal, "sigma": angle.sigma, "current": angle.current}
             for angle in site.angles
         ],
+        "plane": None if site.plane is None else {
+            "atoms": [atom.label for atom in site.plane.atoms],
+            "sigma": site.plane.sigma, "current_rms": site.plane.current_rms,
+        },
         "warnings": list(site.warnings),
         "summary": describe_site(site),
     }
@@ -459,6 +513,9 @@ def describe_site(site: CoordinationSite) -> str:
                  + ", ".join(f"{_donor_label(first)}-{vertex.name}-{_donor_label(last)} "
                              f"(now {angle.current:.1f})"
                              for angle in site.angles for first, vertex, last in [angle.atoms]))
+    if site.plane is not None:
+        text += (f"; {site.metal.name} and its {len(site.plane.atoms) - 1} donors in one plane, "
+                 f"sigma {site.plane.sigma:g} A (now {site.plane.current_rms:.2f} A rms)")
     return text
 
 

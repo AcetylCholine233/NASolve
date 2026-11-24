@@ -299,6 +299,7 @@ donor atom as `CHAIN:RESID/ATOM`. NASolve writes phenix.refine
 | Hg-N bond | 2.1 A | 0.2 A |
 | two donors (linear): angle donor-donor-metal, vertex at the first donor | 0 deg | 3 deg |
 | `--geometry sqp` (square planar, four donors): each angle donor-metal-donor between donors listed next to each other, and the last with the first | 90 deg | 6 deg |
+| `--geometry sqp`: planarity of the metal and its four donors | one plane | 0.2 A |
 
 The 0-degree angle is not a physical angle; it keeps the metal on the line
 through the two donors. With three or more donors there is no angle
@@ -306,8 +307,9 @@ restraint unless `--geometry` names a preset (2026-11-24). For now there is
 one, `sqp` (square planar): give the four donors in order around the square,
 so that each is next to the one before; NASolve restrains the four angles
 between neighbours (D1-M-D2, D2-M-D3, D3-M-D4, D4-M-D1) to 90 degrees and
-leaves the pairs across the square alone (four 90-degree angles add up to 360
-degrees only when the donors are coplanar). It warns when two donors listed
+leaves the pairs across the square alone, and adds a planarity restraint over
+the metal and its four donors (sigma 0.2 A, chosen to match the bond sigma;
+about what 6 degrees is at a 2.4 A bond). It warns when two donors listed
 next to each other are more than 135 degrees apart in the model (probably
 across the square). A bare `--geometry sqp` applies to the only
 `--coordination`; with several, name the metal (`--geometry B:101=sqp`).

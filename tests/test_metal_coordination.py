@@ -10,7 +10,9 @@ definition on 2026-11-23). phenix.refine is simulated.
 ``--geometry`` (user, 2026-11-24): a preset coordination geometry; for now
 ``sqp``, square planar: four donors listed in order around the square, and
 for each donor-metal-donor angle between neighbours (the last with the first)
-90 degrees, sigma 6. Without --geometry nothing changes.
+90 degrees, sigma 6; and (user, same day) a planarity restraint over the
+metal and its four donors (sigma 0.2 A, NASolve's choice: the user gave none).
+Without --geometry nothing changes.
 """
 
 import io
@@ -37,7 +39,7 @@ from .helpers import pdb_record
 from .test_autorefine import PHENIX_21, make_mtz_dump, make_refine, make_refine_run
 
 
-def coordination_model(path: Path, *, metal: str = "AG", altloc: bool = False) -> Path:
+def coordination_model(path: Path, *, metal: str = "AG", altloc: bool = False, n1_z: float = 0.0) -> Path:
     """A metal between N3 of C:1 and O4 of C:2, about on a line."""
     lines = [
         pdb_record("ATOM", 1, "N3", "DT", "C", 1, element="N", x=-2.2),
@@ -47,7 +49,7 @@ def coordination_model(path: Path, *, metal: str = "AG", altloc: bool = False) -
         pdb_record("HETATM", 5, metal, metal, "Z", 1, element=metal),
         pdb_record("ATOM", 6, "O6", "DG", "C", 3, element="O", x=0.0, y=-2.5),
         pdb_record("ATOM", 7, "N7", "DG", "C", 3, element="N", x=0.0, y=-9.0),
-        pdb_record("ATOM", 8, "N1", "DC", "C", 4, element="N", x=0.0, y=2.3),
+        pdb_record("ATOM", 8, "N1", "DC", "C", 4, element="N", x=0.0, y=2.3, z=n1_z),
     ]
     if altloc:
         lines.append(lines[0][:16] + "B" + lines[0][17:])
@@ -77,7 +79,8 @@ class GeometryParseTests(unittest.TestCase):
     def test_presets(self):
         bare = parse_geometry("sqp")
         self.assertEqual((bare.metal, bare.preset.code, bare.preset.name), (None, "sqp", "square planar"))
-        self.assertEqual((bare.preset.donors, bare.preset.angle_ideal, bare.preset.angle_sigma), (4, 90.0, 6.0))
+        self.assertEqual((bare.preset.donors, bare.preset.angle_ideal, bare.preset.angle_sigma,
+                          bare.preset.plane_sigma), (4, 90.0, 6.0, 0.2))
         named = parse_geometry(" B:101=SQP ")
         self.assertEqual((named.metal.label, named.preset.code), ("B:101", "sqp"))
         for text, message in (
@@ -154,19 +157,36 @@ class SquarePlanarTests(unittest.TestCase):
             self.assertEqual({(angle.ideal, angle.sigma) for angle in site.angles}, {(90.0, 6.0)})
             self.assertEqual([round(angle.current, 1) for angle in site.angles], [90.0, 98.8, 81.2, 90.0])
             self.assertEqual(site.warnings, ())
+            self.assertEqual([atom.name for atom in site.plane.atoms], ["AG", "N3", "O6", "O4", "N1"])
+            self.assertEqual((site.plane.sigma, site.plane.current_rms), (0.2, 0.0))
             self.assertEqual(coordination_phil([site]), EXPECTED_SQP_PHIL)
             record = coordination_record(site)
             self.assertEqual((record["geometry"], record["preset"], record["angle"]),
                              ("square planar (sqp)", "sqp", None))
             self.assertEqual([item["atoms"] for item in record["angles"]][0],
                              ["DT C:1 N3", "AG Z:1 AG", "DG C:3 O6"])
+            self.assertEqual(record["plane"], {
+                "atoms": ["AG Z:1 AG", "DT C:1 N3", "DG C:3 O6", "DT C:2 O4", "DC C:4 N1"],
+                "sigma": 0.2, "current_rms": 0.0})
             self.assertEqual(describe_site(site), (
                 "AG Z:1 AG: C:1 N3 2.3 A (now 2.20), C:3 O6 2.5 A (now 2.50), C:2 O4 2.5 A (now 2.63), "
                 "C:4 N1 2.3 A (now 2.30); square planar 90 +/- 6 deg: C:1 N3-AG-C:3 O6 (now 90.0), "
-                "C:3 O6-AG-C:2 O4 (now 98.8), C:2 O4-AG-C:4 N1 (now 81.2), C:4 N1-AG-C:1 N3 (now 90.0)"))
+                "C:3 O6-AG-C:2 O4 (now 98.8), C:2 O4-AG-C:4 N1 (now 81.2), C:4 N1-AG-C:1 N3 (now 90.0); "
+                "AG and its 4 donors in one plane, sigma 0.2 A (now 0.00 A rms)"))
             # Named metal: the same.
             named, = plan_coordination(model, [parse_coordination(self.SQUARE)], [parse_geometry("Z:1/AG=sqp")])
             self.assertEqual(coordination_phil([named]), EXPECTED_SQP_PHIL)
+
+    def test_current_distance_from_the_plane(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # N1 1 A above the plane of the others: rms 0.262 A from the best plane (numpy).
+            model = coordination_model(Path(directory) / "model.pdb", n1_z=1.0)
+            site, = plan_coordination(model, [parse_coordination(self.SQUARE)], [parse_geometry("sqp")])
+            self.assertAlmostEqual(site.plane.current_rms, 0.262, places=3)
+            # Without --geometry, or for a linear site: no plane.
+            linear, = plan_coordination(model, [parse_coordination("Z:1=C:1/N3,C:2/O4")])
+            self.assertIsNone(linear.plane)
+            self.assertNotIn("planarity", coordination_phil([linear]))
 
     def test_donors_out_of_order_are_reported(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,7 +223,7 @@ class SquarePlanarTests(unittest.TestCase):
 EXPECTED_SQP_PHIL = """\
 # NASolve metal coordination restraints (nasolve autorefine --coordination)
 # Bonds: lab table, sigma 0.2 A. Linear (two donors): angle donor-donor-metal 0 deg, sigma 3 (not a physical angle; keeps the metal on the donor-donor line).
-# Square planar (--geometry sqp): angle donor-metal-donor between donors listed next to each other (and the last with the first), 90 deg, sigma 6.
+# Square planar (--geometry sqp): angle donor-metal-donor between donors listed next to each other (and the last with the first), 90 deg, sigma 6; the metal and its donors in one plane, sigma 0.2 A.
 refinement {
   geometry_restraints.edits {
     # AG Z:1 AG: Z:1=C:1/N3,C:3/O6,C:2/O4,C:4/N1 (square planar (sqp))
@@ -266,6 +286,11 @@ refinement {
       atom_selection_3 = chain C and resid 1 and name N3
       angle_ideal = 90
       sigma = 6
+    }
+    planarity {
+      action = add
+      atom_selection = (chain Z and resid 1 and name AG) or (chain C and resid 1 and name N3) or (chain C and resid 3 and name O6) or (chain C and resid 2 and name O4) or (chain C and resid 4 and name N1)
+      sigma = 0.2
     }
   }
 }
@@ -391,8 +416,8 @@ class AutoRefineCoordinationTests(unittest.TestCase):
             restraint = result.report_path.parent / "metal_coordination.eff"
             self.assertEqual(restraint.read_text(), EXPECTED_SQP_PHIL)
             site = json.loads(result.report_path.read_text())["inputs"]["metal_coordination"]["sites"][0]
-            self.assertEqual((site["geometry"], site["preset"], len(site["angles"])),
-                             ("square planar (sqp)", "sqp", 4))
+            self.assertEqual((site["geometry"], site["preset"], len(site["angles"]), len(site["plane"]["atoms"])),
+                             ("square planar (sqp)", "sqp", 4, 5))
 
     def test_command_line_forwards_and_prints(self):
         from nasolve.cli import main
