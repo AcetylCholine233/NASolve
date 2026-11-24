@@ -333,8 +333,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(metal CHAIN:RESID[/ATOM], donors CHAIN:RESID/ATOM); repeatable, one per "
             "metal. Bond lengths from the lab table (Ag-O 2.5, Ag-N 2.3, Hg-O 2.1, "
             "Hg-N 2.1 A), sigma 0.2 A; with two donors also the angle donor-donor-metal "
-            "0 deg, sigma 3 (keeps it linear); no angle for more donors. Kept by later "
-            "rounds from this round's checkpoint"
+            "0 deg, sigma 3 (keeps it linear); no angle for more donors unless --geometry. "
+            "Kept by later rounds from this round's checkpoint"
+        ),
+    )
+    autorefine.add_argument(
+        "--geometry", action="append", default=[], metavar="[METAL=]PRESET",
+        help=(
+            "preset coordination geometry for a --coordination site: sqp = square planar "
+            "(4 donors, listed in order around the square; each donor-metal-donor angle "
+            "between neighbours, the last with the first, 90 deg, sigma 6). A bare PRESET "
+            "applies to the only --coordination; with several, name the metal, e.g. "
+            "B:101=sqp"
         ),
     )
     autofdp = subparsers.add_parser(
@@ -1359,6 +1369,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             macro_cycles=args.cycles,
             user_restraints=args.restraints,
             coordination=args.coordination,
+            coordination_geometry=args.geometry,
             progress=progress,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:

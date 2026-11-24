@@ -30,6 +30,7 @@ from .metal_coordination import (
     coordination_phil,
     coordination_record,
     parse_coordination,
+    parse_geometry,
     plan_coordination,
 )
 from .model_assessment import file_sha256
@@ -1667,6 +1668,7 @@ def execute_autorefine(
     extra_restraints: Sequence[Path] = (),
     user_restraints: Sequence[Path] = (),
     coordination: Sequence[str] = (),
+    coordination_geometry: Sequence[str] = (),
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
@@ -1686,6 +1688,9 @@ def execute_autorefine(
     later rounds like ``--restraints``. The checkpoint records the sites
     (``metal_coordination``); a metal the parent checkpoint already restrains
     is refused, since Phenix stops on a bond added twice.
+    ``coordination_geometry`` (``--geometry [METAL=]PRESET``) gives a site a
+    preset geometry, e.g. ``sqp``: square planar, 90-degree angles between
+    donors listed next to each other.
     """
     xyz_wxc_scale = (
         0.1
@@ -1814,10 +1819,13 @@ def execute_autorefine(
     if not isinstance(parent_coordination, list):
         raise AutoRefineError("Parent checkpoint metal-coordination record is malformed")
     coordination_sites = []
+    if coordination_geometry and not coordination:
+        raise AutoRefineError("--geometry needs --coordination (the metal and its donors)")
     if coordination:
         try:
             coordination_sites = plan_coordination(
-                model, [parse_coordination(text) for text in coordination])
+                model, [parse_coordination(text) for text in coordination],
+                [parse_geometry(text) for text in coordination_geometry])
         except CoordinationError as exc:
             raise AutoRefineError(str(exc)) from exc
         restrained = {tuple(item.get("metal_key") or ()): item for item in parent_coordination

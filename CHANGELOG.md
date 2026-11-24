@@ -10,6 +10,19 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine --geometry [METAL=]PRESET` (user's specification,
+  2026-11-24): a preset coordination geometry for a `--coordination` site.
+  For now `sqp`, square planar: four donors, given in order around the
+  square; one angle restraint donor-metal-donor (metal at the vertex) for
+  each pair given next to each other, the last with the first, 90 deg, sigma
+  6 (`nasolve.metal_coordination.GEOMETRY_PRESETS`). Pairs across the square
+  are not restrained. A site with another number of donors is refused; donors
+  given next to each other but more than 135 deg apart in the starting model
+  are reported (probably not in order). A bare preset applies to the only
+  `--coordination`; with several, `METAL=PRESET` names the site. Without
+  `--geometry` nothing changes (linear angle for two donors, none for more).
+  Site records gain `preset` and `angles` (all angle restraints; `angle`
+  still holds the linear one). phenix.refine simulated.
 - `nasolve autorefine RUN --coordination METAL=DONOR,DONOR` (user's
   specification, 2026-11-23): restrains a heavy-atom site to its binding
   partners with phenix.refine `geometry_restraints.edits`

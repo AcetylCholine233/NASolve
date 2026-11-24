@@ -298,10 +298,20 @@ donor atom as `CHAIN:RESID/ATOM`. NASolve writes phenix.refine
 | Hg-O bond | 2.1 A | 0.2 A |
 | Hg-N bond | 2.1 A | 0.2 A |
 | two donors (linear): angle donor-donor-metal, vertex at the first donor | 0 deg | 3 deg |
+| `--geometry sqp` (square planar, four donors): each angle donor-metal-donor between donors listed next to each other, and the last with the first | 90 deg | 6 deg |
 
 The 0-degree angle is not a physical angle; it keeps the metal on the line
 through the two donors. With three or more donors there is no angle
-restraint. These are the lab's values for now (2026-11-23); another metal or
+restraint unless `--geometry` names a preset (2026-11-24). For now there is
+one, `sqp` (square planar): give the four donors in order around the square,
+so that each is next to the one before; NASolve restrains the four angles
+between neighbours (D1-M-D2, D2-M-D3, D3-M-D4, D4-M-D1) to 90 degrees and
+leaves the pairs across the square alone (four 90-degree angles add up to 360
+degrees only when the donors are coplanar). It warns when two donors listed
+next to each other are more than 135 degrees apart in the model (probably
+across the square). A bare `--geometry sqp` applies to the only
+`--coordination`; with several, name the metal (`--geometry B:101=sqp`).
+These are the lab's values for now (2026-11-23); another metal or
 donor element is refused until it is in the table
 (`nasolve.metal_coordination.COORDINATION_LENGTHS`). NASolve checks every atom
 in the round's starting model, prints the current distances and angle, warns
@@ -312,6 +322,7 @@ with `--from` to change it).
 
 ```bash
 ./nasolve autorefine "$RUN" --coordination "B:101=B:4/N2T,A:12/O4"
+./nasolve autorefine "$RUN" --coordination "B:101=B:4/O4,A:12/N4T,B:3/O6,A:11/O4" --geometry sqp
 ```
 
 Bookmark, select, or import a manually corrected model with:

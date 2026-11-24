@@ -6,6 +6,11 @@ coordination (two donors) the angle donor-donor-metal 0 degrees, sigma 3 (not
 a physical angle); no preset angle for more donors. Written as phenix.refine
 ``geometry_restraints.edits`` (the form checked against Phenix 2.2.1's own
 definition on 2026-11-23). phenix.refine is simulated.
+
+``--geometry`` (user, 2026-11-24): a preset coordination geometry; for now
+``sqp``, square planar: four donors listed in order around the square, and
+for each donor-metal-donor angle between neighbours (the last with the first)
+90 degrees, sigma 6. Without --geometry nothing changes.
 """
 
 import io
@@ -21,7 +26,10 @@ from nasolve.autorefine import AutoRefineError, execute_autorefine
 from nasolve.metal_coordination import (
     CoordinationError,
     coordination_phil,
+    coordination_record,
+    describe_site,
     parse_coordination,
+    parse_geometry,
     plan_coordination,
 )
 
@@ -39,6 +47,7 @@ def coordination_model(path: Path, *, metal: str = "AG", altloc: bool = False) -
         pdb_record("HETATM", 5, metal, metal, "Z", 1, element=metal),
         pdb_record("ATOM", 6, "O6", "DG", "C", 3, element="O", x=0.0, y=-2.5),
         pdb_record("ATOM", 7, "N7", "DG", "C", 3, element="N", x=0.0, y=-9.0),
+        pdb_record("ATOM", 8, "N1", "DC", "C", 4, element="N", x=0.0, y=2.3),
     ]
     if altloc:
         lines.append(lines[0][:16] + "B" + lines[0][17:])
@@ -62,6 +71,23 @@ class ParseTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaisesRegex(CoordinationError, message):
                 parse_coordination(text)
+
+
+class GeometryParseTests(unittest.TestCase):
+    def test_presets(self):
+        bare = parse_geometry("sqp")
+        self.assertEqual((bare.metal, bare.preset.code, bare.preset.name), (None, "sqp", "square planar"))
+        self.assertEqual((bare.preset.donors, bare.preset.angle_ideal, bare.preset.angle_sigma), (4, 90.0, 6.0))
+        named = parse_geometry(" B:101=SQP ")
+        self.assertEqual((named.metal.label, named.preset.code), ("B:101", "sqp"))
+        for text, message in (
+            ("oct", r"unknown geometry 'oct' \(presets: sqp = square planar\)"),
+            ("B:101=", "unknown geometry ''"),
+            ("B101=sqp", "not CHAIN:RESID"),
+            ("B:101=B:4=sqp", "give PRESET or METAL=PRESET"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(CoordinationError, message):
+                parse_geometry(text)
 
 
 class PlanTests(unittest.TestCase):
@@ -109,6 +135,141 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(CoordinationError, "alternate conformations"):
                 plan_coordination(coordination_model(root / "alt.pdb", altloc=True),
                                   [parse_coordination("Z:1=C:1/N3")])
+
+
+class SquarePlanarTests(unittest.TestCase):
+    # Around Ag Z:1 in the plane z = 0: C:1 N3 (-x), C:3 O6 (-y), C:2 O4 (+x), C:4 N1 (+y).
+    SQUARE = "Z:1=C:1/N3,C:3/O6,C:2/O4,C:4/N1"
+
+    def test_four_bonds_and_four_angles_between_neighbours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = coordination_model(Path(directory) / "model.pdb")
+            site, = plan_coordination(model, [parse_coordination(self.SQUARE)], [parse_geometry("sqp")])
+            self.assertEqual(site.geometry, "square planar (sqp)")
+            self.assertEqual([(bond.donor.name, bond.ideal) for bond in site.bonds],
+                             [("N3", 2.3), ("O6", 2.5), ("O4", 2.5), ("N1", 2.3)])
+            self.assertIsNone(site.angle)                 # no linear angle
+            self.assertEqual([tuple(atom.name for atom in angle.atoms) for angle in site.angles],
+                             [("N3", "AG", "O6"), ("O6", "AG", "O4"), ("O4", "AG", "N1"), ("N1", "AG", "N3")])
+            self.assertEqual({(angle.ideal, angle.sigma) for angle in site.angles}, {(90.0, 6.0)})
+            self.assertEqual([round(angle.current, 1) for angle in site.angles], [90.0, 98.8, 81.2, 90.0])
+            self.assertEqual(site.warnings, ())
+            self.assertEqual(coordination_phil([site]), EXPECTED_SQP_PHIL)
+            record = coordination_record(site)
+            self.assertEqual((record["geometry"], record["preset"], record["angle"]),
+                             ("square planar (sqp)", "sqp", None))
+            self.assertEqual([item["atoms"] for item in record["angles"]][0],
+                             ["DT C:1 N3", "AG Z:1 AG", "DG C:3 O6"])
+            self.assertEqual(describe_site(site), (
+                "AG Z:1 AG: C:1 N3 2.3 A (now 2.20), C:3 O6 2.5 A (now 2.50), C:2 O4 2.5 A (now 2.63), "
+                "C:4 N1 2.3 A (now 2.30); square planar 90 +/- 6 deg: C:1 N3-AG-C:3 O6 (now 90.0), "
+                "C:3 O6-AG-C:2 O4 (now 98.8), C:2 O4-AG-C:4 N1 (now 81.2), C:4 N1-AG-C:1 N3 (now 90.0)"))
+            # Named metal: the same.
+            named, = plan_coordination(model, [parse_coordination(self.SQUARE)], [parse_geometry("Z:1/AG=sqp")])
+            self.assertEqual(coordination_phil([named]), EXPECTED_SQP_PHIL)
+
+    def test_donors_out_of_order_are_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = coordination_model(Path(directory) / "model.pdb")
+            # N3 and O4 are across the square, not neighbours.
+            site, = plan_coordination(model, [parse_coordination("Z:1=C:1/N3,C:2/O4,C:3/O6,C:4/N1")],
+                                      [parse_geometry("sqp")])
+            self.assertEqual(site.warnings, (
+                "C:1 N3 and C:2 O4 are 171.2 deg apart at AG Z:1 AG: square planar takes the donors "
+                "in order around the square, each next to the one before",
+                "C:3 O6 and C:4 N1 are 180.0 deg apart at AG Z:1 AG: square planar takes the donors "
+                "in order around the square, each next to the one before",
+            ))
+
+    def test_what_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = coordination_model(Path(directory) / "model.pdb")
+            square = parse_coordination(self.SQUARE)
+            for specs, geometries, message in (
+                ([parse_coordination("Z:1=C:1/N3,C:2/O4")], ["sqp"],
+                 r"--geometry sqp \(square planar\) needs 4 donors, listed in order around the "
+                 r"square; AG Z:1 AG has 2"),
+                ([square, parse_coordination("C:3/N7=C:1/N3")], ["sqp"],
+                 "--geometry 'sqp': name the metal when there are several --coordination "
+                 r"\(e.g. --geometry Z:1=sqp\)"),
+                ([square], ["C:3/O6=sqp"], "--geometry 'C:3/O6=sqp': DG C:3 O6 has no --coordination"),
+                ([square], ["sqp", "Z:1=sqp"], "--geometry: AG Z:1 AG is given two geometries"),
+                ([], ["sqp"], "--geometry needs --coordination"),
+            ):
+                with self.subTest(geometries=geometries), self.assertRaisesRegex(CoordinationError, message):
+                    plan_coordination(model, specs, [parse_geometry(text) for text in geometries])
+
+
+EXPECTED_SQP_PHIL = """\
+# NASolve metal coordination restraints (nasolve autorefine --coordination)
+# Bonds: lab table, sigma 0.2 A. Linear (two donors): angle donor-donor-metal 0 deg, sigma 3 (not a physical angle; keeps the metal on the donor-donor line).
+# Square planar (--geometry sqp): angle donor-metal-donor between donors listed next to each other (and the last with the first), 90 deg, sigma 6.
+refinement {
+  geometry_restraints.edits {
+    # AG Z:1 AG: Z:1=C:1/N3,C:3/O6,C:2/O4,C:4/N1 (square planar (sqp))
+    bond {
+      action = add
+      atom_selection_1 = chain Z and resid 1 and name AG
+      atom_selection_2 = chain C and resid 1 and name N3
+      distance_ideal = 2.3
+      sigma = 0.2
+    }
+    bond {
+      action = add
+      atom_selection_1 = chain Z and resid 1 and name AG
+      atom_selection_2 = chain C and resid 3 and name O6
+      distance_ideal = 2.5
+      sigma = 0.2
+    }
+    bond {
+      action = add
+      atom_selection_1 = chain Z and resid 1 and name AG
+      atom_selection_2 = chain C and resid 2 and name O4
+      distance_ideal = 2.5
+      sigma = 0.2
+    }
+    bond {
+      action = add
+      atom_selection_1 = chain Z and resid 1 and name AG
+      atom_selection_2 = chain C and resid 4 and name N1
+      distance_ideal = 2.3
+      sigma = 0.2
+    }
+    angle {
+      action = add
+      atom_selection_1 = chain C and resid 1 and name N3
+      atom_selection_2 = chain Z and resid 1 and name AG
+      atom_selection_3 = chain C and resid 3 and name O6
+      angle_ideal = 90
+      sigma = 6
+    }
+    angle {
+      action = add
+      atom_selection_1 = chain C and resid 3 and name O6
+      atom_selection_2 = chain Z and resid 1 and name AG
+      atom_selection_3 = chain C and resid 2 and name O4
+      angle_ideal = 90
+      sigma = 6
+    }
+    angle {
+      action = add
+      atom_selection_1 = chain C and resid 2 and name O4
+      atom_selection_2 = chain Z and resid 1 and name AG
+      atom_selection_3 = chain C and resid 4 and name N1
+      angle_ideal = 90
+      sigma = 6
+    }
+    angle {
+      action = add
+      atom_selection_1 = chain C and resid 4 and name N1
+      atom_selection_2 = chain Z and resid 1 and name AG
+      atom_selection_3 = chain C and resid 1 and name N3
+      angle_ideal = 90
+      sigma = 6
+    }
+  }
+}
+"""
 
 
 EXPECTED_PHIL = """\
@@ -204,6 +365,35 @@ class AutoRefineCoordinationTests(unittest.TestCase):
                     refine(**kwargs)
             self.assertEqual(sorted((run / "AutoRefine").glob("round_*")), rounds)
 
+    def test_square_planar_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = self.run_with_metal(root)
+
+            def refine(**kwargs):
+                return execute_autorefine(
+                    run, make_refine(root, final_work=0.244, final_free=0.267), make_mtz_dump(root),
+                    phenix_version=PHENIX_21, environment={"PATH": "/usr/bin:/bin"},
+                    macro_cycles=1, auto_select_success=False, **kwargs,
+                )
+
+            rounds = sorted((run / "AutoRefine").glob("round_*"))
+            for kwargs, message in (
+                ({"coordination_geometry": ("sqp",)}, "--geometry needs --coordination"),
+                ({"coordination": ("Z:1=C:1/N3,C:2/O4",), "coordination_geometry": ("sqp",)},
+                 "needs 4 donors"),
+            ):
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(AutoRefineError, message):
+                    refine(**kwargs)
+            self.assertEqual(sorted((run / "AutoRefine").glob("round_*")), rounds)
+
+            result = refine(coordination=(SquarePlanarTests.SQUARE,), coordination_geometry=("sqp",))
+            restraint = result.report_path.parent / "metal_coordination.eff"
+            self.assertEqual(restraint.read_text(), EXPECTED_SQP_PHIL)
+            site = json.loads(result.report_path.read_text())["inputs"]["metal_coordination"]["sites"][0]
+            self.assertEqual((site["geometry"], site["preset"], len(site["angles"])),
+                             ("square planar (sqp)", "sqp", 4))
+
     def test_command_line_forwards_and_prints(self):
         from nasolve.cli import main
         from nasolve.config import AppConfig
@@ -239,10 +429,11 @@ class AutoRefineCoordinationTests(unittest.TestCase):
               patch("nasolve.cli.resolve_view_profile", side_effect=CootViewError("no view")),
               redirect_stdout(output)):
             code = main(["autorefine", str(run), "--coordination", "B:101=B:4/N2T,A:12/O4",
-                         "--coordination", "B:102=B:3/O6"])
+                         "--coordination", "B:102=B:3/O6", "--geometry", "B:102=sqp"])
         self.assertEqual(code, 0)
         self.assertEqual(call.call_args.kwargs["coordination"],
                          ["B:101=B:4/N2T,A:12/O4", "B:102=B:3/O6"])
+        self.assertEqual(call.call_args.kwargs["coordination_geometry"], ["B:102=sqp"])
         self.assertIn("Coordination: AG B:101 AG: B:4 N2T 2.3 A (now 2.17), A:12 O4 2.5 A (now 2.84); "
                       "linear: O4-N2T-AG 0 +/- 3 deg (now 25.7)", output.getvalue())
         self.assertIn("Warning: a warning", output.getvalue())

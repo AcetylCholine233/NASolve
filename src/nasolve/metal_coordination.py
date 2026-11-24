@@ -11,7 +11,13 @@ heavy-atom site to its binding partners (donors) in phenix.refine's own form,
   physical angle: at 0 degrees the metal lies on the line through the two
   donors, which keeps the donor-metal-donor geometry linear without the
   180-degree angle at the metal;
-* for three or more donors, bonds only (no preset angle).
+* for three or more donors, bonds only (no preset angle), unless
+  ``--geometry`` names a preset (:data:`GEOMETRY_PRESETS`, user 2026-11-24).
+  For now ``sqp``, square planar: four donors listed in order around the
+  square, and one ``angle`` donor-metal-donor (metal at the vertex) for each
+  pair listed next to each other, the last with the first, ideal 90 degrees,
+  sigma 6. The pairs across the square are not restrained; four 90-degree
+  angles add up to 360 degrees only when the donors are coplanar.
 
 Values chosen by the lab for now (user, 2026-11-23). Phenix adds custom bonds
 to its bonding list, so the metal and its donors are no longer treated as
@@ -43,6 +49,24 @@ LINEAR_ANGLE_SIGMA = 3.0
 #: A donor this much farther from the metal than its ideal length is reported.
 FAR_DONOR_MARGIN = 1.5
 
+
+@dataclass(frozen=True)
+class GeometryPreset:
+    code: str            # --geometry value
+    name: str
+    donors: int          # number of donors, listed in order
+    angle_ideal: float   # each donor-metal-donor angle between neighbours
+    angle_sigma: float
+
+
+#: ``--geometry`` presets (user, 2026-11-24).
+GEOMETRY_PRESETS: dict[str, GeometryPreset] = {
+    "sqp": GeometryPreset("sqp", "square planar", 4, 90.0, 6.0),
+}
+#: Neighbouring donors this far apart (deg) look like a pair across the
+#: square (donors not listed in order): reported.
+NEIGHBOUR_ANGLE_WARNING = 135.0
+
 _SITE = re.compile(r"^\s*([A-Za-z0-9]{1,4}):(-?\d+[A-Za-z]?)(?:/([^,=\s/]+))?\s*$")
 
 
@@ -66,6 +90,13 @@ class CoordinationSpec:
     text: str
     metal: AtomRef
     donors: tuple[AtomRef, ...]
+
+
+@dataclass(frozen=True)
+class GeometrySpec:
+    text: str
+    metal: AtomRef | None    # None: the only --coordination site
+    preset: GeometryPreset
 
 
 @dataclass(frozen=True)
@@ -97,7 +128,9 @@ class CoordinationBond:
 
 @dataclass(frozen=True)
 class CoordinationAngle:
-    atoms: tuple[ModelAtom, ModelAtom, ModelAtom]   # donor 2, donor 1 (vertex), metal
+    # Vertex in the middle: linear (donor 2, donor 1, metal); preset
+    # (donor, metal, next donor).
+    atoms: tuple[ModelAtom, ModelAtom, ModelAtom]
     ideal: float
     sigma: float
     current: float
@@ -108,11 +141,19 @@ class CoordinationSite:
     spec: CoordinationSpec
     metal: ModelAtom
     bonds: tuple[CoordinationBond, ...]
-    angle: CoordinationAngle | None
+    angles: tuple[CoordinationAngle, ...]
     warnings: tuple[str, ...]
+    preset: GeometryPreset | None = None
+
+    @property
+    def angle(self) -> CoordinationAngle | None:
+        """The linear-coordination angle (two donors, no --geometry)."""
+        return self.angles[0] if self.preset is None and self.angles else None
 
     @property
     def geometry(self) -> str:
+        if self.preset is not None:
+            return f"{self.preset.name} ({self.preset.code})"
         count = len(self.bonds)
         if count == 2:
             return "linear"
@@ -122,6 +163,10 @@ class CoordinationSite:
 def _table_text() -> str:
     return ", ".join(f"{metal.title()}-{donor} {length:g} A"
                      for (metal, donor), length in COORDINATION_LENGTHS.items())
+
+
+def _presets_text() -> str:
+    return ", ".join(f"{code} = {preset.name}" for code, preset in GEOMETRY_PRESETS.items())
 
 
 def _site(text: str, what: str) -> AtomRef:
@@ -154,6 +199,23 @@ def parse_coordination(text: str) -> CoordinationSpec:
     if len(set(donors)) != len(donors):
         raise CoordinationError(f"--coordination {text!r}: a donor is given twice")
     return CoordinationSpec(text=text.strip(), metal=metal, donors=donors)
+
+
+def parse_geometry(text: str) -> GeometrySpec:
+    """``--geometry PRESET`` (the only --coordination site) or ``METAL=PRESET``."""
+    if text.count("=") > 1:
+        raise CoordinationError(f"--geometry {text!r}: give PRESET or METAL=PRESET, e.g. B:101=sqp")
+    metal = None
+    value = text
+    if "=" in text:
+        metal_text, value = text.split("=")
+        metal = _site(metal_text, "Metal")
+    preset = GEOMETRY_PRESETS.get(value.strip().lower())
+    if preset is None:
+        raise CoordinationError(
+            f"--geometry {text.strip()!r}: unknown geometry {value.strip()!r} (presets: {_presets_text()})"
+        )
+    return GeometrySpec(text=text.strip(), metal=metal, preset=preset)
 
 
 def _element(line: str) -> str:
@@ -218,13 +280,46 @@ def _angle(vertex, first, second) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
 
 
-def plan_coordination(model: Path, specs: Sequence[CoordinationSpec]) -> list[CoordinationSite]:
-    """Resolve each specification in ``model`` and build its restraints."""
+def _geometries(residues, specs, metals, geometries) -> list[GeometryPreset | None]:
+    """The --geometry preset of each --coordination site (None: no preset)."""
+    if geometries and not specs:
+        raise CoordinationError("--geometry needs --coordination (the metal and its donors)")
+    keys = [(metal.chain, metal.resid, metal.name) for metal in metals]
+    presets: list[GeometryPreset | None] = [None] * len(specs)
+    for geometry in geometries:
+        if geometry.metal is None:
+            if len(specs) != 1:
+                raise CoordinationError(
+                    f"--geometry {geometry.text!r}: name the metal when there are several "
+                    f"--coordination (e.g. --geometry {specs[0].metal.label}={geometry.preset.code})"
+                )
+            index = 0
+        else:
+            metal = _find(residues, geometry.metal, "Metal")
+            key = (metal.chain, metal.resid, metal.name)
+            if key not in keys:
+                raise CoordinationError(f"--geometry {geometry.text!r}: {metal.label} has no --coordination")
+            index = keys.index(key)
+        if presets[index] is not None:
+            raise CoordinationError(f"--geometry: {metals[index].label} is given two geometries")
+        presets[index] = geometry.preset
+    return presets
+
+
+def _donor_label(atom: ModelAtom) -> str:
+    return f"{atom.chain}:{atom.resid} {atom.name}"
+
+
+def plan_coordination(model: Path, specs: Sequence[CoordinationSpec],
+                      geometries: Sequence[GeometrySpec] = ()) -> list[CoordinationSite]:
+    """Resolve each specification in ``model`` and build its restraints;
+    ``geometries`` (``--geometry``) give sites a preset geometry."""
     residues = read_model_atoms(model)
+    metals = [_find(residues, spec.metal, "Metal") for spec in specs]
+    presets = _geometries(residues, specs, metals, geometries)
     sites: list[CoordinationSite] = []
     seen: set[tuple[str, str, str]] = set()
-    for spec in specs:
-        metal = _find(residues, spec.metal, "Metal")
+    for spec, metal, preset in zip(specs, metals, presets):
         key = (metal.chain, metal.resid, metal.name)
         if key in seen:
             raise CoordinationError(f"--coordination: {metal.label} is given twice")
@@ -247,14 +342,32 @@ def plan_coordination(model: Path, specs: Sequence[CoordinationSpec]) -> list[Co
                     f"{donor.label} is {current:.2f} A from {metal.label} (ideal {ideal:g} A)"
                 )
             bonds.append(CoordinationBond(metal, donor, ideal, BOND_SIGMA, round(current, 3)))
-        angle = None
-        if len(bonds) == 2:
+        angles = []
+        if preset is not None:
+            if len(bonds) != preset.donors:
+                raise CoordinationError(
+                    f"--geometry {preset.code} ({preset.name}) needs {preset.donors} donors, listed in "
+                    f"order around the square; {metal.label} has {len(bonds)}"
+                )
+            donors = [bond.donor for bond in bonds]
+            for index, first in enumerate(donors):
+                second = donors[(index + 1) % len(donors)]
+                current = round(_angle(metal.xyz, first.xyz, second.xyz), 2)
+                angles.append(CoordinationAngle(atoms=(first, metal, second), ideal=preset.angle_ideal,
+                                                sigma=preset.angle_sigma, current=current))
+                if current > NEIGHBOUR_ANGLE_WARNING:
+                    warnings.append(
+                        f"{_donor_label(first)} and {_donor_label(second)} are {current:.1f} deg apart at "
+                        f"{metal.label}: {preset.name} takes the donors in order around the square, "
+                        "each next to the one before"
+                    )
+        elif len(bonds) == 2:
             first, second = bonds[0].donor, bonds[1].donor
-            angle = CoordinationAngle(
+            angles.append(CoordinationAngle(
                 atoms=(second, first, metal), ideal=LINEAR_ANGLE_IDEAL, sigma=LINEAR_ANGLE_SIGMA,
                 current=round(_angle(first.xyz, second.xyz, metal.xyz), 2),
-            )
-        sites.append(CoordinationSite(spec, metal, tuple(bonds), angle, tuple(warnings)))
+            ))
+        sites.append(CoordinationSite(spec, metal, tuple(bonds), tuple(angles), tuple(warnings), preset))
     return sites
 
 
@@ -265,6 +378,14 @@ def coordination_phil(sites: Sequence[CoordinationSite]) -> str:
         "# Bonds: lab table, sigma %g A. Linear (two donors): angle donor-donor-metal "
         "%g deg, sigma %g (not a physical angle; keeps the metal on the donor-donor line)."
         % (BOND_SIGMA, LINEAR_ANGLE_IDEAL, LINEAR_ANGLE_SIGMA),
+    ]
+    for preset in dict.fromkeys(site.preset for site in sites if site.preset is not None):
+        lines.append(
+            f"# {preset.name.capitalize()} (--geometry {preset.code}): angle donor-metal-donor "
+            "between donors listed next to each other (and the last with the first), "
+            f"{preset.angle_ideal:g} deg, sigma {preset.angle_sigma:g}."
+        )
+    lines += [
         "refinement {",
         "  geometry_restraints.edits {",
     ]
@@ -280,16 +401,16 @@ def coordination_phil(sites: Sequence[CoordinationSite]) -> str:
                 f"      sigma = {bond.sigma:g}",
                 "    }",
             ]
-        if site.angle is not None:
-            first, vertex, last = site.angle.atoms
+        for angle in site.angles:
+            first, vertex, last = angle.atoms
             lines += [
                 "    angle {",
                 "      action = add",
                 f"      atom_selection_1 = {first.selection}",
                 f"      atom_selection_2 = {vertex.selection}",
                 f"      atom_selection_3 = {last.selection}",
-                f"      angle_ideal = {site.angle.ideal:g}",
-                f"      sigma = {site.angle.sigma:g}",
+                f"      angle_ideal = {angle.ideal:g}",
+                f"      sigma = {angle.sigma:g}",
                 "    }",
             ]
     lines += ["  }", "}", ""]
@@ -308,10 +429,17 @@ def coordination_record(site: CoordinationSite) -> dict[str, object]:
              "ideal": bond.ideal, "sigma": bond.sigma, "current": bond.current}
             for bond in site.bonds
         ],
+        "preset": site.preset.code if site.preset is not None else None,
+        # "angle": the linear angle (kept from the first version); "angles": all.
         "angle": None if site.angle is None else {
             "atoms": [atom.label for atom in site.angle.atoms],
             "ideal": site.angle.ideal, "sigma": site.angle.sigma, "current": site.angle.current,
         },
+        "angles": [
+            {"atoms": [atom.label for atom in angle.atoms],
+             "ideal": angle.ideal, "sigma": angle.sigma, "current": angle.current}
+            for angle in site.angles
+        ],
         "warnings": list(site.warnings),
         "summary": describe_site(site),
     }
@@ -326,11 +454,17 @@ def describe_site(site: CoordinationSite) -> str:
         first, vertex, metal = site.angle.atoms
         text += (f"; linear: {first.name}-{vertex.name}-{metal.name} "
                  f"{site.angle.ideal:g} +/- {site.angle.sigma:g} deg (now {site.angle.current:.1f})")
+    elif site.preset is not None:
+        text += (f"; {site.preset.name} {site.preset.angle_ideal:g} +/- {site.preset.angle_sigma:g} deg: "
+                 + ", ".join(f"{_donor_label(first)}-{vertex.name}-{_donor_label(last)} "
+                             f"(now {angle.current:.1f})"
+                             for angle in site.angles for first, vertex, last in [angle.atoms]))
     return text
 
 
 __all__ = [
-    "BOND_SIGMA", "COORDINATION_LENGTHS", "LINEAR_ANGLE_IDEAL", "LINEAR_ANGLE_SIGMA",
-    "CoordinationError", "CoordinationSite", "CoordinationSpec", "coordination_phil",
-    "coordination_record", "describe_site", "parse_coordination", "plan_coordination",
+    "BOND_SIGMA", "COORDINATION_LENGTHS", "GEOMETRY_PRESETS", "LINEAR_ANGLE_IDEAL",
+    "LINEAR_ANGLE_SIGMA", "CoordinationError", "CoordinationSite", "CoordinationSpec",
+    "GeometryPreset", "GeometrySpec", "coordination_phil", "coordination_record", "describe_site",
+    "parse_coordination", "parse_geometry", "plan_coordination",
 ]
