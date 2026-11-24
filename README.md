@@ -285,6 +285,19 @@ records the original path and checksum; the original file is not changed.
 ./nasolve autorefine "$RUN" --from refine-002 --model "edited.pdb"
 ```
 
+To keep an atom where it is for a round, typically a heavy atom whose
+position you trust, give `--fix-xyz CHAIN:RESID[/ATOM]` (repeatable; the atom
+name may be left out when the residue has one atom, e.g. `B:101`). It is left
+out of coordinate refinement (`refine.sites.individual = all and not (...)`);
+its occupancy, B and anomalous terms are still refined, and restraints to it
+(e.g. `--coordination`) move the other atoms instead. NASolve compares its
+coordinates before and after; if it moved (more than 0.002 A) the round is
+for review. It applies to that round only: give it again for the next one.
+
+```bash
+./nasolve autorefine "$RUN" --fix-xyz B:101
+```
+
 **Restraints are inherited along a branch.** A round uses every restraint
 file of the checkpoint it starts from: PostMR's (NARestraints pairs and
 stacking, linked phosphate, ReadySet supplement, curated dictionaries) and

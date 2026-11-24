@@ -284,6 +284,17 @@ def _find(residues, ref: AtomRef, what: str) -> ModelAtom:
     return found[0][1]
 
 
+def parse_atom(text: str, what: str = "Atom") -> AtomRef:
+    """``CHAIN:RESID`` or ``CHAIN:RESID/ATOM`` (e.g. for ``--fix-xyz``)."""
+    return _site(text, what)
+
+
+def find_atom(residues, ref: AtomRef, what: str = "Atom") -> ModelAtom:
+    """The one atom ``ref`` names in ``read_model_atoms`` output (the atom name
+    may be left out when the residue has one atom)."""
+    return _find(residues, ref, what)
+
+
 def _angle(vertex, first, second) -> float:
     u = [a - b for a, b in zip(first, vertex)]
     v = [a - b for a, b in zip(second, vertex)]
@@ -523,5 +534,6 @@ __all__ = [
     "BOND_SIGMA", "COORDINATION_LENGTHS", "GEOMETRY_PRESETS", "LINEAR_ANGLE_IDEAL",
     "LINEAR_ANGLE_SIGMA", "CoordinationError", "CoordinationSite", "CoordinationSpec",
     "GeometryPreset", "GeometrySpec", "coordination_phil", "coordination_record", "describe_site",
-    "parse_coordination", "parse_geometry", "plan_coordination",
+    "find_atom", "parse_atom", "parse_coordination", "parse_geometry", "plan_coordination",
+    "read_model_atoms",
 ]

@@ -483,7 +483,8 @@ class AutoRefineCoordinationTests(unittest.TestCase):
             executables={"phenix.refine": Path("/phenix/phenix.refine"),
                          "phenix.mtz.dump": Path("/phenix/phenix.mtz.dump")},
         )
-        payload = {"inputs": {"observation_labels": [], "start_model": {
+        payload = {"fixed_xyz": [{"atom": "AG B:101 AG", "shift": 0.0}],
+                   "inputs": {"observation_labels": [], "start_model": {
             "source": "/data/edited.pdb", "copy": "/r/start_model.pdb",
             "instead_of": "/r/round_001/refined_001.pdb"}, "metal_coordination": {
             "file": "/r/metal_coordination.eff", "inherited": [], "sites": [{
@@ -503,8 +504,10 @@ class AutoRefineCoordinationTests(unittest.TestCase):
               redirect_stdout(output)):
             code = main(["autorefine", str(run), "--coordination", "B:101=B:4/N2T,A:12/O4",
                          "--coordination", "B:102=B:3/O6", "--geometry", "B:102=sqp",
-                         "--model", "/data/edited.pdb"])
+                         "--model", "/data/edited.pdb", "--fix-xyz", "B:101"])
         self.assertEqual(code, 0)
+        self.assertEqual(call.call_args.kwargs["fix_xyz"], ["B:101"])
+        self.assertIn("Fixed in place: AG B:101 AG (moved 0.000 A)", output.getvalue())
         self.assertEqual(call.call_args.kwargs["start_model"], Path("/data/edited.pdb"))
         self.assertIn("Starting model: /data/edited.pdb (instead of the model of refine-001)",
                       output.getvalue())

@@ -10,6 +10,19 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine RUN --fix-xyz CHAIN:RESID[/ATOM]` (user's request,
+  2026-11-24): keeps an atom (e.g. a heavy atom) in place for one round by
+  leaving it out of `refine.sites.individual` (`all and not (...)`;
+  repeatable). Checked against Phenix 2.2.1: coordinate refinement and global
+  real-space refinement use that selection, the morph step is switched off
+  (`task_table.run_morph` is empty), local real-space fitting refits protein
+  side chains. Occupancy, B and anomalous terms are still refined. The atom
+  is resolved in the round's starting model (`--model` included; unknown,
+  ambiguous or repeated atoms refused before anything is created); its start
+  and final coordinates are recorded in the round report (`fixed_xyz`, empty
+  without the option; checkpoint `fixed_xyz` lists the atoms), and an atom
+  that moved more than 0.002 A sends the round to review. Not inherited.
+  phenix.refine simulated.
 - `nasolve autorefine RUN --model FILE` (user's request, 2026-11-24): the
   round starts from FILE (a PDB, e.g. edited in Coot) instead of the model of
   the checkpoint it continues (`--from`, or the current one), whose data,

@@ -347,6 +347,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     autorefine.add_argument(
+        "--fix-xyz", action="append", default=[], metavar="CHAIN:RESID[/ATOM]",
+        help=(
+            "keep this atom (e.g. a heavy atom) in place for this round: it is left out of "
+            "coordinate refinement; its occupancy, B and anomalous terms are still refined. "
+            "Repeat for more atoms. The atom name may be left out when its residue has one "
+            "atom (e.g. B:101). Not kept by later rounds"
+        ),
+    )
+    autorefine.add_argument(
         "--geometry", action="append", default=[], metavar="[METAL=]PRESET",
         help=(
             "preset coordination geometry for a --coordination site: sqp = square planar "
@@ -1381,6 +1390,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             coordination=args.coordination,
             coordination_geometry=args.geometry,
             start_model=args.model,
+            fix_xyz=args.fix_xyz,
             progress=progress,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
@@ -1412,6 +1422,12 @@ def _autorefine(args: argparse.Namespace) -> int:
             if isinstance(item, dict):
                 print(f"Extra restraints: {Path(str(item.get('copy'))).name} "
                       f"(copy of {item.get('source')})")
+        for item in payload.get("fixed_xyz") or []:
+            if isinstance(item, dict):
+                shift = item.get("shift")
+                print(f"Fixed in place: {item.get('atom')} "
+                      + (f"(moved {shift:.3f} A)" if isinstance(shift, (int, float))
+                         else "(not found in the refined model)"))
         coordination = inputs.get("metal_coordination")
         if isinstance(coordination, dict):
             for item in coordination.get("sites") or []:

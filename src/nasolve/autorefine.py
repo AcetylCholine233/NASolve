@@ -26,12 +26,16 @@ from .checkpoints import (
     resolve_checkpoint,
 )
 from .metal_coordination import (
+    AtomRef,
     CoordinationError,
     coordination_phil,
     coordination_record,
+    find_atom,
+    parse_atom,
     parse_coordination,
     parse_geometry,
     plan_coordination,
+    read_model_atoms,
 )
 from .model_assessment import file_sha256
 from .run_context import artifact_reference, resolve_artifact_path
@@ -422,6 +426,20 @@ def anomalous_selections(report: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(selections)
 
 
+#: A --fix-xyz atom that moved more than this (A) sends the round to review
+#: (PDB coordinates have 0.001 A precision).
+FIXED_XYZ_TOLERANCE = 0.002
+
+
+def _individual_sites(fixed: Sequence[str]) -> str:
+    """``refine.sites.individual``: every atom, less the --fix-xyz atoms."""
+    if not fixed:
+        return "all"
+    if len(fixed) == 1:
+        return f"all and not ({fixed[0]})"
+    return "all and not (" + " or ".join(f"({selection})" for selection in fixed) + ")"
+
+
 def write_recipe_parameters(
     path: Path,
     *,
@@ -438,6 +456,7 @@ def write_recipe_parameters(
     refine_coordinates: bool = True,
     xyz_wxc_scale: float = 0.5,
     anomalous_groups: Mapping[str, Mapping[str, object]] | None = None,
+    fixed_site_selections: Sequence[str] = (),
 ) -> tuple[str, ...]:
     if macro_cycles < 1:
         raise AutoRefineError("AutoRefine requires at least one macrocycle")
@@ -464,6 +483,8 @@ def write_recipe_parameters(
         raise AutoRefineError("Explicit scattering values require fixed or fdp-only mode")
     if real_space_sites and not refine_coordinates:
         raise AutoRefineError("Real-space coordinate refinement requires refine_coordinates")
+    if fixed_site_selections and not refine_coordinates:
+        raise AutoRefineError("--fix-xyz needs a recipe that refines coordinates")
     if (
         isinstance(xyz_wxc_scale, bool)
         or not isinstance(xyz_wxc_scale, (int, float))
@@ -534,7 +555,7 @@ def write_recipe_parameters(
         "  refine {",
         "    strategy = " + " ".join(f"*{strategy}" for strategy in strategies),
         "    sites {",
-        "      individual = all",
+        "      individual = " + _individual_sites(fixed_site_selections),
         "    }",
     ])
     if adp_mode == "group":
@@ -1677,6 +1698,7 @@ def execute_autorefine(
     coordination: Sequence[str] = (),
     coordination_geometry: Sequence[str] = (),
     start_model: Path | None = None,
+    fix_xyz: Sequence[str] = (),
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
@@ -1706,6 +1728,12 @@ def execute_autorefine(
     parent's model before anything is created, then copied to
     ``round_NNN/start_model.pdb`` (what phenix.refine gets) and recorded
     (``inputs.start_model``, checkpoint ``start_model``) with its checksum.
+
+    ``fix_xyz`` (``--fix-xyz CHAIN:RESID[/ATOM]``) leaves those atoms out of
+    coordinate refinement (``refine.sites.individual = all and not (...)``)
+    for this round only; occupancy, B and anomalous terms are still refined.
+    Their start and final coordinates are recorded (``fixed_xyz``); one that
+    moved more than ``FIXED_XYZ_TOLERANCE`` sends the round to review.
     """
     xyz_wxc_scale = (
         0.1
@@ -1841,6 +1869,20 @@ def execute_autorefine(
         start_digest = file_sha256(start_source)
         model = start_source
     validate_refined_model(model, report)
+    fixed_atoms = []
+    if fix_xyz:
+        try:
+            start_atoms = read_model_atoms(model)
+            for text in fix_xyz:
+                atom = find_atom(start_atoms, parse_atom(text, "--fix-xyz atom"), "--fix-xyz atom")
+                if any((item.chain, item.resid, item.name) == (atom.chain, atom.resid, atom.name)
+                       for item in fixed_atoms):
+                    raise CoordinationError(f"--fix-xyz: {atom.label} is given twice")
+                fixed_atoms.append(atom)
+        except CoordinationError as exc:
+            raise AutoRefineError(str(exc)) from exc
+        if not refine_coordinates:
+            raise AutoRefineError("--fix-xyz needs a recipe that refines coordinates")
     parent_coordination = parent.get("metal_coordination") or []
     if not isinstance(parent_coordination, list):
         raise AutoRefineError("Parent checkpoint metal-coordination record is malformed")
@@ -2006,6 +2048,7 @@ def execute_autorefine(
         refine_coordinates=refine_coordinates,
         xyz_wxc_scale=xyz_wxc_scale,
         anomalous_groups=anomalous_groups,
+        fixed_site_selections=[atom.selection for atom in fixed_atoms],
     )
     command = build_refine_command(
         refine_executable,
@@ -2122,6 +2165,25 @@ def execute_autorefine(
         except AutoRefineError as exc:
             compatibility_error = str(exc)
 
+    # --fix-xyz: did the fixed atoms stay where they were?
+    fixed_records: list[dict[str, object]] = []
+    if fixed_atoms:
+        final_atoms = read_model_atoms(output_model) if output_model is not None else {}
+        for atom in fixed_atoms:
+            try:
+                final = find_atom(final_atoms, AtomRef(atom.chain, atom.resid, atom.name))
+            except CoordinationError:
+                final = None
+            fixed_records.append({
+                "atom": atom.label,
+                "selection": atom.selection,
+                "start_xyz": list(atom.xyz),
+                "final_xyz": list(final.xyz) if final is not None else None,
+                "shift": round(math.dist(atom.xyz, final.xyz), 3) if final is not None else None,
+            })
+    moved_fixed = [record for record in fixed_records
+                   if record["shift"] is not None and record["shift"] > FIXED_XYZ_TOLERANCE]
+
     file_reference = _cached_file_referencer(run)
     model_reference = file_reference(output_model) if output_model is not None else None
     extra_restraint_references = [
@@ -2225,6 +2287,13 @@ def execute_autorefine(
         checkpoint_status = "REVIEW"
         usable = True
         exit_code = 2
+    elif moved_fixed:
+        status = "AUTOREFINE_REVIEW"
+        message = ("Refinement completed, but atoms fixed with --fix-xyz moved: "
+                   + ", ".join(f"{record['atom']} {record['shift']:.3f} A" for record in moved_fixed))
+        checkpoint_status = "REVIEW"
+        usable = True
+        exit_code = 0
     elif terminal_geometry_audit["requires_review"] is True:
         status = "AUTOREFINE_REVIEW"
         message = (
@@ -2283,6 +2352,7 @@ def execute_autorefine(
             if terminal_protection_record is not None
             else {}
         ),
+        **({"fixed_xyz": [record["atom"] for record in fixed_records]} if fixed_records else {}),
         **(
             {"start_model": {"source": start_model_record["source"],
                              **file_reference(model)}}
@@ -2328,6 +2398,7 @@ def execute_autorefine(
         "processor_count": nproc,
         "command": command,
         "preflight_command": preflight_command,
+        "fixed_xyz": fixed_records,   # --fix-xyz atoms: start and final coordinates
         "parameters": str(parameters),
         "terminal_geometry_protection": terminal_protection_record,
         "inputs": {
