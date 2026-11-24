@@ -18,8 +18,8 @@ one at a time, the one furthest from theory first, lowers the occupancy when
 f″ is below theory or raises it when above, and runs the same round again,
 until f″ is accepted (within ±10% of theory by default) or the site has had
 `--max-iterations` adjustments (default 5). Coot is not opened for these rounds: the maps of an
-f″-only round are not diagnostic. With `--final-eff MANUAL.eff`, a converged
-run ends with a final round that uses every setting of that manual
+f″-only round are not diagnostic. With `--final-eff MANUAL.eff`, the run
+ends (converged or not, since 2026-11-24) with a final round that uses every setting of that manual
 phenix.refine run, with AutoFDP's model, the metal occupancies held and f′/f″
 fixed at the calibrated values (step 6); its result opens in Coot. That
 round also serves as the B confirmation (step 5). It is partially
@@ -82,7 +82,7 @@ nasolve autofdp AutoMR/run_001/AutoRefine/round_002
 nasolve autofdp AutoMR/run_001/AutoRefine/round_002/refined_001.pdb staraniso_alldata-unique.mtz
 ```
 
-The first also ends a converged run with a final round from
+The first also ends the run with a final round from
 `round_002/refined_001.eff`; the second only with `--final-eff`.
 
 | Option | Default | Meaning |
@@ -106,7 +106,7 @@ The first also ends a converged run with a final round from
 | `--occupancy-floor` | 0.05 *(to confirm)* | lowest occupancy step 3 sets; a site still below theory there goes to review (identity review once step 4 exists) |
 | `--map-sigma` | 3.0 *(to confirm)* | mFo-DFc peak or hole at the site that counts as significant |
 | `--no-confirm-b` | confirm on | skip the separate B-only round (not used: the final round serves as the B confirmation for now) |
-| `--final-eff` | none (with `ROUND`: its `refined_NNN.eff`) | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; when every site converges, the final round (step 6) uses all of its settings |
+| `--final-eff` | none (with `ROUND`: its `refined_NNN.eff`) | parameters (.eff) of a manual phenix.refine run, e.g. the GUI's `.phenix/project_data/refine_NN.eff`; after the f″ rounds, converged or not, the final round (step 6) uses all of its settings |
 | `--plan` | off | do the preflight and print what was read, without refining or writing anything |
 | `--no-coot` | open Coot | do not open the final round in Coot (only a final round opens Coot) |
 | `--coot` | configured Coot | Coot executable for the final round's view |
@@ -386,7 +386,13 @@ but how its starting parameters are given is provisional. A manual .eff is
 the interim way; the user is considering a better one.
 
 
-Runs only when every calibrated site converged (`AUTOFDP_CONVERGED`), in
+Runs after the f″ rounds, whether every calibrated site converged
+(`AUTOFDP_CONVERGED`) or not (`AUTOFDP_REVIEW`; user, 2026-11-24: it first
+ran only after convergence), but not after a failed f″ round. A site that
+did not converge keeps its last occupancy and its f″ from the last f″ round,
+like the others; the run stays `AUTOFDP_REVIEW` (exit 2), with the final
+round's result added to the message and `final_round.after_status` saying
+which it followed. It runs in
 `run_NNN/final_round/`. It is a normal refinement with the settings of a
 manual phenix.refine run (`--final-eff`, for example the GUI's
 `.phenix/project_data/refine_NN.eff`), changed only where the metal sites
@@ -477,7 +483,7 @@ same level as `AutoMR/` in a NASolve dataset), or inside
   adjusted occupancy) for each step-3 round;
 - `final_model.pdb`: the last round's model, with the adjusted occupancies
   (not written when a round failed);
-- `final_round/` (with `--final-eff`, after convergence): `final_input.eff`,
+- `final_round/` (with `--final-eff`, after the f″ rounds): `final_input.eff`,
   `autofdp_final.params`, `command.json`, the phenix.refine logs and outputs
   (`final_001.pdb`, `final_001.mtz`, ...);
 - `CootGUI/`: Coot's log, backups and map script for the final round's view;
@@ -520,7 +526,8 @@ same level as `AutoMR/` in a NASolve dataset), or inside
   - `final_model`, `settings` (with `max_iterations`, `occupancy_floor` and
     `final_eff`), `status`, `message` and `steps` (`occupancy_adjustment`:
     `done`, `review`, `failed` or `not run`; `final_round`: `done`, `failed`,
-    `skipped: not converged` or `not requested`).
+    `skipped: an f″ round failed` or `not requested`); `final_round` also
+    records `after_status` (the status of the f″ rounds it followed).
 
   Planned, in addition: mFo-DFc and anomalous map σ at each site and the
   identity check.

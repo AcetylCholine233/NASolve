@@ -38,6 +38,7 @@ from nasolve.phil_text import scan, starred, unquote
 from .test_autofdp_round import (
     ENV,
     SILVER,
+    make_fdp_refine,
     _plan,
     make_inputs,
     make_ready_set,
@@ -434,7 +435,10 @@ class FinalRoundTests(unittest.TestCase):
             }])
             self.assertEqual(anomalous_phil.read_text().count("anomalous_scatterers"), 1)  # untouched
 
-    def test_no_final_round_without_convergence_or_without_an_eff(self):
+    def test_final_round_also_after_a_review_but_not_after_a_failure(self):
+        # User, 2026-11-24: run the final round even when f'' does not
+        # converge (it ran only after AUTOFDP_CONVERGED). Each site keeps its
+        # last occupancy and refined f''; the run stays AUTOFDP_REVIEW.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model, mtz = make_inputs(root)
@@ -443,10 +447,26 @@ class FinalRoundTests(unittest.TestCase):
             result = _execute(_plan(root, model, mtz, refine=refine, final_eff=eff), root,
                               refine=refine, max_iterations=0)
             self.assertEqual(result.status, STATUS_REVIEW)
-            self.assertIsNone(result.final)
-            self.assertFalse((result.run_directory / "final_round").exists())
+            self.assertIsNotNone(result.final)
+            self.assertEqual(result.final.status, STATUS_FINAL_DONE)
+            self.assertTrue((result.run_directory / "final_round" / "final_001.pdb").is_file())
+            site, = result.final.sites
+            self.assertEqual((site.occupancy, site.f_double_prime), (0.9, 5.0))
+            self.assertTrue(result.message.startswith("B:101 AG: "))
+            self.assertTrue(result.message.endswith(result.final.message))
             report = json.loads(result.report_path.read_text())
-            self.assertEqual(report["steps"]["final_round"], "skipped: not converged")
+            self.assertEqual(report["status"], STATUS_REVIEW)
+            self.assertEqual(report["steps"]["final_round"], "done")
+            self.assertEqual(report["final_round"]["after_status"], STATUS_REVIEW)
+
+            # An f'' round that failed: no final round.
+            failing = make_fdp_refine(root, {})
+            failed = _execute(_plan(root, model, mtz, refine=failing, final_eff=eff), root, refine=failing)
+            self.assertEqual(failed.status, STATUS_FAILED)
+            self.assertIsNone(failed.final)
+            self.assertEqual(json.loads(failed.report_path.read_text())["steps"]["final_round"],
+                             "skipped: an f'' round failed")
+
             plain = _execute(_plan(root, model, mtz, refine=make_final_refine(root)), root,
                              refine=make_final_refine(root))
             self.assertIsNone(plain.final)
@@ -552,6 +572,16 @@ class FinalCommandTests(unittest.TestCase):
             launched.assert_not_called()
             self.assertIn("Maps: ", out)
 
+            # Not converged: the final round still runs; exit 2 (review).
+            code, out, err, _ = self._main(
+                root, [str(model), str(mtz), "--final-eff", str(eff), "--no-coot", "--max-iterations", "0"],
+                make_final_refine(root, fdp=5.0))
+            self.assertEqual(code, 2, err)
+            self.assertIn("AutoFDP final round and B confirmation", out)
+            self.assertIn("Not every site converged: each site kept its last occupancy and "
+                          "refined f'' in the final round", out)
+            self.assertNotIn("not run, because not every site converged", out)
+
             def broken(*args, **kwargs):
                 raise CootViewError("fixture: no display")
             code, out, err, _ = self._main(
@@ -564,7 +594,7 @@ class FinalCommandTests(unittest.TestCase):
                 root, [str(model), str(mtz), "--final-eff", str(eff), "--plan"], make_final_refine(root)
             )
             self.assertEqual(code, 0, err)
-            self.assertIn("If every site converges: a final round with the settings of refine_12.eff", out)
+            self.assertIn("After the f'' rounds: a final round with the settings of refine_12.eff", out)
             launched.assert_not_called()
 
             code, out, err, launched = self._main(
@@ -572,8 +602,9 @@ class FinalCommandTests(unittest.TestCase):
                 make_final_refine(root, fdp=5.0),
             )
             self.assertEqual(code, 2, err)
-            self.assertIn("AutoFDP final round: not run, because not every site converged", out)
-            launched.assert_not_called()
+            # Not converged: the final round runs all the same and opens in Coot.
+            self.assertIn("AutoFDP final round and B confirmation", out)
+            launched.assert_called_once()
 
             code, _, err, _ = self._main(
                 root, [str(model), str(mtz), "--coot", "/opt/coot", "--no-coot"], make_final_refine(root)

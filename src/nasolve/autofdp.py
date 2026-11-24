@@ -2220,11 +2220,15 @@ def execute_autofdp(
             for outcome in outcomes
         ],
     }
-    # The final round: only after convergence, with the manual .eff's settings.
+    # The final round, with the manual .eff's settings: after the f'' rounds,
+    # whether every site converged or not (user, 2026-11-24; it ran only after
+    # convergence). Each site keeps its last occupancy and refined f''.
     final: FinalRoundResult | None = None
     if plan.final_eff is not None:
-        if status != STATUS_CONVERGED:
-            report["steps"]["final_round"] = "skipped: not converged"
+        converged = status == STATUS_CONVERGED
+        lead = "every site converged" if converged else "not every site converged"
+        if final_model is None:
+            report["steps"]["final_round"] = "skipped: an f'' round failed"
         else:
             report.update(status=status, message=message)
             report["steps"]["final_round"] = "running"
@@ -2236,15 +2240,17 @@ def execute_autofdp(
                 )
             except AutoFDPError as exc:
                 report["steps"]["final_round"] = "failed"
-                report["final_round"] = {"status": STATUS_FAILED, "message": str(exc)}
+                report["final_round"] = {"status": STATUS_FAILED, "message": str(exc),
+                                         "after_status": status}
                 status = STATUS_FAILED
-                message = f"every site converged, but the final round could not run: {exc}"
+                message = f"{lead}, but the final round could not run: {exc}"
             else:
-                report["final_round"] = _final_entry(final, plan.final_eff, run_directory)
+                report["final_round"] = {**_final_entry(final, plan.final_eff, run_directory),
+                                         "after_status": status}
                 report["steps"]["final_round"] = "done" if final.status == STATUS_FINAL_DONE else "failed"
                 if final.status != STATUS_FINAL_DONE:
                     status = STATUS_FAILED
-                    message = f"every site converged, but {final.message}"
+                    message = f"{lead}, but {final.message}"
                 else:
                     message += f"; {final.message}"
     report.update(status=status, message=message)
@@ -2854,7 +2860,7 @@ def final_round(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> FinalRoundResult:
-    """The final round after convergence, with the manual .eff's settings.
+    """The final round after the f'' rounds, with the manual .eff's settings.
 
     Partially implemented: it also serves as the B confirmation (occupancy
     and f'/f'' held, B refined), and how its starting parameters are given

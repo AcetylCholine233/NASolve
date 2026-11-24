@@ -28,7 +28,7 @@ class AutoFDPSpecificationTests(unittest.TestCase):
         self.assertIn("Steps 1 to 3 are implemented", flowing)
         self.assertIn("Coot is not opened for these rounds: the maps of an f''-only round "
                       "are not diagnostic", flowing)
-        self.assertIn("With --final-eff, a converged run ends with a final round", flowing)
+        self.assertIn("With --final-eff, the run ends (converged or not) with a final round", flowing)
         self.assertIn("The final round is PARTIALLY IMPLEMENTED: it also serves as the B "
                       "confirmation", flowing)
         self.assertIn("The identity check is NOT IMPLEMENTED YET", flowing)

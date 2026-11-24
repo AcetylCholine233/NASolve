@@ -390,8 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
             "theory or raise it if above, and run the same round again, until f'' is "
             "accepted or the site has had --max-iterations adjustments "
             "(step 3). Coot is not opened for these rounds: the maps of an "
-            "f''-only round are not diagnostic. With --final-eff, a converged run "
-            "ends with a final round that uses every setting of that manual .eff, "
+            "f''-only round are not diagnostic. With --final-eff, the run ends "
+            "(converged or not) with a final round that uses every setting of that "
+            "manual .eff, "
             "with AutoFDP's model, the metal occupancies held and f'/f'' fixed at "
             "the calibrated values; its result opens in Coot. The final round is "
             "PARTIALLY IMPLEMENTED: it also serves as the B confirmation, and how "
@@ -484,11 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
     autofdp.add_argument(
         "--final-eff", type=Path, metavar="MANUAL.eff",
         help="parameters of a manual phenix.refine run (e.g. the GUI's "
-             ".phenix/project_data/refine_NN.eff). When every site converges, a "
-             "final round uses all of its settings with AutoFDP's model, the metal "
-             "sites' occupancy held and f'/f'' fixed at the calibrated values, and "
-             "opens the result in Coot. Not with an AutoRefine round, whose "
-             "refined_NNN.eff is used",
+             ".phenix/project_data/refine_NN.eff). After the f'' rounds, whether or "
+             "not every site converged, a final round uses all of its settings with "
+             "AutoFDP's model, the metal sites' occupancy held and f'/f'' fixed at the "
+             "last values, and opens the result in Coot. Not with an AutoRefine round, "
+             "whose refined_NNN.eff is used",
     )
     autofdp.add_argument(
         "--plan", action="store_true",
@@ -2041,8 +2042,8 @@ def _print_fdp_round(result, max_iterations: int) -> None:
                     f"{label:<14}{start + ' -> ' + final:>14}{refined:>9}"
                     f"{outcome.f_double_prime_theory:>9.2f}{deviation:>11}  {outcome.reason}"
                 )
-    if result.plan.final_eff is not None and result.final is None and first.status == STATUS_ROUND_DONE:
-        print("\nAutoFDP final round: not run, because not every site converged")
+    if result.plan.final_eff is not None and result.final is None and result.final_model is None:
+        print("\nAutoFDP final round: not run, because an f'' round failed")
     _print_final_round(result)
     print(f"\n{_color(result.status, status_color)}: {result.message}")
     if result.final_model is not None:
@@ -2061,6 +2062,9 @@ def _print_final_round(result) -> None:
         f"settings of {result.plan.final_eff.source.name}; metal occupancy held, "
         "f' and f'' fixed)"
     )
+    if result.status != "AUTOFDP_CONVERGED" and final.status == "AUTOFDP_FINAL_DONE":
+        print("Not every site converged: each site kept its last occupancy and refined f'' "
+              "in the final round")
     print(f"R-work {_format_metric(final.r_work)}, R-free {_format_metric(final.r_free)}")
     print(f"\n{'Site':<14}{'Occ':>6}{'f-prime':>9}{'fdp':>9}{'B before':>10}{'B after':>9}")
     for site in final.sites:
@@ -2182,7 +2186,7 @@ def _autofdp(args: argparse.Namespace) -> int:
             )
             if plan.final_eff is not None:
                 print(
-                    "If every site converges: a final round with the settings of "
+                    "After the f'' rounds: a final round with the settings of "
                     f"{plan.final_eff.source.name}, AutoFDP's final model, the metal "
                     "occupancies held and f'/f'' fixed at the calibrated values"
                 )

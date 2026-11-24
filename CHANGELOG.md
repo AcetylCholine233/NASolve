@@ -169,6 +169,15 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- AutoFDP runs the final round (`--final-eff`, or an AutoRefine round's
+  .eff) after the f'' rounds whether or not every site converged (user's
+  request, 2026-11-24); it ran only after AUTOFDP_CONVERGED. A site that did
+  not converge keeps its last occupancy and its f'' from the last f'' round,
+  like the others. The run stays AUTOFDP_REVIEW (exit 2) with the final
+  round's result appended to the message; a failed final round still makes it
+  AUTOFDP_FAILED. No final round after a failed f'' round (`steps.final_round`
+  "skipped: an f'' round failed" instead of "skipped: not converged");
+  `final_round.after_status` records which status it followed.
 - The anomalous map opens in Coot as an ordinary map, named "Anomalous
   (ANOM/PANOM)", not as a difference map (user's request, 2026-11-23): gold
   (`set_map_colour` 1.0, 0.84, 0.0; `coot_view.ANOMALOUS_MAP_COLOUR`),
