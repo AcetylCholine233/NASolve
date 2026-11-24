@@ -1531,6 +1531,25 @@ class AutoRefineTests(unittest.TestCase):
         self.assertEqual(stats["bond_rmsd"], 0.009)
         self.assertEqual(stats["diagnostics"], ["WARNING geometry needs inspection"])
 
+    def test_a_message_ending_in_a_colon_keeps_its_first_detail_line(self):
+        # U-Y_Ag run_004 round_010 (Phenix 2.2.1): the cause is on the next line.
+        stats = parse_refinement_statistics(
+            "  Number of atoms with unknown nonbonded energy type symbols: 1\n"
+            '    "HETATM  858  O1  H2O B 102 .*.     O  "\n'
+            "Sorry: Fatal problems interpreting model file:\n"
+            "  Number of atoms with unknown nonbonded energy type symbols: 1\n"
+            "    Please edit the model file to resolve the problems and/or supply a\n"
+            "Sorry:\n"
+            "\n"
+            "WARNING: something\n"
+        )
+        self.assertEqual(stats["diagnostics"], [
+            "Sorry: Fatal problems interpreting model file: "
+            "Number of atoms with unknown nonbonded energy type symbols: 1",
+            "Sorry:",
+            "WARNING: something",
+        ])
+
     def test_missing_free_r_is_rejected_without_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

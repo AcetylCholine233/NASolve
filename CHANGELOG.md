@@ -229,6 +229,14 @@ entries are reconstructed from repository history.
 
 ### Fixed
 
+- AutoRefine output for a round phenix.refine stopped before writing a model
+  (2026-11-24, U-Y_Ag run_004 round_010): it now says "Nothing to inspect:
+  phenix.refine stopped before writing a model." instead of the Coot-view
+  lookup's "Schema-2 checkpoint model is not portable"; and a Phenix message
+  that ends in a colon ("Sorry: Fatal problems interpreting model file:")
+  keeps its first indented detail line ("Number of atoms with unknown
+  nonbonded energy type symbols: 1"), in the terminal and the round report's
+  `statistics.diagnostics`.
 - A model imported with `nasolve checkpoints add --model` keeps its parent
   checkpoint's `metal_coordination` record as well as its restraint files.
   Before, only the files came along, so a later `--coordination` for the same

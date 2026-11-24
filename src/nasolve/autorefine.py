@@ -1265,9 +1265,16 @@ def parse_refinement_statistics(log_text: str, model_text: str = "") -> dict[str
     initial = series[0] if series else None
     final_geometry = geometry[-1] if geometry else (None, None)
     diagnostics: list[str] = []
-    for line in log_text.splitlines():
+    log_lines = log_text.splitlines()
+    for index, line in enumerate(log_lines):
         stripped = line.strip()
         if re.match(r"^(?:WARNING\b|ERROR\b|Sorry\b|FATAL\b)", stripped, re.I):
+            # "Sorry: Fatal problems interpreting model file:" names its cause
+            # on the next, indented line: keep that line with it.
+            following = log_lines[index + 1] if index + 1 < len(log_lines) else ""
+            if (stripped.endswith(":") and len(stripped) > len(stripped.split(":")[0]) + 1
+                    and following[:1].isspace() and following.strip()):
+                stripped = f"{stripped} {following.strip()}"
             if stripped not in diagnostics:
                 diagnostics.append(stripped)
     return {

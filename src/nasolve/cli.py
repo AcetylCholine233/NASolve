@@ -1509,6 +1509,11 @@ def _autorefine(args: argparse.Namespace) -> int:
         print(_color("Current checkpoint updated.", "32"))
     else:
         print("Current checkpoint unchanged.")
+    if result.model_path is None:
+        # phenix.refine stopped before writing a model: nothing for Coot.
+        print("Nothing to inspect: phenix.refine stopped before writing a model.")
+        print("See the full log and report above.")
+        return result.exit_code
     try:
         resolve_view_profile(result.run_directory, checkpoint=result.checkpoint_id)
     except CootViewError as exc:

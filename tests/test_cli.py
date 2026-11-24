@@ -94,6 +94,42 @@ class CLITests(unittest.TestCase):
                     self.assertNotIn('select this result', text)
                     select.assert_not_called()
 
+    def test_failed_round_without_a_model_says_so(self):
+        # 2026-11-24: a round phenix.refine stopped before writing a model
+        # (U-Y_Ag run_004 round_010) printed "Schema-2 checkpoint model is not
+        # portable" from the Coot-view lookup instead.
+        with tempfile.TemporaryDirectory() as directory:
+            run = make_checkpoint_run(Path(directory))
+            report_path = run / 'refinement-report.json'
+            report_path.write_text('{}')
+            installation = SimpleNamespace(
+                version='2.2.1', environment={},
+                executables={'phenix.refine': Path('/phenix/refine'), 'phenix.mtz.dump': Path('/phenix/dump')},
+            )
+            result = AutoRefineResult(
+                status='AUTOREFINE_FAILED', message='fixture', exit_code=2,
+                run_directory=run, round_directory=run / 'AutoRefine' / 'round_002',
+                checkpoint_id='refine-002', parent_checkpoint='postmr',
+                report_path=report_path, log_path=run / 'refine.log',
+                model_path=None, model_cif=None, reflection_cif=None, map_coefficients=None,
+                statistics={}, selected_as_current=False,
+            )
+            with (
+                patch('nasolve.cli.load_config', return_value=AppConfig()),
+                patch('nasolve.cli.discover_phenix', return_value=installation),
+                patch('nasolve.cli.remember_phenix'), patch('nasolve.cli.save_config'),
+                patch('nasolve.cli.execute_autorefine', return_value=result),
+                patch('nasolve.cli.resolve_view_profile',
+                      side_effect=CootViewError('Schema-2 checkpoint model is not portable')) as resolve,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(main(['autorefine', str(run)]), 2)
+            text = output.getvalue()
+            resolve.assert_not_called()
+            self.assertIn('Nothing to inspect: phenix.refine stopped before writing a model.', text)
+            self.assertNotIn('not portable', text)
+            self.assertIn('See the full log and report above.', text)
+
     def test_show_active_run_and_explicit_overrides_report_exact_sources(self):
         with symlinked_temporary_directory() as directory:
             root = Path(directory)
