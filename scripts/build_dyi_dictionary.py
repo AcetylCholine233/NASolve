@@ -29,6 +29,16 @@ held the triazole in the base plane. The ideal coordinates still have the
 triazole coplanar (one conformation, N2T on the C5 side); refinement does not
 keep it there.
 
+DYI's conformational torsions are restrained as phenix.refine restrains a
+standard dC (user, 2026-11-25): glycosidic chi -150 (210) with period 2 and
+e.s.d. 40 (AceDRG: period 6, e.s.d. 10), the five sugar ring torsions e.s.d.
+40 (AceDRG 2.8-6.3; both puckers, C2'- and C3'-endo, stay as alternatives),
+backbone beta e.s.d. 25 and gamma e.s.d. 20 (AceDRG 10). Targets and the
+other periods are AceDRG's. The tight AceDRG torsions pulled DYI into their
+minima in the first round and held it there. alpha and epsilon name OP3 and
+HO3', which a DNA chain link removes; they and the torsions that keep the
+rings flat are unchanged.
+
 One value is chosen here: C4-N4 = 1.411 +/- 0.015 A. AceDRG gives
 1.424 A for a triazol-1-yl on a carbon between two carbons (TZF, ZRS; 1.429 A
 on quinolin-4-yl, TQU) and 1.399 A on a carbon between two nitrogens
@@ -73,6 +83,15 @@ DROPPED = {"H41", "H42"}
 #: carbon, ring carbon, N1, C5), about the central bond. Left out: the
 #: central bond is free to rotate.
 INTER_RING = ("CAE", "CAK", "NAL", "CAG")
+#: dC torsion id -> (e.s.d., period or None to keep AceDRG's): the restraints
+#: phenix.refine uses for a standard dC (chi -150 sinusoidal period 2 sigma 40,
+#: sugar sigma 40, beta sigma 25, gamma sigma 20).
+DC_LIKE_TORSIONS = {
+    **{f"{pucker}-chi": (40.0, 2) for pucker in ("C2e", "C3e")},
+    **{f"{pucker}-nyu{index}": (40.0, None) for pucker in ("C2e", "C3e") for index in range(5)},
+    "beta": (25.0, None),
+    "gamma": (20.0, None),
+}
 SMILES = "n3cncn3C1=NC(=O)N(C=C1)[C@H]2C[C@H](O)[C@@H](CO[P](O)(O)=O)O2"
 
 
@@ -159,6 +178,15 @@ def assemble(dc: dict, tzf: dict) -> dict[str, list[dict]]:
 
     torsions = [{**row, "comp_id": CODE} for row in rows(dc, "_chem_comp_tor", TOR)
                 if not DROPPED & set(names(row, ("atom_id_1", "atom_id_2", "atom_id_3", "atom_id_4")))]
+    missing = set(DC_LIKE_TORSIONS) - {row["id"] for row in torsions}
+    if missing:
+        raise ValueError(f"DC.cif has no torsion {', '.join(sorted(missing))}")
+    for row in torsions:
+        if row["id"] in DC_LIKE_TORSIONS:
+            esd, period = DC_LIKE_TORSIONS[row["id"]]
+            row["value_angle_esd"] = f"{esd:.3f}"
+            if period is not None:
+                row["period"] = str(period)
     for row in rows(tzf, "_chem_comp_tor", TOR):
         quad = names(row, ("atom_id_1", "atom_id_2", "atom_id_3", "atom_id_4"))
         if quad == list(INTER_RING):
@@ -349,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
         f"Chosen here: C4-N4 {C4_N4[0]:.3f} +/- {C4_N4[1]:.3f} A (AceDRG 1.424 on C(C,C), 1.399 on C(N,N));",
         "N4 energy type NR5. Coordinates: DC's for shared atoms; triazole fitted, coplanar, N2T on the C5 side.",
         "Each ring its own plane (plan-1 base with N4, plan-2 triazole with C4); no torsion restraint about C4-N4 (free to rotate).",
+        "Sugar, chi and backbone torsions restrained as phenix.refine restrains dC: chi period 2 e.s.d. 40,",
+        "sugar ring e.s.d. 40 (C2'/C3'-endo alternatives kept), beta 25, gamma 20; AceDRG targets.",
     ]
     write(args.output, restraints, header)
     print(f"wrote {args.output}: {len(restraints['atom'])} atoms, {len(restraints['bond'])} bonds, "

@@ -259,7 +259,10 @@ graph overlap from placing the one new sulfur atom on the wrong side of a base.
 `C38` and `5IU` use the same guarded construction with parents `DC` and `DT`.
 `DYI` (O4-triazolyl-dU, parent `DC`) declares `N4 -> N4` along the parent
 `C4-N4` vector, at the dictionary's 1.41 A rather than dC's 1.33 A, so the
-overlaid triazole keeps its bonds to `N4`.
+overlaid triazole keeps its bonds to `N4`. Its sugar, glycosidic and
+backbone torsions are restrained as phenix.refine restrains a standard dC
+(chi period 2 e.s.d. 40, sugar ring e.s.d. 40, beta 25, gamma 20), not with
+AceDRG's tighter e.s.d.s, which held DYI's conformation in refinement.
 Their iodine is placed along the external bisector defined by the mapped
 `C4-C5-C6` ring atoms, using the C-I distance from the dictionary's ideal
 coordinate set and the parent `C5` occupancy and B factor. The transformed Coot

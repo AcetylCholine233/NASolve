@@ -161,6 +161,51 @@ class DYIEntryTests(unittest.TestCase):
             centred = points - points.mean(axis=0)
             self.assertLess(float(np.abs(centred @ np.linalg.svd(centred)[2][-1]).max()), 0.01)
 
+    def test_conformational_torsions_are_as_loose_as_phenix_dc(self):
+        """DYI's sugar, chi and backbone torsions are restrained as phenix.refine
+        restrains a standard dC (user, 2026-11-25): chi -150 period 2 sigma 40,
+        sugar ring torsions sigma 40, beta sigma 25, gamma sigma 20. AceDRG's
+        (sigma 2.8-10, chi period 6) held DYI's conformation in round 1's minima."""
+        values = component()
+        rows = {
+            identifier: (float(value), float(esd), int(period))
+            for identifier, value, esd, period in zip(
+                values["_chem_comp_tor.id"], values["_chem_comp_tor.value_angle"],
+                values["_chem_comp_tor.value_angle_esd"], values["_chem_comp_tor.period"])
+        }
+        for pucker in ("C2e", "C3e"):
+            self.assertEqual(rows[f"{pucker}-chi"], (210.0, 40.0, 2))   # dC: -150, sinusoidal 2, 40
+            for index in range(5):
+                with self.subTest(torsion=f"{pucker}-nyu{index}"):
+                    value, esd, period = rows[f"{pucker}-nyu{index}"]
+                    self.assertEqual((esd, period), (40.0, 1))
+        # Targets unchanged: both puckers stay as alternatives.
+        self.assertEqual(rows["C2e-nyu2"][0], 326.9)
+        self.assertEqual(rows["C3e-nyu2"][0], 35.9)
+        self.assertEqual(rows["beta"], (180.0, 25.0, 3))
+        self.assertEqual(rows["gamma"], (180.0, 20.0, 3))
+        # Torsions that keep the rings flat are AceDRG's, unchanged.
+        self.assertEqual(rows["const_sp2_sp2_8"], (180.0, 5.0, 2))
+        self.assertEqual(rows["tz_const_29"], (0.0, 10.0, 2))
+
+        # The copy Phenix reads folds the C3'-endo targets into alt_value_angle
+        # and keeps sigma 40 on the folded sugar rows.
+        from nasolve.ligand_profiles import normalize_ccp4_torsion_alternates
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "DYI.cif"
+            self.assertTrue(normalize_ccp4_torsion_alternates(DICTIONARY, runtime))
+            folded = component(runtime)
+        folded_rows = {
+            identifier: (esd, alternative)
+            for identifier, esd, alternative in zip(
+                folded["_chem_comp_tor.id"], folded["_chem_comp_tor.value_angle_esd"],
+                folded["_chem_comp_tor.alt_value_angle"])
+        }
+        self.assertNotIn("C3e-nyu2", folded_rows)
+        self.assertEqual(float(folded_rows["C2e-nyu2"][0]), 40.0)
+        self.assertEqual(float(folded_rows["C2e-nyu2"][1]), 35.9)
+        self.assertEqual(float(folded_rows["C2e-chi"][0]), 40.0)
+
     def test_validation_rejects_an_incomplete_or_wrong_dictionary(self):
         text = DICTIONARY.read_text(encoding="utf-8")
         bad = {

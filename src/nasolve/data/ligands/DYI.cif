@@ -7,6 +7,8 @@
 # Chosen here: C4-N4 1.411 +/- 0.015 A (AceDRG 1.424 on C(C,C), 1.399 on C(N,N));
 # N4 energy type NR5. Coordinates: DC's for shared atoms; triazole fitted, coplanar, N2T on the C5 side.
 # Each ring its own plane (plan-1 base with N4, plan-2 triazole with C4); no torsion restraint about C4-N4 (free to rotate).
+# Sugar, chi and backbone torsions restrained as phenix.refine restrains dC: chi period 2 e.s.d. 40,
+# sugar ring e.s.d. 40 (C2'/C3'-endo alternatives kept), beta 25, gamma 20; AceDRG targets.
 data_comp_list
 loop_
 _chem_comp.id
@@ -195,22 +197,22 @@ _chem_comp_tor.atom_id_4
 _chem_comp_tor.value_angle
 _chem_comp_tor.value_angle_esd
 _chem_comp_tor.period
-DYI C2e-chi         "O4'" "C1'" N1    C2     210.000 10.000 6
-DYI C2e-nyu0        "C4'" "O4'" "C1'" "C2'"  340.700 6.300  1
-DYI C2e-nyu1        "O4'" "C1'" "C2'" "C3'"  32.800  4.900  1
-DYI C2e-nyu2        "C1'" "C2'" "C3'" "C4'"  326.9   3.600  1
-DYI C2e-nyu3        "C2'" "C3'" "C4'" "O4'"  22.600  4.500  1
-DYI C2e-nyu4        "C3'" "C4'" "O4'" "C1'"  357.700 6.100  1
-DYI C3e-chi         "O4'" "C1'" N1    C2     210.000 10.000 6
-DYI C3e-nyu0        "C4'" "O4'" "C1'" "C2'"  2.8     6.100  1
-DYI C3e-nyu1        "O4'" "C1'" "C2'" "C3'"  335.00  4.900  1
-DYI C3e-nyu2        "C1'" "C2'" "C3'" "C4'"  35.9    2.800  1
-DYI C3e-nyu3        "C2'" "C3'" "C4'" "O4'"  324.700 3.100  1
-DYI C3e-nyu4        "C3'" "C4'" "O4'" "C1'"  20.500  5.100  1
+DYI C2e-chi         "O4'" "C1'" N1    C2     210.000 40.000 2
+DYI C2e-nyu0        "C4'" "O4'" "C1'" "C2'"  340.700 40.000 1
+DYI C2e-nyu1        "O4'" "C1'" "C2'" "C3'"  32.800  40.000 1
+DYI C2e-nyu2        "C1'" "C2'" "C3'" "C4'"  326.9   40.000 1
+DYI C2e-nyu3        "C2'" "C3'" "C4'" "O4'"  22.600  40.000 1
+DYI C2e-nyu4        "C3'" "C4'" "O4'" "C1'"  357.700 40.000 1
+DYI C3e-chi         "O4'" "C1'" N1    C2     210.000 40.000 2
+DYI C3e-nyu0        "C4'" "O4'" "C1'" "C2'"  2.8     40.000 1
+DYI C3e-nyu1        "O4'" "C1'" "C2'" "C3'"  335.00  40.000 1
+DYI C3e-nyu2        "C1'" "C2'" "C3'" "C4'"  35.9    40.000 1
+DYI C3e-nyu3        "C2'" "C3'" "C4'" "O4'"  324.700 40.000 1
+DYI C3e-nyu4        "C3'" "C4'" "O4'" "C1'"  20.500  40.000 1
 DYI alpha           "C5'" "O5'" P     OP3    -60.000 10.00  3
-DYI beta            P     "O5'" "C5'" "C4'"  180.000 10.00  3
+DYI beta            P     "O5'" "C5'" "C4'"  180.000 25.000 3
 DYI epsi            "C4'" "C3'" "O3'" "HO3'" 180.000 10.00  3
-DYI gamma           "O5'" "C5'" "C4'" "C3'"  180.000 10.00  3
+DYI gamma           "O5'" "C5'" "C4'" "C3'"  180.000 20.000 3
 DYI const_sp2_sp2_4 O2    C2    N1    "C1'"  0.000   5.0    2
 DYI const_18        C5    C6    N1    "C1'"  180.000 10.0   2
 DYI const_sp2_sp2_6 O2    C2    N3    C4     180.000 5.0    2

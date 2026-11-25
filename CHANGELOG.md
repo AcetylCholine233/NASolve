@@ -169,6 +169,22 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- DYI dictionary: the sugar, glycosidic and backbone torsions are restrained
+  as phenix.refine restrains a standard dC (user's request, 2026-11-25).
+  Glycosidic chi (O4'-C1'-N1-C2, 210 deg) period 2, e.s.d. 40 (was period 6,
+  e.s.d. 10; phenix's dC: -150, sinusoidal period 2, sigma 40); the five
+  sugar ring torsions e.s.d. 40 (were 2.8-6.3; the C2'- and C3'-endo targets
+  both stay, folded into `alt_value_angle` in the copy phenix reads); beta
+  e.s.d. 25 and gamma e.s.d. 20 (were 10). Targets, the ring-flattening
+  torsions, alpha and epsilon (OP3 and HO3', removed by the chain link) are
+  unchanged; bonds, angles, planes and coordinates too. In Y-T run_002 and
+  U-Y_Ag run_004 the AceDRG torsions pulled DYI's chi and pucker into their
+  minima in the first round and held them (chi moved 29 deg, the largest
+  change of any residue). Built by `scripts/build_dyi_dictionary.py`
+  (`DC_LIKE_TORSIONS`); compared with the dC torsions in those runs'
+  phenix.refine .geo files (Phenix 2.2.1). Runs prepared earlier keep the
+  dictionary PostMR recorded: rerun PostMR (`--force-overwrite`) to use this
+  one, or pass a run's `relax_DYI_torsions_v2.eff` to AutoRefine.
 - AutoFDP runs the final round (`--final-eff`, or an AutoRefine round's
   .eff) after the f'' rounds whether or not every site converged (user's
   request, 2026-11-24); it ran only after AUTOFDP_CONVERGED. A site that did
