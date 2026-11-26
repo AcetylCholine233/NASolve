@@ -10,6 +10,35 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- Watching a running AutoRefine round in Coot (user's request, 2026-11-26):
+  `nasolve show RUN --live`. phenix.refine run from the command line writes its
+  model only at the end; with `PHENIX_GUI_ENVIRONMENT=1` (the hook Phenix's GUI
+  uses; Phenix 2.2.1 `phenix/refinement/driver.py`, `runtime.py`) it saves
+  `.status.pkl` (model plus filled 2mFo-DFc and mFo-DFc map coefficients) at
+  the start, after every macro-cycle and at the end. AutoRefine now sets that
+  variable for the refinement (not the dry run), copies each snapshot once it
+  has settled and converts it with phenix.python into
+  `round_NNN/live/snapshot_NNN.pdb` and `snapshot_NNN_maps.mtz`
+  (2FOFCWT/PH2FOFCWT, FOFCWT/PHFOFCWT), listed in `live/status.json` (schema 1:
+  state, macro-cycles, start model and ligand dictionaries relative to `live/`,
+  snapshots with label, R-work, R-free, bonds, angles). The terminal shows one
+  line per snapshot (start, macro-cycle K of N, final). Conversion runs beside
+  the refinement; its failures are warnings, it stops after 3 in a row, and
+  the round's refinement and result are unchanged. The round report gains
+  `live` (enabled/reason, method, status file, state, snapshot count,
+  warnings); without phenix.python next to phenix.refine the variable is not
+  set and the round runs as before. `show --live` opens the newest snapshot of
+  the running round (or of the last round with snapshots; a round whose
+  NASolve process has gone is shown as stopped) with the round's start model
+  and dictionaries, in `CootGUI/autorefine-live/refine-NNN/`; a "NASolve live"
+  toolbar button, "Load latest snapshot" (`nasolve_live_load_latest()`),
+  replaces model and maps with the newest, keeping contour levels, the
+  refinement map and the view. Snapshots carry no anomalous map. The only
+  other effect of the variable in phenix.refine is the wording of one R-free
+  flag error message. Ctrl+C still stops phenix.refine (now also recorded as
+  `interrupted` in `live/status.json`). Simulated phenix.refine, phenix.python
+  and Coot; the converter and Coot calls were checked against Phenix 2.2.1's
+  and Coot's source, not yet run live.
 - `nasolve autorefine RUN --fix-xyz CHAIN:RESID[/ATOM]` (user's request,
   2026-11-24): keeps an atom (e.g. a heavy atom) in place for one round by
   leaving it out of `refine.sites.individual` (`all and not (...)`;

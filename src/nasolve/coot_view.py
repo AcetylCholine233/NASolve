@@ -14,6 +14,13 @@ from typing import Callable, Mapping, Sequence
 from .checkpoints import READABLE_SCHEMA_VERSIONS
 from .model_assessment import file_sha256
 from .ligand_profiles import is_modification_only
+from .live_refinement import (
+    MAP_LABELS as LIVE_MAP_LABELS,
+    LiveViewError,
+    find_live_round,
+    latest_snapshot,
+    resolve_listed_path,
+)
 from .run_context import artifact_reference, dataset_directory, resolve_artifact_path
 
 
@@ -52,6 +59,8 @@ class ViewProfile:
     checkpoint_id: str | None = None
     anomalous_map_paths: tuple[Path, ...] = ()
     metal_merge: MetalMerge | None = None
+    #: A running (or finished) AutoRefine round's newest snapshot.
+    live: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,7 @@ class CootViewResult:
     map_source: str
     checkpoint_id: str | None
     metal_merge: MetalMerge | None = None
+    live: Mapping[str, object] | None = None
 
 
 def _required_file(path: Path, description: str) -> Path:
@@ -739,6 +749,56 @@ def _autorefine_profile(
     )
 
 
+def _live_profile(run: Path) -> ViewProfile:
+    """The newest snapshot of the running AutoRefine round (or of the last round with any)."""
+    try:
+        status_path, status = find_live_round(run)
+        snapshot = latest_snapshot(status_path, status)
+    except LiveViewError as exc:
+        raise CootViewError(str(exc)) from exc
+    live_directory = status_path.parent
+    start_model = resolve_listed_path(status.get("start_model"), live_directory)
+    extra = (start_model,) if start_model is not None and start_model.is_file() else ()
+    dictionaries = []
+    for value in status.get("dictionaries") or []:
+        path = resolve_listed_path(value, live_directory)
+        if path is None or not path.is_file():
+            raise CootViewError(f"Ligand dictionary of the live round is missing: {value}")
+        dictionaries.append(path)
+    checkpoint = str(status.get("checkpoint"))
+    _checkpoint_component(checkpoint)
+    state = str(status.get("state"))
+
+    def number(key: str) -> str:
+        value = snapshot.get(key)
+        return f"{value:.4f}" if isinstance(value, float) else "?"
+
+    summary = (f"snapshot {snapshot.get('number')} of {checkpoint} ({snapshot.get('label')}; "
+               f"R-work {number('r_work')}, R-free {number('r_free')}; refinement {state})")
+    return ViewProfile(
+        "autorefine-live",
+        snapshot["model_path"],
+        snapshot["maps_path"],
+        extra,
+        tuple(dictionaries),
+        f"live {summary}",
+        "2mFo-DFc and mFo-DFc of the same snapshot",
+        checkpoint,
+        (),
+        live={
+            "status": str(status_path),
+            "checkpoint": checkpoint,
+            "state": state,
+            "number": snapshot.get("number"),
+            "label": snapshot.get("label"),
+            "summary": summary,
+            "model": str(snapshot["model_path"]),
+            "maps": str(snapshot["maps_path"]),
+            "start_model": str(start_model) if extra else None,
+        },
+    )
+
+
 def resolve_view_profile(
     run_directory: Path,
     *,
@@ -867,6 +927,154 @@ try:
 except Exception as exc:
     # Ordinary --auto maps remain available; make optional-map failures visible.
     report_anomalous_map("error", message=str(exc), paths=map_paths)
+'''
+    )
+
+
+def _live_script(live: Mapping[str, object]) -> str:
+    """In-Coot loader for a running AutoRefine round's snapshots.
+
+    Names the snapshot model and maps, and adds a "NASolve live" toolbar
+    button, "Load latest snapshot", that reads the round's live/status.json
+    and replaces the shown snapshot (model and both maps) with the newest
+    one, keeping the contour levels and the view. The start model stays open
+    for comparison. Python: ``nasolve_live_load_latest()``.
+    """
+    settings = {key: live.get(key) for key in
+                ("status", "checkpoint", "number", "label", "summary", "model", "maps",
+                 "start_model")}
+    settings["labels"] = [list(pair) for pair in LIVE_MAP_LABELS]
+    return (
+        "import coot\nimport json\nimport os\n\n"
+        f"NASOLVE_LIVE = {json.dumps(settings)}\n"
+        '''
+_nasolve_live = {"number": NASOLVE_LIVE["number"], "model": -1, "maps": []}
+
+
+def _nasolve_live_tell(message, dialog=False):
+    print("NASOLVE_LIVE " + json.dumps({"message": message}), flush=True)
+    try:
+        if dialog:
+            coot.info_dialog("NASolve live: " + message)
+        else:
+            coot.add_status_bar_text("NASolve live: " + message)
+    except Exception:
+        pass
+
+
+def _nasolve_live_same(a, b):
+    return bool(a) and bool(b) and os.path.realpath(a) == os.path.realpath(b)
+
+
+def _nasolve_live_find(model_path, maps_path):
+    model, maps = -1, []
+    for imol in range(coot.graphics_n_molecules()):
+        if coot.is_valid_model_molecule(imol):
+            if _nasolve_live_same(coot.molecule_name(imol), model_path):
+                model = imol
+        elif coot.is_valid_map_molecule(imol):
+            if _nasolve_live_same(coot.mtz_hklin_for_map(imol), maps_path):
+                maps.append(imol)
+    return model, maps
+
+
+def _nasolve_live_name(model, maps, number, label):
+    if model >= 0:
+        coot.set_molecule_name(model, "Live snapshot %s (%s)" % (number, label))
+    for imol in maps:
+        kind = "mFo-DFc" if coot.map_is_difference_map(imol) else "2mFo-DFc"
+        coot.set_molecule_name(imol, "Live %s (snapshot %s)" % (kind, number))
+
+
+def nasolve_live_load_latest(*_ignored):
+    """Replace the shown snapshot with the newest one the refinement has saved."""
+    with open(NASOLVE_LIVE["status"], encoding="utf-8") as handle:
+        status = json.load(handle)
+    snapshots = status.get("snapshots") or []
+    state = status.get("state")
+    if not snapshots:
+        _nasolve_live_tell("no snapshot yet (refinement %s)" % state)
+        return None
+    latest = snapshots[-1]
+    if latest.get("number") == _nasolve_live["number"]:
+        note = "" if state == "running" else (
+            "; refinement %s - open the result with nasolve show (anomalous map included)" % state)
+        _nasolve_live_tell("already showing the newest snapshot, %s (%s)%s"
+                           % (latest.get("number"), latest.get("label"), note))
+        return None
+    directory = os.path.dirname(NASOLVE_LIVE["status"])
+    model_path = os.path.join(directory, os.path.basename(latest["model"]))
+    maps_path = os.path.join(directory, os.path.basename(latest["maps"]))
+    old_model, old_maps = _nasolve_live["model"], list(_nasolve_live["maps"])
+    levels = {}
+    for imol in old_maps:
+        if coot.is_valid_map_molecule(imol):
+            levels[bool(coot.map_is_difference_map(imol))] = coot.get_contour_level_in_sigma(imol)
+    refinement_map = coot.imol_refinement_map()
+    scroll_map = coot.scroll_wheel_map()
+    coot.set_recentre_on_read_pdb(0)
+    model = coot.read_pdb(model_path)
+    (amplitude, phase), (diff_amplitude, diff_phase) = NASOLVE_LIVE["labels"]
+    two = coot.make_and_draw_map(maps_path, amplitude, phase, "", 0, 0)
+    diff = coot.make_and_draw_map(maps_path, diff_amplitude, diff_phase, "", 0, 1)
+    if model < 0 or two < 0 or diff < 0:
+        _nasolve_live_tell("Coot could not open snapshot %s (%s)" % (latest.get("number"), model_path),
+                           dialog=True)
+        return None
+    coot.set_contour_level_in_sigma(two, levels.get(False, 1.0))
+    coot.set_contour_level_in_sigma(diff, levels.get(True, 3.0))
+    if old_model >= 0 and coot.is_valid_model_molecule(old_model):
+        coot.close_molecule(old_model)
+    for imol in old_maps:
+        if coot.is_valid_map_molecule(imol):
+            coot.close_molecule(imol)
+    if refinement_map in old_maps or refinement_map < 0:
+        coot.set_imol_refinement_map(two)
+    if scroll_map in old_maps or scroll_map < 0:
+        coot.set_scroll_wheel_map(two)
+    _nasolve_live.update(number=latest.get("number"), model=model, maps=[two, diff])
+    _nasolve_live_name(model, [two, diff], latest.get("number"), latest.get("label"))
+
+    def value(key):
+        number = latest.get(key)
+        return "%.4f" % number if isinstance(number, float) else "?"
+
+    _nasolve_live_tell("snapshot %s (%s): R-work %s, R-free %s; refinement %s"
+                       % (latest.get("number"), latest.get("label"), value("r_work"),
+                          value("r_free"), state))
+    print("NASOLVE_LIVE_LOADED " + json.dumps({"number": latest.get("number"), "model": model,
+                                               "maps": [two, diff]}), flush=True)
+    return latest.get("number")
+
+
+def _nasolve_live_start():
+    model, maps = _nasolve_live_find(NASOLVE_LIVE["model"], NASOLVE_LIVE["maps"])
+    _nasolve_live.update(model=model, maps=maps)
+    _nasolve_live_name(model, maps, NASOLVE_LIVE["number"], NASOLVE_LIVE["label"])
+    if NASOLVE_LIVE["start_model"]:
+        start, _ = _nasolve_live_find(NASOLVE_LIVE["start_model"], None)
+        if start >= 0:
+            coot.set_molecule_name(start, "Start model of " + NASOLVE_LIVE["checkpoint"])
+    try:
+        import coot_gui
+        menu = coot_gui.attach_module_menu_button("NASolve live")
+        coot_gui.add_simple_action_to_menu(
+            menu, "Load latest snapshot", "nasolve_live_load_latest",
+            lambda _action, _parameter: nasolve_live_load_latest())
+        where = "toolbar"
+    except Exception as exc:
+        where = "scripting-only " + str(exc)
+    _nasolve_live_tell(NASOLVE_LIVE["summary"] + "; NASolve live > Load latest snapshot to update")
+    print("NASOLVE_LIVE_READY " + json.dumps({"button": where, "model": model, "maps": maps}),
+          flush=True)
+    return False
+
+
+try:
+    from gi.repository import GLib
+    GLib.timeout_add(500, _nasolve_live_start)
+except Exception:
+    _nasolve_live_start()
 '''
     )
 
@@ -1054,14 +1262,24 @@ def launch_coot_view(
     *,
     stage: str | None = None,
     checkpoint: str | None = None,
+    live: bool = False,
     environment: Mapping[str, str] | None = None,
     launcher: Callable[..., object] = subprocess.Popen,
 ) -> CootViewResult:
-    """Open a resolved result without allowing Coot to litter the repository."""
+    """Open a resolved result without allowing Coot to litter the repository.
+
+    ``live``: the newest snapshot of the AutoRefine round that is running (or
+    of the last round that saved any), with the round's start model.
+    """
     run = run_directory.expanduser().resolve()
     if checkpoint is not None:
         checkpoint = _checkpoint_component(checkpoint)
-    profile = resolve_view_profile(run, stage=stage, checkpoint=checkpoint)
+    if live:
+        if stage is not None or checkpoint is not None:
+            raise CootViewError("--live cannot be combined with --stage or --checkpoint")
+        profile = _live_profile(run)
+    else:
+        profile = resolve_view_profile(run, stage=stage, checkpoint=checkpoint)
     scratch_root = run / "CootGUI"
     working = scratch_root / profile.stage
     if profile.checkpoint_id is not None:
@@ -1142,7 +1360,12 @@ def _launch_profile(
         command.extend(["--dictionary", str(dictionary)])
     command.extend(["--auto", str(profile.map_path)])
     anomalous_paths = profile.anomalous_map_paths or (profile.map_path,)
-    startup_script = _anomalous_map_script(anomalous_paths)
+    if profile.live is not None:
+        # Snapshots have no anomalous map; the loader adds the update button.
+        anomalous_paths = ()
+        startup_script = _live_script(profile.live)
+    else:
+        startup_script = _anomalous_map_script(anomalous_paths)
     if profile.metal_merge is not None and profile.extra_model_paths:
         # One startup script: the merge command is appended to the map loader.
         startup_script += _metal_merge_script(
@@ -1182,14 +1405,21 @@ def _launch_profile(
                 "map_source": profile.map_source,
                 "model_path": str(profile.model_path),
                 "map_path": str(profile.map_path),
-                "anomalous_map": {
-                    "status": "check-in-coot",
-                    "paths": [str(path) for path in anomalous_paths],
-                    "labels": [list(pair) for pair in ANOMALOUS_LABEL_PAIRS],
-                    "contour_sigma": 3.0,
-                    "script": str(map_script),
-                    "log_marker": "NASOLVE_ANOMALOUS_MAP",
-                },
+                "anomalous_map": (
+                    {
+                        "status": "check-in-coot",
+                        "paths": [str(path) for path in anomalous_paths],
+                        "labels": [list(pair) for pair in ANOMALOUS_LABEL_PAIRS],
+                        "contour_sigma": 3.0,
+                        "script": str(map_script),
+                        "log_marker": "NASOLVE_ANOMALOUS_MAP",
+                    }
+                    if anomalous_paths else None
+                ),
+                "live": (
+                    {**dict(profile.live), "script": str(map_script), "log_marker": "NASOLVE_LIVE"}
+                    if profile.live is not None else None
+                ),
                 "metal_merge": (
                     {
                         "output_directory": str(profile.metal_merge.output_directory),
@@ -1221,6 +1451,7 @@ def _launch_profile(
         map_source=profile.map_source,
         checkpoint_id=profile.checkpoint_id,
         metal_merge=profile.metal_merge,
+        live=profile.live,
     )
 
 

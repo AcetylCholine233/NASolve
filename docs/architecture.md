@@ -640,6 +640,15 @@ Automatic readiness requires a successful Phenix exit, a compatible model,
 `Rwork < Rfree`, and `Rwork < 0.30`. These numerical tests permit continued
 automation but do not replace visual inspection or user approval.
 
+While phenix.refine runs, AutoRefine collects live snapshots
+(`nasolve.live_refinement`): phenix.refine gets `PHENIX_GUI_ENVIRONMENT=1`, the
+hook Phenix's GUI uses, and saves `.status.pkl` at the start, after every
+macro-cycle and at the end; each settled copy is converted by phenix.python into
+`round_NNN/live/snapshot_NNN.pdb` and `_maps.mtz`, listed in
+`live/status.json`. Snapshots are a viewing aid only: they are not checkpoint
+outputs, nothing downstream reads them, and a conversion failure never changes
+the round. `nasolve show RUN --live` opens the newest one.
+
 ## Refine Doctor contract
 
 Refine Doctor is a finisher and diagnostic layer, not an unconstrained

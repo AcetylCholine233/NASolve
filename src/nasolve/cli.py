@@ -559,7 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="checkpoint ID/bookmark when an explicit run path is supplied",
     )
     show = subparsers.add_parser(
-        "show", help="open a completed run stage in an isolated graphical Coot session"
+        "show", help=(
+            "open a completed run stage (or, with --live, a running refinement) in an "
+            "isolated graphical Coot session"
+        )
     )
     show.add_argument(
         "target", nargs="?",
@@ -581,6 +584,14 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument(
         "--checkpoint",
         help="open a specific checkpoint without changing the current selection",
+    )
+    show.add_argument(
+        "--live", action="store_true",
+        help=(
+            "the AutoRefine round that is running: its newest snapshot (saved after every "
+            "macro-cycle) with the round's start model; a 'NASolve live' toolbar button loads "
+            "the next one. Without a running round, the last round that saved snapshots"
+        ),
     )
     show.add_argument("--coot", help="one-run Coot executable override")
     return parser
@@ -1377,6 +1388,8 @@ def _autorefine(args: argparse.Namespace) -> int:
 
         def progress(checkpoint_id: str, log_path: Path) -> None:
             print(f"AutoRefine {checkpoint_id} started; full output: {log_path}")
+            print(f"Watch it in Coot while it runs: nasolve show {shlex.quote(str(run))} --live "
+                  "(a snapshot after every macro-cycle)", flush=True)
 
         result = execute_autorefine(
             run,
@@ -1393,6 +1406,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             start_model=args.model,
             fix_xyz=args.fix_xyz,
             progress=progress,
+            live_report=lambda line: print(line, flush=True),
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
         print(f"AutoRefine error: {exc}", file=sys.stderr)
@@ -1816,10 +1830,23 @@ def _show(args: argparse.Namespace) -> int:
             coot.executable,
             stage=args.stage,
             checkpoint=args.checkpoint,
+            live=getattr(args, "live", False),
         )
     except (ConfigError, CootDiscoveryError, CootViewError) as exc:
         print(f"Coot view error: {exc}", file=sys.stderr)
         return 2
+    if getattr(result, "live", None) is not None:
+        print(f"Opened the live view of {result.checkpoint_id} in run: {result.run_directory}")
+        print(f"Showing: {result.source}")
+        print(f"Snapshot model: {result.model_path}")
+        print(f"Snapshot maps (2mFo-DFc, mFo-DFc): {result.map_path}")
+        for extra in result.extra_model_paths:
+            print(f"Start model: {extra}")
+        print("In Coot: NASolve live > Load latest snapshot shows the newest macro-cycle. "
+              "Snapshots have no anomalous map; open the finished round with nasolve show for it.")
+        print(f"Coot log: {result.log_path}")
+        print(f"PID: {result.pid}")
+        return 0
     print(f"Opened {result.stage} in run: {result.run_directory}")
     print(f"Model source: {result.source}")
     print(f"Model: {result.model_path}")

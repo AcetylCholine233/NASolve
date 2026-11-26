@@ -420,6 +420,23 @@ or the highest numbered run in a dataset:
 ./nasolve show "$RUN" --checkpoint refine-005
 ```
 
+While an AutoRefine round is running, watch it from a second terminal:
+
+```bash
+./nasolve show "$RUN" --live
+```
+
+This opens the round's newest snapshot (model, 2mFo-DFc and mFo-DFc maps)
+beside the model it started from. phenix.refine saves a snapshot when it starts
+refining, after every macro-cycle and at the end; AutoRefine prints R-work and
+R-free for each and writes them to `round_NNN/live/`. In Coot, **NASolve live >
+Load latest snapshot** swaps in the newest one, keeping your contour levels and
+view. Snapshots have no anomalous map; open the finished round with plain
+`show` for that. Without a running round, `--live` shows the last round that
+saved snapshots. The snapshots use the hook Phenix's own GUI uses
+(`PHENIX_GUI_ENVIRONMENT`); if phenix.python is missing, the round runs as
+before without them.
+
 The current checkpoint wins over newer unselected refinement attempts. Without
 a checkpoint registry, NASolve chooses an accepted AutoSol view with a usable
 density map, completed PostMR, or Phaser. Explicit `--stage` and `--checkpoint`

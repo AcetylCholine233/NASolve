@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from .ligand_profiles import validate_model_phosphate_policy
+from .ligand_profiles import is_modification_only, validate_model_phosphate_policy
+from .live_refinement import LiveSnapshots, run_with_snapshots
 from .phosphate import PhosphateError, requested_op3_sites
 from .checkpoints import (
     CheckpointError,
@@ -1345,6 +1346,20 @@ def _write_metrics_tsv(path: Path, statistics: Mapping[str, object]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _ligand_dictionaries(restraints: Sequence[object]) -> list[Path]:
+    """The CIF ligand dictionaries among a round's restraint files (for Coot)."""
+    found = []
+    for path in restraints:
+        if not isinstance(path, Path) or path.suffix.casefold() != ".cif":
+            continue
+        try:
+            if not is_modification_only(path):
+                found.append(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return found
+
+
 def _discover_output(round_directory: Path, pattern: str) -> Path | None:
     candidates = sorted(
         (path.resolve() for path in round_directory.glob(pattern) if path.is_file()),
@@ -1722,6 +1737,7 @@ def execute_autorefine(
     terminal_geometry_protection: Mapping[str, object] | None = None,
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
+    live_report: Callable[[str], None] | None = None,
 ) -> AutoRefineResult:
     """Run one quiet refinement round and append an immutable checkpoint.
 
@@ -2092,6 +2108,7 @@ def execute_autorefine(
     if progress is not None:
         progress(checkpoint_id, log_path)
     preflight_failed = False
+    live_record: dict[str, object] | None = None   # phenix.refine never ran
     try:
         with preflight_log.open("w", encoding="utf-8") as preflight_handle:
             preflight = subprocess.run(
@@ -2122,24 +2139,33 @@ def execute_autorefine(
             completed_returncode = preflight.returncode
             preflight_failed = True
         else:
+            # Snapshots after each macro-cycle for "nasolve show RUN --live".
+            live = LiveSnapshots(
+                round_directory,
+                refine_executable.expanduser().resolve().parent / "phenix.python",
+                environment,
+                checkpoint_id=checkpoint_id,
+                parent_checkpoint=str(parent.get("id")),
+                start_model=model,
+                dictionaries=_ligand_dictionaries(restraints),
+                macro_cycles=macro_cycles,
+                report=live_report,
+            )
             try:
                 with log_path.open("w", encoding="utf-8") as log_handle:
-                    completed = subprocess.run(
+                    completed_returncode = run_with_snapshots(
                         command,
                         cwd=round_directory,
-                        env=dict(environment) if environment is not None else None,
-                        text=True,
-                        stdout=log_handle,
-                        stderr=subprocess.STDOUT,
-                        check=False,
+                        environment=environment,
+                        log_handle=log_handle,
+                        watcher=live,
                     )
             except OSError as exc:
                 log_path.write_text(
                     f"NASolve could not launch phenix.refine: {exc}\n", encoding="utf-8"
                 )
                 completed_returncode = 127
-            else:
-                completed_returncode = completed.returncode
+            live_record = live.record()
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
     output_model = _discover_output(round_directory, "refined_*.pdb")
     model_cif = _discover_filtered_output(
@@ -2437,6 +2463,7 @@ def execute_autorefine(
         "preflight_command": preflight_command,
         "fixed_xyz": fixed_records,   # --fix-xyz atoms: start and final coordinates
         "phenix_unused_files": unused_files,   # "Files not used by program" in the log
+        "live": live_record,   # snapshots for nasolve show RUN --live (live/status.json)
         "parameters": str(parameters),
         "terminal_geometry_protection": terminal_protection_record,
         "inputs": {
