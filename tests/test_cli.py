@@ -425,7 +425,7 @@ class CLITests(unittest.TestCase):
         result = SimpleNamespace(
             status="POSTMR_READY", message="ready", run_directory=run,
             input_model=run / "Phaser" / "mr_solution-merged.pdb", input_model_source="metal-merged",
-            merge_selected_by="--merged-model", other_merges=("mr_solution-merged-2.pdb",),
+            merge_selected_by="--model", other_merges=("mr_solution-merged-2.pdb",),
             merge_warnings=("mr_solution-merged.pdb has changed since it was merged; using the file as it is now",),
             model_path=run / "PostMR" / "model.pdb", metal_sites=(), anomalous_scatterer_phil=None,
             readyset_log=run / "PostMR" / "readyset.log", restraint_paths=(),
@@ -441,13 +441,13 @@ class CLITests(unittest.TestCase):
               patch("nasolve.cli.discover_coot", side_effect=CootDiscoveryError("no Coot")),
               patch("nasolve.cli.prepare_postmr", return_value=result) as call,
               redirect_stdout(output)):
-            self.assertEqual(main(["postmr", str(run), "--merged-model", "mr_solution-merged.pdb"]), 0)
+            self.assertEqual(main(["postmr", str(run), "--model", "mr_solution-merged.pdb"]), 0)
         self.assertEqual(call.call_args.kwargs["merged_model"], "mr_solution-merged.pdb")
         self.assertIs(call.call_args.kwargs["use_merged_model"], True)
         text = output.getvalue()
         self.assertIn(f"Starting model: {run / 'Phaser' / 'mr_solution-merged.pdb'} (Phaser model with "
-                      "merged metal sites, chosen with --merged-model)", text)
-        self.assertIn("Other merged models recorded (choose one with --merged-model NAME): "
+                      "merged metal sites, chosen with --model)", text)
+        self.assertIn("Other merged models recorded (choose one with --model NAME): "
                       "mr_solution-merged-2.pdb", text)
         self.assertIn("Warning: mr_solution-merged.pdb has changed since it was merged", text)
 

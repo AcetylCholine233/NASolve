@@ -110,7 +110,8 @@ entries are reconstructed from repository history.
   `occupancy_start` and `nudge`; the plan and `autofdp.log` show
   "occupancy 0.90 -> 0.95 (--nudge 0.05)". First written as minus Q; the
   user corrected it to plus Q the same day. phenix.refine simulated.
-- `nasolve postmr RUN --merged-model FILE`: start PostMR from a chosen model
+- `nasolve postmr RUN --merged-model FILE` (renamed `--model` on 2026-11-26, see
+  Changed): start PostMR from a chosen model
   with merged metal sites instead of the newest merge (user's request,
   2026-11-19). FILE is a name in the run's `Phaser/` folder (e.g.
   `mr_solution-merged-2.pdb`) or a path. A recorded, unchanged merge keeps its
@@ -198,6 +199,13 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- `nasolve postmr RUN --model FILE` replaces `--merged-model FILE` (user's
+  request, 2026-11-26), so PostMR names its starting model the way AutoRefine
+  does (`autorefine --model FILE`). Same behaviour: a name in the run's
+  `Phaser/` folder or a path; a recorded merge keeps its record, any other PDB
+  is compared with the Phaser model and warned about. `--merged-model` is no
+  longer accepted. New PostMR reports record `metal_merge.selected_by` as
+  `--model`; earlier reports keep `--merged-model`.
 - DYI dictionary: the sugar, glycosidic and backbone torsions are restrained
   as phenix.refine restrains a standard dC (user's request, 2026-11-25).
   Glycosidic chi (O4'-C1'-N1-C2, 210 deg) period 2, e.s.d. 40 (was period 6,

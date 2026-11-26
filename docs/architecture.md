@@ -511,7 +511,7 @@ the Phaser model, caps occupancies at 1.00, and writes a new
 `<model>-merged[-N].pdb` in the source AutoMR run's `Phaser/` directory without
 overwriting, then appends it to that run's `report.json["metal_merge"]` (run-
 anchored, SHA-256) and selects it. PostMR starts from the selected (newest)
-merged model, or from the model named by `--merged-model FILE` (a name in
+merged model, or from the model named by `--model FILE` (a name in
 `Phaser/` or a path), unless `--original-model` is given. Without the option a
 selected model that is missing or changed is refused. A chosen file that is a
 recorded, unchanged merge keeps its record; any other PDB file (saved by hand,

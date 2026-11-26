@@ -88,7 +88,7 @@ class PostMRResult:
     kept: tuple[str, ...] = ()          # --force-overwrite: folders kept in PostMRHistory/
     kept_as: str | None = None          # ... as this numbered result
     merge_selected_by: str | None = None    # how the merged model was chosen
-    merge_warnings: tuple[str, ...] = ()    # --merged-model: an unrecorded or changed file
+    merge_warnings: tuple[str, ...] = ()    # --model: an unrecorded or changed file
     other_merges: tuple[str, ...] = ()      # recorded merges PostMR did not use
 
 
@@ -256,7 +256,7 @@ def _solution_model(run: Path, report: Mapping[str, object]) -> Path:
 
 
 #: How PostMR chose its merged model (recorded as ``metal_merge.selected_by``).
-MERGE_BY_OPTION = "--merged-model"
+MERGE_BY_OPTION = "--model"
 MERGE_BY_DEFAULT = "newest merge (report.json metal_merge.selected)"
 
 
@@ -356,7 +356,7 @@ def _compare_with_phaser(
 
 
 def _chosen_model_path(run: Path, choice: str | Path) -> Path | None:
-    """``--merged-model``: an absolute path, else relative to the current
+    """``--model``: an absolute path, else relative to the current
     folder, the run's ``Phaser/`` folder or the run."""
     wanted = Path(choice).expanduser()
     candidates = [wanted] if wanted.is_absolute() else [
@@ -375,7 +375,7 @@ def _merged_metal_model(
     (newest) merge is used; if it is missing or changed since merging PostMR
     stops rather than silently falling back to the plain model.
 
-    ``choice`` (``--merged-model``) is a model file (a name in the run's
+    ``choice`` (``--model``) is a model file (a name in the run's
     ``Phaser/`` folder, or a path). A recorded merge whose file is unchanged
     keeps its record. Any other PDB file (saved by hand in Coot, or a recorded
     name whose file has changed since) is used as it is, with its checksum,
@@ -398,7 +398,7 @@ def _merged_metal_model(
         if path is None:
             raise PostMRPreparationError(
                 f"The merged metal model {selected} is missing or was changed after merging. "
-                "Merge again in Coot, name the model to use with --merged-model FILE, or use "
+                "Merge again in Coot, name the model to use with --model FILE, or use "
                 "--original-model to start from the Phaser model."
             )
         return path, {**entry, "selected_by": MERGE_BY_DEFAULT}
@@ -407,11 +407,11 @@ def _merged_metal_model(
     if path is None:
         recorded = ", ".join(_merge_label(item) for item in merges) or "none"
         raise PostMRPreparationError(
-            f"--merged-model: no such file: {choice} (looked in the current folder, "
+            f"--model: no such file: {choice} (looked in the current folder, "
             f"{run / 'Phaser'} and {run}); merges recorded for this run: {recorded}"
         )
     if path.suffix.lower() not in {".pdb", ".ent"} or not _atom_positions(path):
-        raise PostMRPreparationError(f"--merged-model: {path} is not a PDB model with atoms")
+        raise PostMRPreparationError(f"--model: {path} is not a PDB model with atoms")
     for item in merges:
         if isinstance(item.get("model"), Mapping):
             resolved = resolve_artifact_path(item["model"], run)
@@ -1972,7 +1972,7 @@ def prepare_postmr(
 
     When metal sites were merged into the Phaser model in Coot, PostMR starts
     from the newest merged model unless ``use_merged_model`` is False;
-    ``merged_model`` (``--merged-model``) names another recorded merge.
+    ``merged_model`` (``--model``) names another recorded merge, or any PDB model.
 
     NARestraints: a run with a frame uses the frame's pair file and
     secondary-structure restraints; ``modified_pairs_only`` restrains only
@@ -2048,7 +2048,7 @@ def prepare_postmr(
             "and experimental backbone passthrough"
         )
     if merged_model is not None and not use_merged_model:
-        raise PostMRPreparationError("--merged-model and --original-model cannot be combined")
+        raise PostMRPreparationError("--model and --original-model cannot be combined")
     merged = _merged_metal_model(run, report, merged_model) if use_merged_model else None
     if merged is not None:
         source_model, merge_record = merged

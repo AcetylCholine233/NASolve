@@ -45,7 +45,7 @@ from .phenix_runtime import (
     remember_phenix,
 )
 from .phaser import PhaserExecutionError, execute_phaser, tfz_override_warning
-from .postmr import PostMRPreparationError, prepare_postmr
+from .postmr import MERGE_BY_OPTION, PostMRPreparationError, prepare_postmr
 from .refine_doctor import RefineDoctorError, execute_refine_doctor
 
 
@@ -186,12 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     starting_model.add_argument(
-        "--merged-model", metavar="FILE",
+        "--model", metavar="FILE",
         help=(
-            "start from this model with merged metal sites: a file name in the run's "
-            "Phaser/ folder (e.g. mr_solution-merged-2.pdb) or a path. A model saved by "
-            "hand is accepted with a warning and compared with the Phaser model. "
-            "Default: the newest merge saved with the NASolve merge command"
+            "start from this model, e.g. one with merged metal sites: a file name in the "
+            "run's Phaser/ folder (e.g. mr_solution-merged-2.pdb) or a path. A model saved "
+            "by hand is accepted with a warning and compared with the Phaser model. "
+            "Default: the newest merge saved with the NASolve merge command, else the "
+            "Phaser model"
         ),
     )
     postmr.add_argument(
@@ -907,7 +908,7 @@ def _print_metal_merge_hint(merge) -> None:
     )
     print(f"Merged model will be saved as: {merge.output_directory / (merge.merged_stem + '.pdb')}")
     print(f"'nasolve postmr {merge.run_directory}' then starts from the newest merged model "
-          "(--merged-model NAME picks another).")
+          "(--model NAME picks another).")
     for warning in merge.warnings:
         print(f"Warning: {warning}")
 
@@ -1073,7 +1074,7 @@ def _postmr(args: argparse.Namespace) -> int:
             force_overwrite=args.force_overwrite,
             allow_unreviewed_backbone=args.allow_unreviewed_backbone,
             use_merged_model=not args.original_model,
-            merged_model=args.merged_model,
+            merged_model=args.model,
         )
     except (
         ConfigError,
@@ -1097,13 +1098,13 @@ def _postmr(args: argparse.Namespace) -> int:
             "Phaser model with merged metal sites"
             if result.input_model_source == "metal-merged" else "Phaser model"
         )
-        if result.merge_selected_by == "--merged-model":
-            source += ", chosen with --merged-model"
+        if result.merge_selected_by == MERGE_BY_OPTION:
+            source += f", chosen with {MERGE_BY_OPTION}"
         print(f"Starting model: {result.input_model} ({source})")
         for warning in result.merge_warnings:
             print(_color(f"Warning: {warning}", "33"))
         if result.other_merges:
-            print("Other merged models recorded (choose one with --merged-model NAME): "
+            print("Other merged models recorded (choose one with --model NAME): "
                   + ", ".join(result.other_merges))
     print(f"Prepared model: {result.model_path}")
     for site in result.metal_sites:

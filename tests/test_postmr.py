@@ -210,7 +210,8 @@ class PostMRTests(unittest.TestCase):
             self.assertEqual(result.input_model.name, "mr_solution.pdb")
 
     def test_merged_model_option_chooses_which_recorded_merge_postmr_uses(self):
-        """--merged-model NAME (user, 2026-11-19): PostMR starts from that
+        """--model NAME (user, 2026-11-19; called --merged-model until the user
+        renamed it on 2026-11-26, as AutoRefine's --model): PostMR starts from that
         recorded merge instead of the newest one."""
         from nasolve.cli import build_parser
 
@@ -254,7 +255,7 @@ class PostMRTests(unittest.TestCase):
                  r"mr_solution-merged-2.pdb \(2026-11-19 18:30, 2 sites\)"),
                 ({"merged_model": "notes.txt"}, "is not a PDB model with atoms"),
                 ({"merged_model": first.name, "use_merged_model": False},
-                 "--merged-model and --original-model cannot be combined"),
+                 "--model and --original-model cannot be combined"),
             ):
                 with self.subTest(bad=bad):
                     with self.assertRaisesRegex(PostMRPreparationError, message):
@@ -263,19 +264,19 @@ class PostMRTests(unittest.TestCase):
 
             result = postmr(merged_model=first.name)
             self.assertEqual(result.input_model, first.resolve())
-            self.assertEqual(result.merge_selected_by, "--merged-model")
+            self.assertEqual(result.merge_selected_by, "--model")
             self.assertEqual(result.merge_warnings, ())   # a recorded, unchanged merge
             self.assertEqual(result.other_merges, (second.name,))
             record = json.loads((result.postmr_directory / "report.json").read_text())
             self.assertEqual(record["metal_merge"]["name"], first.name)
-            self.assertEqual(record["metal_merge"]["selected_by"], "--merged-model")
+            self.assertEqual(record["metal_merge"]["selected_by"], "--model")
             self.assertNotIn(" HG ", result.model_path.read_text())
             # The run's default selection is not changed.
             self.assertEqual(json.loads(report_path.read_text())["metal_merge"]["selected"], second.name)
 
             # A path to the merge works too; without the option, the newest is used.
             for kwargs, expected, selected_by in (
-                ({"merged_model": str(first)}, first, "--merged-model"),
+                ({"merged_model": str(first)}, first, "--model"),
                 ({}, second, "newest merge (report.json metal_merge.selected)"),
             ):
                 with self.subTest(kwargs=kwargs):
@@ -311,7 +312,7 @@ class PostMRTests(unittest.TestCase):
             report = json.loads(report_path.read_text())
             report["metal_merge"]["selected"] = first.name
             report_path.write_text(json.dumps(report))
-            with self.assertRaisesRegex(PostMRPreparationError, "name the model to use with --merged-model"):
+            with self.assertRaisesRegex(PostMRPreparationError, "name the model to use with --model"):
                 postmr(force_overwrite=True)
             result = postmr(force_overwrite=True, merged_model=first.name)
             self.assertEqual(result.merge_warnings[0],
@@ -339,10 +340,12 @@ class PostMRTests(unittest.TestCase):
             self.assertIn("residues changed (not planned mutations): B:4 DG->DT", record["warnings"][-1])
 
             parser = build_parser()
-            self.assertEqual(parser.parse_args(["postmr", "run_004", "--merged-model", first.name]).merged_model,
+            self.assertEqual(parser.parse_args(["postmr", "run_004", "--model", first.name]).model,
                              first.name)
             with self.assertRaises(SystemExit), patch("sys.stderr"):
-                parser.parse_args(["postmr", "run_004", "--merged-model", first.name, "--original-model"])
+                parser.parse_args(["postmr", "run_004", "--model", first.name, "--original-model"])
+            with self.assertRaises(SystemExit), patch("sys.stderr"):   # the old name is gone
+                parser.parse_args(["postmr", "run_004", "--merged-model", first.name])
 
     def test_non_object_report_is_rejected_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
