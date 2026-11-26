@@ -199,6 +199,13 @@ entries are reconstructed from repository history.
 
 ### Changed
 
+- `nasolve autofdp RUN/AutoRefine/round_NNN` writes its run inside that round,
+  `round_NNN/AutoFDP/run_NNN` (numbered per round), instead of `AutoFDP/` beside
+  the MTZ (user's request, 2026-11-26). `--output DIR` still decides when given;
+  the model-and-MTZ form is unchanged. `run_context.dataset_directory` knows
+  the new place (also under `PostMRHistory/postmr-NNN/`), so the report's
+  references to the MTZ and the round stay dataset-anchored. Earlier runs stay
+  where they are.
 - `nasolve postmr RUN --model FILE` replaces `--merged-model FILE` (user's
   request, 2026-11-26), so PostMR names its starting model the way AutoRefine
   does (`autorefine --model FILE`). Same behaviour: a name in the run's

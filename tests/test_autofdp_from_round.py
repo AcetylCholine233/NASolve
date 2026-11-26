@@ -225,7 +225,11 @@ class RoundCommandTests(unittest.TestCase):
                 "AUTOFDP_CONVERGED",
             ):
                 self.assertIn(text, out)
-            run = mtz.parent.resolve() / "AutoFDP" / "run_001"
+            # The results go inside the round (user, 2026-11-26), not beside the MTZ.
+            run = round_dir.resolve() / "AutoFDP" / "run_001"
+            self.assertTrue((run / "report.json").is_file())
+            self.assertFalse((mtz.parent / "AutoFDP").exists())
+            self.assertIn(f"Run folder: {run}", out)
             report = json.loads((run / "report.json").read_text())
             recorded = report["inputs"]["autorefine_round"]
             self.assertEqual(recorded["directory"], {
@@ -246,8 +250,18 @@ class RoundCommandTests(unittest.TestCase):
             code, out, err, _ = self._main(root, [str(mtz), str(model), "--no-coot"], make_final_refine(root))
             self.assertEqual(code, 0, err)
             self.assertNotIn("AutoRefine round:", out)
-            report = json.loads((mtz.parent / "AutoFDP" / "run_002" / "report.json").read_text())
+            report = json.loads((mtz.parent / "AutoFDP" / "run_001" / "report.json").read_text())
             self.assertIsNone(report["inputs"]["autorefine_round"])
+
+            # --output still decides; a second run from the round is numbered in it.
+            elsewhere = root / "elsewhere"
+            code, out, err, _ = self._main(root, [str(round_dir), "--output", str(elsewhere), "--no-coot"],
+                                           make_final_refine(root))
+            self.assertEqual(code, 0, err)
+            self.assertTrue((elsewhere / "run_001" / "report.json").is_file())
+            code, out, err, _ = self._main(root, [str(round_dir), "--no-coot"], make_final_refine(root))
+            self.assertEqual(code, 0, err)
+            self.assertTrue((round_dir / "AutoFDP" / "run_002" / "report.json").is_file())
 
     def test_round_problems_on_the_command_line(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -267,6 +281,7 @@ class RoundCommandTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("Give one model (.pdb) and one reflection file (.mtz)", err)
             self.assertFalse((mtz.parent / "AutoFDP").exists())
+            self.assertFalse((round_dir / "AutoFDP").exists())
 
 
 if __name__ == "__main__":

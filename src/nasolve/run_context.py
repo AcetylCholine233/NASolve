@@ -21,7 +21,10 @@ ABSOLUTE_ANCHOR = "absolute"
 
 # Numbered run series that live directly in a dataset directory. AutoSolMetal
 # runs live inside an AutoMR run (AutoMR/run_NNN/AutoSolMetal/run_NNN); older
-# ones directly in the dataset (DATASET/AutoSolMetal/run_NNN).
+# ones directly in the dataset (DATASET/AutoSolMetal/run_NNN). AutoFDP runs
+# started from an AutoRefine round live inside it
+# (AutoMR/run_NNN/AutoRefine/round_NNN/AutoFDP/run_NNN, also under
+# PostMRHistory/postmr-NNN/); others directly in the dataset.
 _DATASET_RUN_SERIES = {"AutoMR", "AutoSolMetal", "AutoFDP"}
 
 
@@ -31,6 +34,11 @@ def dataset_directory(run_directory: Path) -> Path:
         parent_run = run.parent.parent
         if run.parent.name == "AutoSolMetal" and parent_run.parent.name == "AutoMR":
             return parent_run.parent.parent   # AutoMR/run_NNN/AutoSolMetal/run_NNN
+        if (run.parent.name == "AutoFDP" and parent_run.name.startswith("round_")
+                and parent_run.parent.name == "AutoRefine"):
+            for ancestor in parent_run.parents:   # .../AutoMR/run_NNN/.../AutoRefine/round_NNN
+                if ancestor.name == "AutoMR":
+                    return ancestor.parent
         return parent_run
     return run.parent
 

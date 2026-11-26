@@ -410,7 +410,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autofdp.add_argument(
         "--output", type=Path, metavar="DIR",
-        help="folder in which a new run_NNN is made (default: AutoFDP beside the MTZ)",
+        help=("folder in which a new run_NNN is made (default: AutoFDP inside the AutoRefine "
+              "round when one is given, else AutoFDP beside the MTZ)"),
     )
     autofdp.add_argument(
         "--site", action="append", default=[], metavar="SITE",

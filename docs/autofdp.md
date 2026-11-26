@@ -90,7 +90,7 @@ The first also ends the run with a final round from
 | `ROUND` | | an AutoRefine round folder instead of the two files: its one `refined_NNN.pdb` (never changed), the one X-ray data file its `refined_NNN.eff` names in `data_manager.miller_array` (amplitude or intensity arrays; Free-R flags and phases are not data), and that .eff as the final round's. Its `report.json` gives the checkpoint and status, recorded in the run report (`inputs.autorefine_round`). Not with `--final-eff` |
 | `MODEL.pdb` | required without `ROUND` | the starting model, PDB format, for example an AutoRefine `refined_001.pdb`; never changed |
 | `DATA.mtz` | required without `ROUND` | reflections with anomalous data and Free-R flags. The two files may be given in either order |
-| `--output` | `AutoFDP` beside the MTZ | folder in which a new `run_NNN` is made |
+| `--output` | `AutoFDP` inside the AutoRefine round when one is given, else beside the MTZ | folder in which a new `run_NNN` is made |
 | `--site` | every metal site | metal sites whose B step 1 sets, e.g. `B:101`; repeatable. Every metal site is still refined in the f″ round |
 | `--wavelength` | MTZ header | X-ray wavelength (Å), for an MTZ whose header has none; a disagreement with the header is recorded |
 | `--cif` | none | restraint dictionary to give ReadySet (and phenix.refine) for a residue; repeatable. ReadySet makes dictionaries for other unknown residues, and NASolve's curated ones are added automatically |
@@ -465,9 +465,11 @@ supplied": the output .eff loaded the GUI's `refine_85.eff`, and its
 
 ## Outputs
 
-Each run is a new folder, `AutoFDP/run_NNN/` beside the MTZ by default (at the
-same level as `AutoMR/` in a NASolve dataset), or inside
-`--output`:
+Each run is a new folder. Started from an AutoRefine round, it is
+`AutoRefine/round_NNN/AutoFDP/run_NNN/` inside that round (user, 2026-11-26),
+numbered per round; started from a model and an MTZ, `AutoFDP/run_NNN/` beside
+the MTZ (at the same level as `AutoMR/` in a NASolve dataset). `--output` puts
+it inside another folder:
 
 - `source_model.pdb` (unchanged copy of the given model) and
   `start_model.pdb` (metal B set), from step 1;

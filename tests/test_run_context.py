@@ -4,10 +4,32 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nasolve.run_context import artifact_reference, resolve_artifact_path
+from nasolve.run_context import artifact_reference, dataset_directory, resolve_artifact_path
 
 
 class RunContextTests(unittest.TestCase):
+    def test_autofdp_runs_inside_an_autorefine_round_belong_to_the_dataset(self):
+        """AutoFDP from an AutoRefine round writes AutoRefine/round_NNN/AutoFDP/run_NNN
+        (user, 2026-11-26); its dataset is the one holding AutoMR/, so the MTZ
+        beside it is dataset-anchored, also for an archived PostMR result."""
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory).resolve() / "U-Y_Ag nasolve"
+            for nested in (
+                dataset / "AutoMR/run_004/AutoRefine/round_006/AutoFDP/run_001",
+                dataset / "AutoMR/run_004/PostMRHistory/postmr-002/AutoRefine/round_011/AutoFDP/run_003",
+            ):
+                nested.mkdir(parents=True)
+                self.assertEqual(dataset_directory(nested), dataset)
+            mtz = dataset / "staraniso_alldata-unique.mtz"
+            mtz.write_bytes(b"MTZ ")
+            run = dataset / "AutoMR/run_004/AutoRefine/round_006/AutoFDP/run_001"
+            self.assertEqual(artifact_reference(mtz, run),
+                             {"anchor": "dataset", "relative_path": "staraniso_alldata-unique.mtz"})
+            # Unchanged: AutoFDP beside the MTZ, and metal searches in an AutoMR run.
+            self.assertEqual(dataset_directory(dataset / "AutoFDP/run_016"), dataset)
+            self.assertEqual(dataset_directory(dataset / "AutoMR/run_004/AutoSolMetal/run_001"), dataset)
+            self.assertEqual(dataset_directory(dataset / "AutoMR/run_004"), dataset)
+
     def test_legacy_collaborator_paths_rebase_to_current_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "dataset"

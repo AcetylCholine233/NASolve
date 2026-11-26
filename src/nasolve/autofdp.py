@@ -1531,7 +1531,9 @@ def plan_autofdp(
     Reads the model's metal sites and their planned B (step 1), the MTZ
     labels, Free-R flags and wavelength (``phenix.mtz.dump``), and the
     theoretical f'/f'' of every metal element (``phenix.python``). Runs no
-    refinement. ``output_root`` defaults to ``AutoFDP`` beside the MTZ file.
+    refinement. ``output_root`` defaults to ``AutoFDP`` inside the AutoRefine
+    round when ``source`` is given (user, 2026-11-26), else ``AutoFDP`` beside
+    the MTZ file.
     ``final_eff`` (a manual phenix.refine .eff) is checked with
     ``read_final_eff``. ``source`` (``read_autorefine_round``) records the
     AutoRefine round the model, the MTZ and the final .eff come from; they
@@ -1566,7 +1568,8 @@ def plan_autofdp(
     theory = theoretical_scattering(
         sorted(elements), reflections.wavelength, refine_executable, environment, theory_overrides
     )
-    root = (output_root or reflections.mtz.parent / "AutoFDP").expanduser().resolve()
+    default_root = (source.directory if source is not None else reflections.mtz.parent) / "AutoFDP"
+    root = (output_root or default_root).expanduser().resolve()
     return AutoFDPPlan(
         model=model,
         reflections=reflections,
