@@ -502,14 +502,23 @@ def append_checkpoint(
     payload: dict[str, object],
     *,
     select: bool = False,
+    bookmark: str | None = None,
 ) -> Path:
+    """Add a checkpoint; ``bookmark`` also names it (``autorefine --name``)."""
     checkpoint_id = payload.get("id")
     if not isinstance(checkpoint_id, str) or not checkpoint_id:
         raise CheckpointError("New checkpoint has no ID")
     if any(item.get("id") == checkpoint_id for item in _items(registry)):
         raise CheckpointError(f"Checkpoint already exists: {checkpoint_id}")
+    if bookmark is not None:
+        bookmark = check_new_bookmark(registry, bookmark)
+        bookmarks = registry.setdefault("bookmarks", {})
+        if not isinstance(bookmarks, dict):
+            raise CheckpointError("Malformed checkpoint bookmarks")
     payload.setdefault("created_utc", _now())
     _items(registry).append(payload)
+    if bookmark is not None:
+        registry["bookmarks"][bookmark] = checkpoint_id   # type: ignore[index]
     if select:
         registry["current"] = checkpoint_id
     return save_registry(run, registry)
@@ -537,6 +546,26 @@ def _valid_bookmark(name: str) -> str:
     return normalized
 
 
+#: Names NASolve gives checkpoints itself; a name like these would hide one.
+_CHECKPOINT_ID = re.compile(r"(?:postmr|autosol|(?:refine|manual|autofdp)-\d+)", re.IGNORECASE)
+
+
+def check_new_bookmark(registry: Mapping[str, object], name: str) -> str:
+    """A valid, unused checkpoint name (bookmark), normalized; raises otherwise."""
+    label = _valid_bookmark(name)
+    if _CHECKPOINT_ID.fullmatch(label) or any(
+            str(item.get("id", "")).casefold() == label.casefold() for item in _items(registry)):
+        raise CheckpointError(
+            f"Checkpoint name {label!r} looks like a checkpoint ID; choose another name"
+        )
+    bookmarks = registry.get("bookmarks")
+    if isinstance(bookmarks, Mapping) and label in bookmarks:
+        raise CheckpointError(
+            f"Checkpoint name already exists: {label} (-> {bookmarks[label]})"
+        )
+    return label
+
+
 def add_checkpoint(
     run_directory: Path,
     *,
@@ -547,12 +576,10 @@ def add_checkpoint(
 ) -> CheckpointRecord:
     """Bookmark the current node, or import a manual model as a new child."""
     run, registry = initialize_registry(run_directory)
-    label = _valid_bookmark(name)
+    label = check_new_bookmark(registry, name)
     bookmarks = registry.setdefault("bookmarks", {})
     if not isinstance(bookmarks, dict):
         raise CheckpointError("Malformed checkpoint bookmarks")
-    if label in bookmarks:
-        raise CheckpointError(f"Checkpoint name already exists: {label}")
     base = resolve_checkpoint(registry, parent)
     if model is None:
         if reflections is not None:
@@ -690,6 +717,7 @@ __all__ = [
     "checkpoint_record",
     "inherited_paths",
     "initialize_registry",
+    "check_new_bookmark",
     "list_checkpoints",
     "next_checkpoint_id",
     "read_registry",

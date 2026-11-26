@@ -21,6 +21,7 @@ from .checkpoints import (
     CheckpointError,
     _inherited_paths_for_autorefine,
     append_checkpoint,
+    check_new_bookmark,
     inherited_paths,
     initialize_registry,
     next_checkpoint_id,
@@ -99,6 +100,7 @@ class AutoRefineResult:
     map_coefficients: Path | None
     statistics: dict[str, object]
     selected_as_current: bool
+    name: str | None = None   # --name: the round's checkpoint name (bookmark)
 
 
 @dataclass(frozen=True)
@@ -1738,6 +1740,7 @@ def execute_autorefine(
     auto_select_success: bool = True,
     progress: Callable[[str, Path], None] | None = None,
     live_report: Callable[[str], None] | None = None,
+    name: str | None = None,
 ) -> AutoRefineResult:
     """Run one quiet refinement round and append an immutable checkpoint.
 
@@ -1782,6 +1785,8 @@ def execute_autorefine(
         parent = resolve_checkpoint(registry, from_checkpoint)
         if parent.get("usable") is not True:
             raise AutoRefineError(f"Checkpoint {parent.get('id')} is not reusable")
+        # --name: checked before anything is made; the new checkpoint gets it.
+        bookmark = check_new_bookmark(registry, name) if name is not None else None
         inherited = (
             _inherited_paths_for_autorefine(parent, run)
             if use_experimental_phases
@@ -2401,7 +2406,7 @@ def execute_autorefine(
         "recipe": recipe,
         "phenix_version": selector_policy.phenix_version,
         "reflection_selector_mode": selector_policy.mode,
-        "label": None,
+        "label": bookmark,   # --name
         "model": model_reference,
         # Keep observations authoritative across every branch; output MTZ is evidence only.
         "observations": parent.get("observations"),
@@ -2444,7 +2449,7 @@ def execute_autorefine(
     }
     selected = auto_select_success and status == "AUTOREFINE_READY"
     try:
-        append_checkpoint(run, registry, checkpoint_payload, select=selected)
+        append_checkpoint(run, registry, checkpoint_payload, select=selected, bookmark=bookmark)
     except CheckpointError as exc:
         raise AutoRefineError(str(exc)) from exc
     round_payload = {
@@ -2452,6 +2457,7 @@ def execute_autorefine(
         "message": message,
         "created_utc": created,
         "checkpoint": checkpoint_id,
+        "name": bookmark,   # --name: the checkpoint's name (bookmark)
         "parent_checkpoint": parent["id"],
         "selected_as_current": selected,
         "recipe": recipe,
@@ -2553,6 +2559,7 @@ def execute_autorefine(
         map_coefficients=map_coefficients,
         statistics=statistics,
         selected_as_current=selected,
+        name=bookmark,
     )
 
 

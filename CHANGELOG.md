@@ -10,6 +10,16 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine RUN --name NAME` (user's request, 2026-11-26): names the
+  round's checkpoint as it is made. The folder stays `round_NNN` (NASolve finds
+  rounds by number); the name is a bookmark (`checkpoints.json` `bookmarks`),
+  also the checkpoint's `label` and the round report's new `name`, and works
+  with `--from NAME`, `checkpoints use` and, new, `nasolve show RUN
+  --checkpoint NAME` (the Coot working folder is still named by the ID). The
+  name is checked before the round starts: letters, numbers, spaces, `.`, `_`
+  and `-`, unused, and not like a checkpoint ID (`refine-NNN`, `manual-NNN`,
+  `autofdp-NNN`, `postmr`, `autosol`, any existing ID), since a bookmark is
+  looked up before an ID; `checkpoints add --name` now follows the same rule.
 - Watching a running AutoRefine round in Coot (user's request, 2026-11-26):
   `nasolve show RUN --live`. phenix.refine run from the command line writes its
   model only at the end; with `PHENIX_GUI_ENVIRONMENT=1` (the hook Phenix's GUI

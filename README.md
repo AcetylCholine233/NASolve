@@ -369,6 +369,19 @@ with `--from` to change it).
 ./nasolve autorefine "$RUN" --coordination "B:101=B:4/O4,A:12/N4T,B:3/O6,A:11/O4" --geometry sqp
 ```
 
+Name a round as it is made with `--name`; the folder stays `round_NNN`, and the
+name works wherever a checkpoint ID does (`--from`, `show --checkpoint`,
+`checkpoints use`) and appears in `checkpoints list`:
+
+```bash
+./nasolve autorefine "$RUN" --name "Ag sqp" --coordination "B:101=B:4/O4,A:12/N4T,B:3/O6,A:11/O4" --geometry sqp
+./nasolve autorefine "$RUN" --from "Ag sqp"
+./nasolve show "$RUN" --checkpoint "Ag sqp"
+```
+
+Names may contain letters, numbers, spaces, `.`, `_` and `-`, must be new, and
+must not look like a checkpoint ID (`refine-006`, `postmr`).
+
 Bookmark, select, or import a manually corrected model with:
 
 ```bash

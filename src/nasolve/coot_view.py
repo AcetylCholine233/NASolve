@@ -88,6 +88,20 @@ def _required_file(path: Path, description: str) -> Path:
     return path.resolve()
 
 
+def _checkpoint_request(value: str) -> str:
+    """A requested checkpoint: an ID or a name (bookmark, may contain spaces).
+
+    Only the ID it resolves to is used in paths (``_checkpoint_component``).
+    """
+    if (not isinstance(value, str) or not value.strip() or len(value) > 128
+            or any(character in value for character in "/\\\0")):
+        raise CootViewError(
+            f"Not a checkpoint ID or name: {value!r} (checkpoint IDs used for Coot must be "
+            "a single safe path component)"
+        )
+    return value.strip()
+
+
 def _checkpoint_component(value: str) -> str:
     """Return a checkpoint ID that is safe to use as one directory name."""
     if _CHECKPOINT_COMPONENT.fullmatch(value) is None:
@@ -714,6 +728,19 @@ def _autorefine_profile(
     items = registry.get("checkpoints")
     if not isinstance(current, str) or not isinstance(items, list):
         raise CootViewError("Checkpoint registry has no valid current pointer")
+    requested_name = None
+    bookmarks = registry.get("bookmarks")
+    if (checkpoint_id is not None and isinstance(bookmarks, Mapping)
+            and isinstance(bookmarks.get(checkpoint_id), str)
+            and not any(isinstance(item, Mapping) and item.get("id") == checkpoint_id
+                        for item in items)):
+        requested_name, current = checkpoint_id, bookmarks[checkpoint_id]   # a name
+    elif checkpoint_id is not None and not any(
+            isinstance(item, Mapping) and item.get("id") == checkpoint_id for item in items):
+        raise CootViewError(
+            f"Checkpoint registry requested checkpoint is unknown: {checkpoint_id} "
+            "(not a checkpoint ID or name; see nasolve checkpoints list)"
+        )
     _checkpoint_component(current)
     checkpoints: dict[str, Mapping[str, object]] = {}
     for item in items:
@@ -736,13 +763,14 @@ def _autorefine_profile(
     )
     selection = "requested" if checkpoint_id is not None else "current"
     status = checkpoint.get("status", "legacy status unrecorded")
+    named = f" '{requested_name}'" if requested_name else ""
     return ViewProfile(
         "autorefine",
         model,
         map_path,
         (),
         _checkpoint_dictionaries(run, checkpoint, schema_version),
-        f"{selection} {checkpoint.get('kind')} checkpoint {current} ({status})",
+        f"{selection} {checkpoint.get('kind')} checkpoint {current}{named} ({status})",
         map_source,
         current,
         anomalous_paths,
@@ -807,7 +835,7 @@ def resolve_view_profile(
 ) -> ViewProfile:
     run = run_directory.expanduser().resolve()
     if checkpoint is not None:
-        checkpoint = _checkpoint_component(checkpoint)
+        checkpoint = _checkpoint_request(checkpoint)
     report = _read_json(_required_file(run / "report.json", "NASolve report"), "run report")
     if report.get("workflow") == "metal_autosol":
         # DATASET/AutoSolMetal/run_NNN opened directly.
@@ -1273,7 +1301,7 @@ def launch_coot_view(
     """
     run = run_directory.expanduser().resolve()
     if checkpoint is not None:
-        checkpoint = _checkpoint_component(checkpoint)
+        checkpoint = _checkpoint_request(checkpoint)
     if live:
         if stage is not None or checkpoint is not None:
             raise CootViewError("--live cannot be combined with --stage or --checkpoint")

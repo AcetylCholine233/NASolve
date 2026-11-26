@@ -328,6 +328,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     autorefine.add_argument(
+        "--name", metavar="NAME",
+        help=(
+            "name this round's checkpoint, e.g. \"Ag sqp\" (letters, numbers, spaces, '.', "
+            "'_' and '-'; not used before, and not like an ID such as refine-006). The "
+            "folder stays round_NNN; use the name with --from NAME, nasolve show RUN "
+            "--checkpoint NAME and nasolve checkpoints use; checkpoints list shows it"
+        ),
+    )
+    autorefine.add_argument(
         "--coordination", action="append", default=[], metavar="METAL=DONOR,DONOR",
         help=(
             "restrain a metal site to its binding partners, e.g. B:101=B:4/N2T,A:12/O4 "
@@ -585,7 +594,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.add_argument(
         "--checkpoint",
-        help="open a specific checkpoint without changing the current selection",
+        help=("open a specific checkpoint (ID such as refine-006, or its name) without "
+              "changing the current selection"),
     )
     show.add_argument(
         "--live", action="store_true",
@@ -1409,6 +1419,7 @@ def _autorefine(args: argparse.Namespace) -> int:
             fix_xyz=args.fix_xyz,
             progress=progress,
             live_report=lambda line: print(line, flush=True),
+            name=args.name,
         )
     except (AutoRefineError, ConfigError, PhenixDiscoveryError) as exc:
         print(f"AutoRefine error: {exc}", file=sys.stderr)
@@ -1420,6 +1431,9 @@ def _autorefine(args: argparse.Namespace) -> int:
     )
     print(f"\n{_color(result.status, status_color)}: {result.message}")
     print(f"Checkpoint: {result.checkpoint_id} (parent: {result.parent_checkpoint})")
+    if getattr(result, "name", None):
+        print(f"Name: {result.name} (use it as --from {shlex.quote(result.name)} or "
+              f"nasolve show RUN --checkpoint {shlex.quote(result.name)})")
     print("Cycles: " + str(args.cycles))
     payload = json.loads(result.report_path.read_text(encoding="utf-8"))
     inputs = payload.get("inputs", {})
