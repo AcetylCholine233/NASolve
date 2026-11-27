@@ -361,12 +361,16 @@ donor element is refused until it is in the table
 in the round's starting model, prints the current distances and angle, warns
 about a donor far from its metal, and records the sites in the round report
 and checkpoint; later rounds from that checkpoint keep the restraints, and
-restraining the same metal again is refused (start from an earlier checkpoint
-with `--from` to change it).
+restraining the same metal again is refused. `--coordination B:101=drop`
+removes a metal's inherited coordination (its geometry included) from that
+round on and keeps every other restraint; given with a new specification for
+the same metal in one command, it replaces it.
 
 ```bash
 ./nasolve autorefine "$RUN" --coordination "B:101=B:4/N2T,A:12/O4"
 ./nasolve autorefine "$RUN" --coordination "B:101=B:4/O4,A:12/N4T,B:3/O6,A:11/O4" --geometry sqp
+./nasolve autorefine "$RUN" --coordination B:101=drop
+./nasolve autorefine "$RUN" --coordination B:101=drop --coordination "B:101=B:4/N2T,A:12/O4"
 ```
 
 Name a round as it is made with `--name`; the folder stays `round_NNN`, and the

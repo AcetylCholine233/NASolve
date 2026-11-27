@@ -1348,6 +1348,59 @@ def _write_metrics_tsv(path: Path, statistics: Mapping[str, object]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _is_coordination_drop(text: str) -> bool:
+    """``--coordination METAL=drop``."""
+    return "=" in text and text.split("=", 1)[1].strip().casefold() == "drop"
+
+
+def _reference_path(reference: object, run: Path) -> Path | None:
+    if not isinstance(reference, Mapping):
+        return None
+    path = resolve_artifact_path(reference, run)
+    return path.resolve() if path is not None else None
+
+
+def _coordination_drops(
+    texts: Sequence[str], inherited: Sequence[object], run: Path, parent_id: str,
+) -> dict[str, object]:
+    """Which inherited coordination sites ``--coordination METAL=drop`` removes.
+
+    Returns ``dropped`` (their records), ``files`` (their restraint files, which
+    leave the restraint bundle), ``carried`` (other sites written in one of those
+    files, to be written again) and ``kept`` (the rest, inherited as they are).
+    """
+    records = [item for item in inherited if isinstance(item, Mapping)]
+    dropped: list[Mapping[str, object]] = []
+    for text in texts:
+        metal = parse_atom(text.split("=", 1)[0], "--coordination metal")
+        matches = [
+            item for item in records
+            if isinstance(item.get("metal_key"), list) and len(item["metal_key"]) == 3
+            and str(item["metal_key"][0]) == metal.chain and str(item["metal_key"][1]) == metal.resid
+            and (metal.name is None or str(item["metal_key"][2]) == metal.name)
+        ]
+        if not matches:
+            restrained = ", ".join(str(item.get("spec")) for item in records) or "none"
+            raise CoordinationError(
+                f"--coordination {text.strip()}: {metal.label} has no coordination restraints in "
+                f"checkpoint {parent_id} (restrained there: {restrained})"
+            )
+        if len(matches) > 1:
+            raise CoordinationError(
+                f"--coordination {text.strip()}: more than one restrained metal in {metal.label}; "
+                "give its atom name, e.g. B:101/AG"
+            )
+        if matches[0] in dropped:
+            raise CoordinationError(f"--coordination {text.strip()}: {metal.label} is dropped twice")
+        dropped.append(matches[0])
+    files = {path for item in dropped
+             if (path := _reference_path(item.get("restraint"), run)) is not None}
+    carried = [item for item in records if item not in dropped
+               and _reference_path(item.get("restraint"), run) in files]
+    kept = [item for item in records if item not in dropped and item not in carried]
+    return {"dropped": dropped, "files": files, "carried": carried, "kept": kept}
+
+
 def _ligand_dictionaries(restraints: Sequence[object]) -> list[Path]:
     """The CIF ligand dictionaries among a round's restraint files (for Coot)."""
     found = []
@@ -1935,25 +1988,54 @@ def execute_autorefine(
     parent_coordination = parent.get("metal_coordination") or []
     if not isinstance(parent_coordination, list):
         raise AutoRefineError("Parent checkpoint metal-coordination record is malformed")
+    # --coordination METAL=drop (user, 2026-11-26): inherited coordination removed.
+    drop_texts = [text for text in coordination if _is_coordination_drop(text)]
+    add_texts = [text for text in coordination if not _is_coordination_drop(text)]
+    try:
+        coordination_drops = _coordination_drops(drop_texts, parent_coordination, run,
+                                                 str(parent.get("id")))
+    except CoordinationError as exc:
+        raise AutoRefineError(str(exc)) from exc
+    kept_coordination = coordination_drops["kept"]
+    if coordination_drops["files"]:
+        # The dropped metals' restraint files leave the bundle; metals that shared
+        # a file with them are written again into this round's file.
+        removed = coordination_drops["files"]
+        restraints = [path for path in restraints
+                      if not (isinstance(path, Path) and path.resolve() in removed)]
+        parent_restraint_records = [
+            record for record in parent_restraint_records
+            if _reference_path(record, run) not in removed
+        ]
     coordination_sites = []
-    if coordination_geometry and not coordination:
+    carried_sites = []
+    if coordination_geometry and not add_texts:
         raise AutoRefineError("--geometry needs --coordination (the metal and its donors)")
-    if coordination:
-        try:
+    try:
+        if add_texts:
             coordination_sites = plan_coordination(
-                model, [parse_coordination(text) for text in coordination],
+                model, [parse_coordination(text) for text in add_texts],
                 [parse_geometry(text) for text in coordination_geometry])
-        except CoordinationError as exc:
-            raise AutoRefineError(str(exc)) from exc
-        restrained = {tuple(item.get("metal_key") or ()): item for item in parent_coordination
+        carried = coordination_drops["carried"]
+        if carried:
+            carried_sites = plan_coordination(
+                model, [parse_coordination(str(item.get("spec"))) for item in carried],
+                [parse_geometry("{}:{}/{}={}".format(*item["metal_key"], item["preset"]))
+                 for item in carried if item.get("preset")])
+    except CoordinationError as exc:
+        raise AutoRefineError(str(exc)) from exc
+    if coordination_sites:
+        restrained = {tuple(item.get("metal_key") or ()): item
+                      for item in [*kept_coordination, *coordination_drops["carried"]]
                       if isinstance(item, Mapping)}
         for site in coordination_sites:
             key = (site.metal.chain, site.metal.resid, site.metal.name)
             if key in restrained:
                 raise AutoRefineError(
                     f"{site.metal.label} already has coordination restraints from checkpoint "
-                    f"{parent.get('id')} ({restrained[key].get('spec')}); start from an earlier "
-                    "checkpoint (--from) to restrain it differently"
+                    f"{parent.get('id')} ({restrained[key].get('spec')}); drop them in the same "
+                    f"command with --coordination {site.metal.chain}:{site.metal.resid}=drop, "
+                    "or start from an earlier checkpoint (--from)"
                 )
     plan = build_reflection_plan(
         report,
@@ -2017,9 +2099,14 @@ def execute_autorefine(
 
     coordination_path: Path | None = None
     coordination_records = [coordination_record(site) for site in coordination_sites]
-    if coordination_sites:
+    carried_records = [
+        {**coordination_record(site), "carried_over_from": item.get("restraint")}
+        for site, item in zip(carried_sites, coordination_drops["carried"])
+    ]
+    if coordination_sites or carried_sites:
         coordination_path = round_directory / "metal_coordination.eff"
-        coordination_path.write_text(coordination_phil(coordination_sites), encoding="utf-8")
+        coordination_path.write_text(coordination_phil([*coordination_sites, *carried_sites]),
+                                     encoding="utf-8")
         resolved_extra_restraints.append(coordination_path)
         restraints.append(coordination_path)
 
@@ -2429,11 +2516,11 @@ def execute_autorefine(
         ),
         **(
             {"metal_coordination": [
-                *parent_coordination,
+                *kept_coordination,
                 *({**record, "restraint": file_reference(coordination_path)}
-                  for record in coordination_records),
+                  for record in [*coordination_records, *carried_records]),
             ]}
-            if parent_coordination or coordination_records
+            if kept_coordination or coordination_records or carried_records
             else {}
         ),
         "metrics": {
@@ -2491,7 +2578,11 @@ def execute_autorefine(
             "metal_coordination": {   # --coordination
                 "file": str(coordination_path) if coordination_path else None,
                 "sites": coordination_records,
-                "inherited": list(parent_coordination),
+                "inherited": list(kept_coordination),
+                # METAL=drop: removed from here on; carried: metals that shared a
+                # restraint file with a dropped one, written again into "file".
+                "dropped": list(coordination_drops["dropped"]),
+                "carried": carried_records,
             },
         },
         "refinement": {

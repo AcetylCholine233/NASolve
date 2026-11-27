@@ -344,7 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
             "metal. Bond lengths from the lab table (Ag-O 2.5, Ag-N 2.3, Hg-O 2.1, "
             "Hg-N 2.1 A), sigma 0.2 A; with two donors also the angle donor-donor-metal "
             "0 deg, sigma 3 (keeps it linear); no angle for more donors unless --geometry. "
-            "Kept by later rounds from this round's checkpoint"
+            "Kept by later rounds from this round's checkpoint. METAL=drop (e.g. "
+            "B:101=drop) removes a metal's inherited coordination, its geometry included, "
+            "from this round on; with a new METAL=DONOR,... in the same command it "
+            "replaces it"
         ),
     )
     autorefine.add_argument(
@@ -1466,9 +1469,12 @@ def _autorefine(args: argparse.Namespace) -> int:
                     print(f"Coordination: {item.get('summary')}")
                     for warning in item.get("warnings") or []:
                         print(_color(f"  Warning: {warning}", "33"))
-            for item in coordination.get("inherited") or []:
+            for item in [*(coordination.get("inherited") or []), *(coordination.get("carried") or [])]:
                 if isinstance(item, dict):
                     print(f"Coordination (kept from the parent checkpoint): {item.get('summary')}")
+            for item in coordination.get("dropped") or []:
+                if isinstance(item, dict):
+                    print(f"Coordination dropped: {item.get('metal')} ({item.get('spec')})")
     stats = result.statistics
     print("\n                 Initial    Final")
     print(

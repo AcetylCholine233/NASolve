@@ -10,6 +10,20 @@ entries are reconstructed from repository history.
 
 ### Added
 
+- `nasolve autorefine RUN --coordination METAL=drop` (user's request and syntax,
+  2026-11-26): removes a metal's inherited coordination restraints (bonds,
+  angles, preset plane) from this round on; every other restraint stays. The
+  metal's restraint file leaves the round's restraint bundle and checkpoint;
+  another metal written in that same file is planned again on the round's
+  start model from its recorded specification and preset and written into
+  this round's `metal_coordination.eff`. With a new `METAL=DONOR,...` in the
+  same command the metal is restrained afresh (a replacement; before, the
+  same metal again was refused with no way round but an earlier checkpoint).
+  Refused before a round exists: a metal the parent does not restrain, the
+  same metal dropped twice, `--geometry` with only drops. The round report's
+  `inputs.metal_coordination` gains `dropped` and `carried`; `inherited` is
+  what stays as it was. Earlier checkpoints are unchanged, so a branch from
+  them keeps the coordination.
 - `nasolve autorefine RUN --name NAME` (user's request, 2026-11-26): names the
   round's checkpoint as it is made. The folder stays `round_NNN` (NASolve finds
   rounds by number); the name is a bookmark (`checkpoints.json` `bookmarks`),
